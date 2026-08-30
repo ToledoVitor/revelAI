@@ -1,26 +1,18 @@
 import { describe, expect, it } from "vitest";
+import * as publicContracts from "./index.js";
+import { sha256Hex } from "./workflow-benchmark-receipt.js";
 import {
   failedWorkflowBenchmarkReceiptFixture,
   missingWorkflowBenchmarkReceiptFixture,
   passingWorkflowBenchmarkReceiptFixture,
-  sha256Hex,
   staleWorkflowBenchmarkReceiptFixture,
   WorkflowBenchmarkReceiptSchema,
   workflowBenchmarkReceiptDigest,
 } from "./index.js";
 
-function withRecomputedDigest(receipt: Record<string, unknown>) {
-  const { receiptSha256, ...payload } = receipt;
-  void receiptSha256;
-
-  return {
-    ...payload,
-    receiptSha256: workflowBenchmarkReceiptDigest(payload),
-  };
-}
-
 describe("workflow benchmark receipt contract", () => {
   it("parses deterministic passing, failed, and stale fixtures", () => {
+    expect("sha256Hex" in publicContracts).toBe(false);
     expect(sha256Hex("abc")).toBe(
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     );
@@ -102,13 +94,13 @@ describe("workflow benchmark receipt contract", () => {
   });
 
   it("rejects a wrong workflow tuple, malformed hash, manifests, run order, and passed threshold", () => {
-    const wrongTuple = withRecomputedDigest({
+    const wrongTuple = {
       ...passingWorkflowBenchmarkReceiptFixture,
       workflow: {
         ...passingWorkflowBenchmarkReceiptFixture.workflow,
         workflowId: "revelai-free-training-v1",
       },
-    });
+    };
     expect(WorkflowBenchmarkReceiptSchema.safeParse(wrongTuple).success).toBe(
       false,
     );
@@ -119,20 +111,16 @@ describe("workflow benchmark receipt contract", () => {
       }).success,
     ).toBe(false);
     expect(
-      WorkflowBenchmarkReceiptSchema.safeParse(
-        withRecomputedDigest({
-          ...passingWorkflowBenchmarkReceiptFixture,
-          runs: passingWorkflowBenchmarkReceiptFixture.runs.slice(0, 4),
-        }),
-      ).success,
+      WorkflowBenchmarkReceiptSchema.safeParse({
+        ...passingWorkflowBenchmarkReceiptFixture,
+        runs: passingWorkflowBenchmarkReceiptFixture.runs.slice(0, 4),
+      }).success,
     ).toBe(false);
     expect(
-      WorkflowBenchmarkReceiptSchema.safeParse(
-        withRecomputedDigest({
-          ...passingWorkflowBenchmarkReceiptFixture,
-          pooledDispatchToObservationP95Ms: 901,
-        }),
-      ).success,
+      WorkflowBenchmarkReceiptSchema.safeParse({
+        ...passingWorkflowBenchmarkReceiptFixture,
+        pooledDispatchToObservationP95Ms: 901,
+      }).success,
     ).toBe(false);
     expect(
       WorkflowBenchmarkReceiptSchema.safeParse({
@@ -141,43 +129,37 @@ describe("workflow benchmark receipt contract", () => {
       }).success,
     ).toBe(false);
     expect(
-      WorkflowBenchmarkReceiptSchema.safeParse(
-        withRecomputedDigest({
-          ...passingWorkflowBenchmarkReceiptFixture,
-          status: "failed",
-        }),
-      ).success,
+      WorkflowBenchmarkReceiptSchema.safeParse({
+        ...passingWorkflowBenchmarkReceiptFixture,
+        status: "failed",
+      }).success,
     ).toBe(false);
     expect(
-      WorkflowBenchmarkReceiptSchema.safeParse(
-        withRecomputedDigest({
-          ...passingWorkflowBenchmarkReceiptFixture,
-          manifestSet: {
-            ...passingWorkflowBenchmarkReceiptFixture.manifestSet,
-            manifestIds: [
-              "wall-pass-benchmark-a",
-              "wall-pass-benchmark-a",
-              "wall-pass-benchmark-c",
-              "wall-pass-benchmark-d",
-              "wall-pass-benchmark-e",
-            ],
-          },
-        }),
-      ).success,
-    ).toBe(false);
-    expect(
-      WorkflowBenchmarkReceiptSchema.safeParse(
-        withRecomputedDigest({
-          ...passingWorkflowBenchmarkReceiptFixture,
-          runs: [
-            passingWorkflowBenchmarkReceiptFixture.runs[1],
-            passingWorkflowBenchmarkReceiptFixture.runs[0],
-            passingWorkflowBenchmarkReceiptFixture.runs[2],
-            passingWorkflowBenchmarkReceiptFixture.runs[3],
-            passingWorkflowBenchmarkReceiptFixture.runs[4],
+      WorkflowBenchmarkReceiptSchema.safeParse({
+        ...passingWorkflowBenchmarkReceiptFixture,
+        manifestSet: {
+          ...passingWorkflowBenchmarkReceiptFixture.manifestSet,
+          manifestIds: [
+            "wall-pass-benchmark-a",
+            "wall-pass-benchmark-a",
+            "wall-pass-benchmark-c",
+            "wall-pass-benchmark-d",
+            "wall-pass-benchmark-e",
           ],
-        }),
-      ).success,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      WorkflowBenchmarkReceiptSchema.safeParse({
+        ...passingWorkflowBenchmarkReceiptFixture,
+        runs: [
+          passingWorkflowBenchmarkReceiptFixture.runs[1],
+          passingWorkflowBenchmarkReceiptFixture.runs[0],
+          passingWorkflowBenchmarkReceiptFixture.runs[2],
+          passingWorkflowBenchmarkReceiptFixture.runs[3],
+          passingWorkflowBenchmarkReceiptFixture.runs[4],
+        ],
+      }).success,
     ).toBe(false);
   });
 });

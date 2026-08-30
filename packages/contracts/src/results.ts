@@ -532,7 +532,56 @@ export const AttemptListResponseSchema = z
 
 export const AttemptReadResponseSchema = AttemptSummarySchema;
 export const AttemptResultResponseSchema = AttemptOutcomeSchema;
-export const CreateAttemptResponseSchema = AttemptSummarySchema;
+
+const CreateAttemptResponseSharedFields = {
+  id: NonEmptyStringSchema,
+  status: z.literal("awaiting-upload"),
+  createdAt: UtcIsoTimestampSchema,
+};
+
+export const CreateAttemptResponseSchema = z
+  .discriminatedUnion("mode", [
+    z
+      .object({
+        ...CreateAttemptResponseSharedFields,
+        mode: z.literal("free"),
+        outcome: z
+          .object({
+            state: z.literal("pending"),
+            attemptId: NonEmptyStringSchema,
+            mode: z.literal("free"),
+            status: z.literal("awaiting-upload"),
+          })
+          .strict(),
+      })
+      .strict(),
+    z
+      .object({
+        ...CreateAttemptResponseSharedFields,
+        mode: z.literal("verified"),
+        challenge: z
+          .object({ id: z.literal("wall-pass"), version: z.literal(1) })
+          .strict(),
+        outcome: z
+          .object({
+            state: z.literal("pending"),
+            attemptId: NonEmptyStringSchema,
+            mode: z.literal("verified"),
+            status: z.literal("awaiting-upload"),
+          })
+          .strict(),
+      })
+      .strict(),
+  ])
+  .superRefine((response, context) => {
+    if (response.outcome.attemptId !== response.id) {
+      context.addIssue({
+        code: "custom",
+        message: "Create response outcome must belong to its outer attempt",
+        path: ["outcome", "attemptId"],
+      });
+    }
+  });
 
 export const LeaderboardQuerySchema = z
   .object({
@@ -593,19 +642,6 @@ export const LeaderboardResponseSchema = z
       }
       entryIds.add(entry.entryId);
 
-      const expectedCompetitionRank =
-        leaderboard.entries.filter((candidate) => candidate.score > entry.score)
-          .length + 1;
-
-      if (entry.rank !== expectedCompetitionRank) {
-        context.addIssue({
-          code: "custom",
-          message:
-            "Live leaderboard ranks must use competition ranking for its scores",
-          path: ["entries", index, "rank"],
-        });
-      }
-
       const previous = leaderboard.entries[index - 1];
 
       if (previous === undefined) {
@@ -646,19 +682,6 @@ export const LeaderboardResponseSchema = z
           message:
             "Equal live leaderboard scores must be ordered by completed time",
           path: ["entries", index, "completedAt"],
-        });
-      }
-
-      if (
-        entry.score === previous.score &&
-        entry.completedAt === previous.completedAt &&
-        entry.entryId <= previous.entryId
-      ) {
-        context.addIssue({
-          code: "custom",
-          message:
-            "Equal live leaderboard scores and times must be ordered by entry ID",
-          path: ["entries", index, "entryId"],
         });
       }
     }

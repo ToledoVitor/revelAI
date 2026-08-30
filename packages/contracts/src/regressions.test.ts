@@ -385,7 +385,7 @@ describe("review regression contracts", () => {
         ],
         nextCursor: null,
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       LeaderboardResponseSchema.safeParse({
         view: "live",
@@ -440,6 +440,114 @@ describe("review regression contracts", () => {
           },
         ],
         nextCursor: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      LeaderboardResponseSchema.safeParse({
+        view: "live",
+        challengeId: "wall-pass",
+        challengeVersion: 1,
+        ruleVersion: "wall-pass-v1-score-1",
+        calculatedAt: "2026-08-30T12:00:00.000Z",
+        cohortSize: 100,
+        entries: [
+          {
+            entryId: "opaque-page-two-21",
+            rank: 21,
+            score: 80,
+            completedAt: "2026-08-30T12:00:00.000Z",
+          },
+          {
+            entryId: "opaque-page-two-22",
+            rank: 22,
+            score: 79,
+            completedAt: "2026-08-30T12:01:00.000Z",
+          },
+        ],
+        nextCursor: "page-3",
+      }).success,
+    ).toBe(true);
+    expect(
+      LeaderboardResponseSchema.safeParse({
+        view: "live",
+        challengeId: "wall-pass",
+        challengeVersion: 1,
+        ruleVersion: "wall-pass-v1-score-1",
+        calculatedAt: "2026-08-30T12:00:00.000Z",
+        cohortSize: 100,
+        entries: [
+          {
+            entryId: "opaque-cross-page-tie",
+            rank: 21,
+            score: 80,
+            completedAt: "2026-08-30T12:00:00.000Z",
+          },
+          {
+            entryId: "opaque-after-cross-page-tie",
+            rank: 23,
+            score: 79,
+            completedAt: "2026-08-30T12:01:00.000Z",
+          },
+        ],
+        nextCursor: null,
+      }).success,
+    ).toBe(true);
+  });
+
+  it("limits create responses to the initial awaiting-upload snapshot", () => {
+    const freeCreateResponse = {
+      id: "attempt-free-create-1",
+      mode: "free",
+      status: "awaiting-upload",
+      createdAt: "2026-08-30T12:00:00.000Z",
+      outcome: {
+        state: "pending",
+        attemptId: "attempt-free-create-1",
+        mode: "free",
+        status: "awaiting-upload",
+      },
+    };
+    const verifiedCreateResponse = {
+      id: "attempt-verified-create-1",
+      mode: "verified",
+      status: "awaiting-upload",
+      createdAt: "2026-08-30T12:00:00.000Z",
+      challenge: { id: "wall-pass", version: 1 },
+      outcome: {
+        state: "pending",
+        attemptId: "attempt-verified-create-1",
+        mode: "verified",
+        status: "awaiting-upload",
+      },
+    };
+
+    expect(
+      CreateAttemptResponseSchema.safeParse(freeCreateResponse).success,
+    ).toBe(true);
+    expect(
+      CreateAttemptResponseSchema.safeParse(verifiedCreateResponse).success,
+    ).toBe(true);
+    for (const status of ["uploaded", "processing"]) {
+      expect(
+        CreateAttemptResponseSchema.safeParse({
+          ...freeCreateResponse,
+          status,
+          outcome: { ...freeCreateResponse.outcome, status },
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      CreateAttemptResponseSchema.safeParse({
+        ...freeCreateResponse,
+        status: "failed",
+        outcome: {
+          state: "failed",
+          attemptId: "attempt-free-create-1",
+          mode: "free",
+          code: "analysis_internal_error",
+          message: "A análise não pôde ser concluída.",
+          retryable: false,
+        },
       }).success,
     ).toBe(false);
   });

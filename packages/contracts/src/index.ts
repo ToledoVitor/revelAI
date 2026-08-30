@@ -57,17 +57,21 @@ export {
 export {
   mediaFilenameMimeFixtures,
   MediaUploadFixtureDescriptorSchema,
+  MediaUploadFormDataRequestDescriptorSchema,
   MediaUploadAttemptStateSchema,
   MediaUploadExpectedSchema,
   MediaUploadPostconditionSchema,
+  MediaUploadRawMultipartRequestDescriptorSchema,
   MediaUploadWirePartFixtureSchema,
   MediaUploadWireRequestDescriptorSchema,
   mediaUploadFixtures,
   routeErrorFixtures,
   type MediaUploadFixtureDescriptor,
+  type MediaUploadFormDataRequestDescriptor,
   type MediaUploadAttemptState,
   type MediaUploadExpected,
   type MediaUploadPostcondition,
+  type MediaUploadRawMultipartRequestDescriptor,
   type MediaUploadWirePartFixture,
   type MediaUploadWireRequestDescriptor,
 } from "./fixtures.js";
@@ -129,8 +133,8 @@ export {
   passingWorkflowBenchmarkReceiptFixture,
   staleWorkflowBenchmarkReceiptFixture,
   WorkflowBenchmarkReceiptSchema,
-  sha256Hex,
   workflowBenchmarkReceiptDigest,
   type WorkflowBenchmarkReceipt,
+  type WorkflowBenchmarkReceiptPayload,
 } from "./workflow-benchmark-receipt.js";
 export { UtcIsoTimestampSchema, type UtcIsoTimestamp } from "./primitives.js";

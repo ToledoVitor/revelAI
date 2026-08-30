@@ -54,18 +54,43 @@ export const MediaUploadWirePartFixtureSchema = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 
-export const MediaUploadWireRequestDescriptorSchema = z
+export const MediaUploadFormDataRequestDescriptorSchema = z
   .object({
+    adapter: z.literal("form-data"),
     headers: z
       .object({
         "x-revelai-athlete-id": z.string().uuid(),
-        "content-type": z.literal("multipart/form-data"),
       })
       .strict(),
     parts: z.array(MediaUploadWirePartFixtureSchema),
     multipartBytes: z.number().int().min(0),
   })
   .strict();
+
+export const MediaUploadRawMultipartRequestDescriptorSchema = z
+  .object({
+    adapter: z.literal("fastify-raw"),
+    headers: z
+      .object({
+        "x-revelai-athlete-id": z.string().uuid(),
+        "content-type": z.literal(
+          "multipart/form-data; boundary=revelai-contract-boundary-v1",
+        ),
+      })
+      .strict(),
+    parts: z.array(MediaUploadWirePartFixtureSchema),
+    multipartBytes: z.number().int().min(0),
+    body: z.string().min(1),
+  })
+  .strict();
+
+export const MediaUploadWireRequestDescriptorSchema = z.discriminatedUnion(
+  "adapter",
+  [
+    MediaUploadFormDataRequestDescriptorSchema,
+    MediaUploadRawMultipartRequestDescriptorSchema,
+  ],
+);
 
 export const MediaUploadAttemptStateSchema = z
   .object({
@@ -133,7 +158,6 @@ function expectedRouteError(code: RouteErrorCode) {
 
 const athleteHeaders = {
   "x-revelai-athlete-id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
-  "content-type": "multipart/form-data",
 } as const;
 const validMediaPart = {
   kind: "file",
@@ -156,6 +180,7 @@ const unchangedPostcondition = {
   responseCommitted: false,
 } as const;
 const regularRequest = {
+  adapter: "form-data",
   headers: athleteHeaders,
   parts: [validMediaPart],
   multipartBytes: MAX_UPLOAD_BYTES,
@@ -189,10 +214,42 @@ const acceptedUploadFixture = {
   },
 } as const;
 
+const rawMultipartBody =
+  "--revelai-contract-boundary-v1\r\n" +
+  'Content-Disposition: form-data; name="media"; filename="attempt.mp4"\r\n' +
+  "Content-Type: video/mp4\r\n\r\n" +
+  "x\r\n" +
+  "--revelai-contract-boundary-v1--\r\n";
+
+const rawMultipartParserSeamFixture = {
+  adapter: "fastify-raw",
+  headers: {
+    "x-revelai-athlete-id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+    "content-type":
+      "multipart/form-data; boundary=revelai-contract-boundary-v1",
+  },
+  parts: [
+    {
+      kind: "file",
+      fieldName: "media",
+      filename: "attempt.mp4",
+      declaredMime: "video/mp4",
+      fileBytes: 1,
+    },
+  ],
+  multipartBytes: rawMultipartBody.length,
+  body: rawMultipartBody,
+} as const;
+
 const rejectedUploadFixtures = [
   {
     name: "missing-media-part",
-    request: { headers: athleteHeaders, parts: [], multipartBytes: 1 },
+    request: {
+      adapter: "form-data",
+      headers: athleteHeaders,
+      parts: [],
+      multipartBytes: 1,
+    },
     attempt: awaitingUploadState,
     expected: expectedRouteError("media_part_missing"),
     postcondition: unchangedPostcondition,
@@ -378,6 +435,9 @@ const rejectedUploadFixtures = [
 
 export const mediaUploadFixtures = deepFreeze({
   accepted: MediaUploadFixtureDescriptorSchema.parse(acceptedUploadFixture),
+  rawMultipart: MediaUploadRawMultipartRequestDescriptorSchema.parse(
+    rawMultipartParserSeamFixture,
+  ),
   rejected: rejectedUploadFixtures.map((fixture) =>
     MediaUploadFixtureDescriptorSchema.parse(fixture),
   ),
@@ -405,6 +465,12 @@ export type MediaUploadWirePartFixture = z.infer<
 >;
 export type MediaUploadWireRequestDescriptor = z.infer<
   typeof MediaUploadWireRequestDescriptorSchema
+>;
+export type MediaUploadFormDataRequestDescriptor = z.infer<
+  typeof MediaUploadFormDataRequestDescriptorSchema
+>;
+export type MediaUploadRawMultipartRequestDescriptor = z.infer<
+  typeof MediaUploadRawMultipartRequestDescriptorSchema
 >;
 export type MediaUploadAttemptState = z.infer<
   typeof MediaUploadAttemptStateSchema

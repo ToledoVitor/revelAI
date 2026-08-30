@@ -28,6 +28,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+type DeepReadonly<T> = T extends readonly unknown[]
+  ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+  : T extends object
+    ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+    : T;
+
 function canonicalizeJson(value: unknown): string {
   if (
     value === null ||
@@ -137,7 +143,9 @@ export function sha256Hex(value: string): string {
   );
 }
 
-export function workflowBenchmarkReceiptDigest(receipt: unknown): string {
+export function workflowBenchmarkReceiptDigest(
+  receipt: WorkflowBenchmarkReceiptPayload,
+): string {
   return sha256Hex(canonicalizeJson(receipt));
 }
 const BenchmarkRunSchema = z
@@ -405,4 +413,7 @@ export const missingWorkflowBenchmarkReceiptFixture = undefined;
 
 export type WorkflowBenchmarkReceipt = z.infer<
   typeof WorkflowBenchmarkReceiptSchema
+>;
+export type WorkflowBenchmarkReceiptPayload = DeepReadonly<
+  Omit<WorkflowBenchmarkReceipt, "receiptSha256">
 >;

@@ -35,6 +35,54 @@ describe("shared upload transport fixtures", () => {
     });
   });
 
+  it("leaves FormData content type to the client adapter and parses deterministic raw multipart", async () => {
+    const browserFixture = mediaUploadFixtures.accepted;
+    expect(browserFixture.request).toMatchObject({ adapter: "form-data" });
+    expect(browserFixture.request.headers).not.toHaveProperty("content-type");
+
+    const formData = new FormData();
+    for (const part of browserFixture.request.parts) {
+      if (part.kind === "file") {
+        formData.append(
+          part.fieldName,
+          new Blob(["x"], { type: part.declaredMime }),
+          part.filename,
+        );
+      }
+    }
+    const browserRequest = new Request(
+      "https://revelai.test/v1/attempts/media",
+      {
+        method: "POST",
+        headers: browserFixture.request.headers,
+        body: formData,
+      },
+    );
+    expect(browserRequest.headers.get("content-type")).toMatch(
+      /^multipart\/form-data; boundary=/,
+    );
+    const browserFormData = await browserRequest.formData();
+    expect(browserFormData.get("media")).toMatchObject({
+      name: "attempt.mp4",
+      type: "video/mp4",
+      size: 1,
+    });
+
+    const rawFixture = mediaUploadFixtures.rawMultipart;
+    expect(rawFixture).toMatchObject({ adapter: "fastify-raw" });
+    const rawRequest = new Request("https://revelai.test/v1/attempts/media", {
+      method: "POST",
+      headers: rawFixture.headers,
+      body: rawFixture.body,
+    });
+    const rawFormData = await rawRequest.formData();
+    expect(rawFormData.get("media")).toMatchObject({
+      name: "attempt.mp4",
+      type: "video/mp4",
+      size: 1,
+    });
+  });
+
   it("covers each multipart, authorization, state, queue, and cancellation branch", () => {
     const names = mediaUploadFixtures.rejected.map((fixture) => fixture.name);
     expect(new Set(names)).toHaveLength(names.length);
