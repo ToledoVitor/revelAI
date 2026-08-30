@@ -34,5 +34,6 @@ export const ChallengeListResponseSchema = z
   .strict();
 
 export type CaptureGate = z.infer<typeof CaptureGateSchema>;
+export type RequiredGates = z.infer<typeof RequiredGatesSchema>;
 export type Challenge = z.infer<typeof ChallengeSchema>;
 export type ChallengeListResponse = z.infer<typeof ChallengeListResponseSchema>;

@@ -84,6 +84,21 @@ describe("outcome and result transport contracts", () => {
     expect(
       FreeInsightSchema.safeParse({
         ...freeInsight,
+        observations: [
+          {
+            kind: "athlete-visibility",
+            unit: "percent",
+            value: 10,
+            range: "limited",
+          },
+          {
+            kind: "ball-visibility",
+            unit: "percent",
+            value: 10,
+            range: "limited",
+          },
+          freeInsight.observations[2],
+        ],
         tips: [
           "Mantenha o corpo inteiro visível.",
           "Mantenha a bola visível durante a sequência.",
@@ -165,7 +180,7 @@ describe("outcome and result transport contracts", () => {
         attemptId: "attempt-verified-1",
         mode: "verified",
         code: "calibration_not_verified",
-        message: "A captura não atende aos requisitos.",
+        message: "Refaça a calibração antes de tentar novamente.",
         retryable: true,
       }).success,
     ).toBe(true);
@@ -195,7 +210,7 @@ describe("outcome and result transport contracts", () => {
         attemptId: "attempt-free-1",
         mode: "free",
         code: "analysis_configuration_invalid",
-        message: "A análise não pôde ser configurada.",
+        message: "A análise não está disponível agora.",
         retryable: false,
       }).success,
     ).toBe(true);
@@ -212,11 +227,20 @@ describe("outcome and result transport contracts", () => {
   });
 
   it("keeps every invalid retry code retryable", () => {
-    for (const code of [
-      "capture_requirements_not_met",
-      "video_not_continuous",
-      "calibration_not_verified",
-      "tracking_insufficient",
+    for (const [code, message] of [
+      ["capture_requirements_not_met", "A captura não atende aos requisitos."],
+      [
+        "video_not_continuous",
+        "Grave um vídeo contínuo para tentar novamente.",
+      ],
+      [
+        "calibration_not_verified",
+        "Refaça a calibração antes de tentar novamente.",
+      ],
+      [
+        "tracking_insufficient",
+        "Não foi possível acompanhar a atividade no vídeo.",
+      ],
     ]) {
       expect(
         AttemptOutcomeSchema.safeParse({
@@ -224,7 +248,7 @@ describe("outcome and result transport contracts", () => {
           attemptId: "attempt-verified-1",
           mode: "verified",
           code,
-          message: "Tente novamente com uma nova captura.",
+          message,
           retryable: true,
         }).success,
       ).toBe(true);

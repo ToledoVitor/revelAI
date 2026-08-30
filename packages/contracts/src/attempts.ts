@@ -86,12 +86,26 @@ export const AttemptListQuerySchema = z
   })
   .strict();
 
+export const AttemptIdPathParamsSchema = z
+  .object({ id: NonEmptyStringSchema })
+  .strict();
+
+export const CalibrationSessionIdPathParamsSchema = z
+  .object({ id: NonEmptyStringSchema })
+  .strict();
+
+const NormalizedDeclaredMimeSchema = z
+  .string()
+  .trim()
+  .transform((value) => value.split(";", 1)[0]?.trim().toLowerCase() ?? "")
+  .pipe(z.enum(["video/mp4", "video/quicktime", "video/webm"]));
+
 export const MediaUploadPartSchema = z
   .object({
     kind: z.literal("file"),
     fieldName: z.literal("media"),
     filename: NonEmptyStringSchema,
-    declaredMime: z.enum(["video/mp4", "video/quicktime", "video/webm"]),
+    declaredMime: NormalizedDeclaredMimeSchema,
     fileBytes: z.number().int().min(1).max(MAX_UPLOAD_BYTES),
   })
   .strict()
@@ -119,7 +133,16 @@ export const MediaUploadRequestSchema = z
     parts: z.tuple([MediaUploadPartSchema]),
     multipartBytes: z.number().int().min(1).max(MAX_MULTIPART_ENVELOPE_BYTES),
   })
-  .strict();
+  .strict()
+  .superRefine((request, context) => {
+    if (request.multipartBytes < request.parts[0].fileBytes) {
+      context.addIssue({
+        code: "custom",
+        message: "Multipart bytes cannot be lower than emitted file bytes",
+        path: ["multipartBytes"],
+      });
+    }
+  });
 
 const UploadAcceptedOutcomeSchema = z
   .object({
@@ -169,6 +192,10 @@ export type CalibrationSessionReadyInput = z.infer<
 >;
 export type CalibrationSession = z.infer<typeof CalibrationSessionSchema>;
 export type AttemptListQuery = z.infer<typeof AttemptListQuerySchema>;
+export type AttemptIdPathParams = z.infer<typeof AttemptIdPathParamsSchema>;
+export type CalibrationSessionIdPathParams = z.infer<
+  typeof CalibrationSessionIdPathParamsSchema
+>;
 export type MediaUploadPart = z.infer<typeof MediaUploadPartSchema>;
 export type MediaUploadRequest = z.infer<typeof MediaUploadRequestSchema>;
 export type MediaUploadAccepted = z.infer<typeof MediaUploadAcceptedSchema>;
