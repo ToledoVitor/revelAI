@@ -286,6 +286,23 @@ describe("verify-design-assets", () => {
     );
   });
 
+  it.each([
+    ["reference", "docs/design/references/fixture.png"],
+    ["master", "docs/design/assets/revelai-hero-master.png"],
+    ["web crop", "apps/web/public/assets/futsal-hero.png"],
+    ["mobile crop", "apps/mobile/assets/futsal-hero.png"],
+  ])("rejects a missing %s destination", async (_asset, destination) => {
+    const fixture = await verifiedFixture();
+    await rm(join(fixture.root, destination));
+
+    await expectFailure(
+      verifier,
+      fixture.root,
+      fixture.manifest,
+      "Missing repository asset",
+    );
+  });
+
   it("rejects an unaccepted master receipt", async () => {
     const fixture = await verifiedFixture();
     await writeAsset(
