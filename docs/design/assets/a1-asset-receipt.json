@@ -1,0 +1,27 @@
+{
+  "master": {
+    "generatorRunId": "exec-fc963e7b-d4d4-4cc5-82e7-c8290966d900",
+    "sha256": "42c677f39e1955b40cad63f2355332b0d0e326224fcbba0e19e7cbcd0b45924c",
+    "width": 1600,
+    "height": 1200,
+    "licensedOrGenerated": "generated",
+    "accepted": true,
+    "checklist": {
+      "noText": true,
+      "noLogoOrSponsor": true,
+      "noUiOrDeviceChrome": true,
+      "athleteVisible": true,
+      "ballVisible": true
+    }
+  },
+  "webCrop": {
+    "sha256": "42c677f39e1955b40cad63f2355332b0d0e326224fcbba0e19e7cbcd0b45924c",
+    "width": 1600,
+    "height": 1200
+  },
+  "mobileCrop": {
+    "sha256": "ad74681e01bc83298239566c77a25bf5e9ae175bc539b802c91c379f4dfe6e1b",
+    "width": 900,
+    "height": 1200
+  }
+}
