@@ -526,6 +526,21 @@ const migrations: readonly Migration[] = [
       END;
     `,
   },
+  {
+    version: 10,
+    sql: `
+      CREATE TABLE retention_cleanup_records (
+        resource_id TEXT PRIMARY KEY NOT NULL,
+        attempt_id TEXT NOT NULL REFERENCES attempts(id),
+        resource_kind TEXT NOT NULL CHECK (resource_kind IN ('frame', 'temporary', 'observation')),
+        delete_at TEXT NOT NULL,
+        cleanup_requested_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX retention_cleanup_records_due
+        ON retention_cleanup_records(cleanup_requested_at, delete_at, resource_id);
+    `,
+  },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {

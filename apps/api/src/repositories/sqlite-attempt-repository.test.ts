@@ -2636,7 +2636,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 9 });
+    ).toMatchObject({ count: 10 });
     reopened.close();
     upgraded.close();
   });
@@ -2714,7 +2714,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 9 });
+    ).toMatchObject({ count: 10 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -2865,7 +2865,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 9 });
+    ).toMatchObject({ count: 10 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
