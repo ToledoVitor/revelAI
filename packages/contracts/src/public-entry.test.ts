@@ -157,7 +157,9 @@ describe("public contracts entry point", () => {
       nextCursor: null,
     };
 
-    for (const [schema, value] of [
+    const publicContractMatrix: ReadonlyArray<
+      readonly [{ parse: (value: unknown) => unknown }, unknown]
+    > = [
       [
         AthleteIdentityHeaderSchema,
         {
@@ -245,7 +247,9 @@ describe("public contracts entry point", () => {
       [ReadinessResponseSchema, { status: "ready" }],
       [UtcIsoTimestampSchema, "2028-02-29T00:00:00.000Z"],
       [WorkflowBenchmarkReceiptSchema, passingWorkflowBenchmarkReceiptFixture],
-    ]) {
+    ];
+
+    for (const [schema, value] of publicContractMatrix) {
       expectJsonRoundTrip(schema, value);
     }
 
