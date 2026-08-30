@@ -116,16 +116,53 @@ function ascii(bytes: Uint8Array, start: number, end: number): string {
 
 function containsWebmDocType(bytes: Uint8Array): boolean {
   const bound = Math.min(bytes.length, 1024);
-  for (let index = 0; index + 7 <= bound; index += 1) {
-    if (
-      bytes[index] === 0x42 &&
-      bytes[index + 1] === 0x82 &&
-      bytes[index + 2] === 0x84 &&
-      ascii(bytes, index + 3, index + 7) === "webm"
-    )
-      return true;
+  const headerSize = readEbmlSize(bytes, 4, bound);
+  if (!headerSize) return false;
+  const headerStart = 4 + headerSize.length;
+  const headerEnd = headerStart + headerSize.value;
+  if (headerEnd > bound) return false;
+  let cursor = headerStart;
+  let docType: string | undefined;
+  while (cursor < headerEnd) {
+    const idLength = ebmlVintLength(bytes[cursor]);
+    if (!idLength || cursor + idLength > headerEnd) return false;
+    const isDocType =
+      idLength === 2 && bytes[cursor] === 0x42 && bytes[cursor + 1] === 0x82;
+    cursor += idLength;
+    const size = readEbmlSize(bytes, cursor, headerEnd);
+    if (!size) return false;
+    cursor += size.length;
+    const valueEnd = cursor + size.value;
+    if (valueEnd > headerEnd) return false;
+    if (isDocType) {
+      if (docType !== undefined) return false;
+      docType = ascii(bytes, cursor, valueEnd);
+    }
+    cursor = valueEnd;
   }
-  return false;
+  return cursor === headerEnd && docType === "webm";
+}
+
+function readEbmlSize(
+  bytes: Uint8Array,
+  offset: number,
+  limit: number,
+): Readonly<{ length: number; value: number }> | null {
+  const length = ebmlVintLength(bytes[offset]);
+  if (!length || offset + length > limit) return null;
+  let value = bytes[offset]! & ((1 << (8 - length)) - 1);
+  for (let index = 1; index < length; index += 1)
+    value = value * 256 + bytes[offset + index]!;
+  // Unknown-sized EBML elements cannot bound the header safely.
+  if (value === 2 ** (7 * length) - 1) return null;
+  return Object.freeze({ length, value });
+}
+
+function ebmlVintLength(first: number | undefined): number | null {
+  if (first === undefined || first === 0) return null;
+  for (let length = 1; length <= 8; length += 1)
+    if ((first & (1 << (8 - length))) !== 0) return length;
+  return null;
 }
 
 function containerFromFormat(formatName: string): MediaContainer {

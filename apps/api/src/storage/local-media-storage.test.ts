@@ -3,6 +3,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -161,6 +162,9 @@ describe("LocalMediaStorage", () => {
     expect(await readdir(join(root, "temporary"))).toEqual([
       `${MEDIA_ID}.uploading`,
     ]);
+    await expect(storage.discoverReservedOrphans(1)).resolves.toEqual([
+      { id: MEDIA_ID, kind: "temporary" },
+    ]);
 
     const scavenger = new RetentionScavenger({
       repository: {
@@ -177,6 +181,70 @@ describe("LocalMediaStorage", () => {
     await scavenger.run("2030-01-15T13:00:00.000Z");
     expect(await readdir(join(root, "temporary"))).toEqual([]);
     expect(acknowledged).toEqual([MEDIA_ID]);
+  });
+
+  it("keeps the transition fact through final publication and recovers an ambiguous after-rename publisher failure", async () => {
+    const root = await temporaryRoot(directories);
+    const facts: RetentionRecord[] = [];
+    const acknowledged: string[] = [];
+    const retention = {
+      schedule: async (fact: Omit<RetentionRecord, "cleanupRequestedAt">) => {
+        facts.push({ ...fact, cleanupRequestedAt: null });
+      },
+      acknowledge: async (fact: RetentionRecord) => {
+        acknowledged.push(fact.id);
+      },
+    };
+    const storage = new LocalMediaStorage({
+      root,
+      ids: { next: () => MEDIA_ID },
+      prober: { probe: async () => probe },
+      publisher: {
+        publish: async (temporaryPath, finalPath) => {
+          await rename(temporaryPath, finalPath);
+          throw new Error("after rename");
+        },
+      },
+    });
+    const session = await storage.createUploadSession({
+      maxBytes: validMp4.length,
+      retention: {
+        repository: retention,
+        attemptId: "22222222-2222-4222-8222-222222222222",
+        createdAt: "2030-01-15T12:00:00.000Z",
+      },
+    });
+    await session.write(validMp4);
+    await expect(session.commit()).rejects.toThrow(
+      new MediaPipelineError("media_probe_failed"),
+    );
+    expect(await readdir(join(root, "temporary"))).toEqual([]);
+    expect(await readdir(join(root, "originals"))).toEqual([]);
+    expect(acknowledged).toEqual([MEDIA_ID]);
+    expect(facts).toHaveLength(1);
+  });
+
+  it("does not create a temporary when durable transition scheduling fails", async () => {
+    const root = await temporaryRoot(directories);
+    const storage = new LocalMediaStorage({
+      root,
+      ids: { next: () => MEDIA_ID },
+      prober: { probe: async () => probe },
+    });
+    await expect(
+      storage.createUploadSession({
+        maxBytes: validMp4.length,
+        retention: {
+          repository: {
+            schedule: async () => Promise.reject(new Error("sqlite reject")),
+            acknowledge: async () => undefined,
+          },
+          attemptId: "22222222-2222-4222-8222-222222222222",
+          createdAt: "2030-01-15T12:00:00.000Z",
+        },
+      }),
+    ).rejects.toThrow(new MediaPipelineError("media_probe_failed"));
+    expect(await readdir(join(root, "temporary"))).toEqual([]);
   });
 });
 

@@ -13,6 +13,25 @@ export type MediaEligibility =
   | Readonly<{ kind: "eligible"; sampleCount: number }>
   | Readonly<{ kind: "ineligible" }>;
 
+/** Probe-only gate used before private decoding; verified evidence follows C5 extraction. */
+export function isMediaProbeAdmissible(
+  mode: MediaMode,
+  probe: MediaProbe,
+): boolean {
+  if (mode === "free") return evaluateFree(probe).kind === "eligible";
+  const aspect = probe.displayWidth / probe.displayHeight;
+  return (
+    probe.durationSeconds >= 64 &&
+    probe.durationSeconds <= 65 &&
+    probe.displayWidth >= 1280 &&
+    probe.displayHeight >= 720 &&
+    probe.displayWidth > probe.displayHeight &&
+    aspect >= 1.3 &&
+    aspect <= 2 &&
+    probe.nominalFps >= 24
+  );
+}
+
 export function evaluateMediaEligibility(
   input: EligibilityInput,
 ): MediaEligibility {
@@ -36,16 +55,8 @@ export function freeSampleTimestamps(
 
 function evaluateVerified(input: EligibilityInput): MediaEligibility {
   const { probe } = input;
-  const aspect = probe.displayWidth / probe.displayHeight;
   if (
-    probe.durationSeconds < 64 ||
-    probe.durationSeconds > 65 ||
-    probe.displayWidth < 1280 ||
-    probe.displayHeight < 720 ||
-    probe.displayWidth <= probe.displayHeight ||
-    aspect < 1.3 ||
-    aspect > 2 ||
-    probe.nominalFps < 24 ||
+    !isMediaProbeAdmissible("verified", probe) ||
     !isVerifiedTimeline(input.timestamps) ||
     !hasVerifiedSceneEvidence(input.activeSceneChangeScores)
   )

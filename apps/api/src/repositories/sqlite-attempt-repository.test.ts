@@ -2246,7 +2246,7 @@ describe("SQLiteAttemptRepository", () => {
     expect(await resumed.claimProcessing(job)).toBeNull();
   });
 
-  it("releases a claim when SQLite rejects recovery accounting instead of acknowledging an orphan", async () => {
+  it("releases a claim and preserves redelivery when SQLite rejects recovery accounting", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
       athleteId: ATHLETE_A,
@@ -2285,7 +2285,7 @@ describe("SQLiteAttemptRepository", () => {
     await scheduler.tasks.shift()!();
     stop();
 
-    expect(scheduler.tasks).toEqual([]);
+    expect(scheduler.tasks).toHaveLength(1);
     expect(
       await fixture.repository.getAttempt({
         attemptId: ATTEMPT_A,

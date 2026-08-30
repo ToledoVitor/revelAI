@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -8,6 +8,8 @@ import {
 } from "../database/sqlite-database.js";
 import { SQLiteAttemptRepository } from "../repositories/sqlite-attempt-repository.js";
 import { RetentionScavenger } from "./retention-scavenger.js";
+import { LocalMediaStorage } from "../storage/local-media-storage.js";
+import { LocalRetentionObjectStore } from "../storage/local-retention-object-store.js";
 import { SQLiteRetentionRepository } from "./sqlite-retention-repository.js";
 
 const ATHLETE = "11111111-1111-4111-8111-111111111111";
@@ -153,5 +155,69 @@ describe("SQLiteRetentionRepository", () => {
     ).resolves.toEqual([
       expect.objectContaining({ kind: "original", id: MEDIA }),
     ]);
+  });
+
+  it("persists a transition fact before upload creation and reopens to delete an unattached published original", async () => {
+    const transientMedia = "99999999-9999-4999-8999-999999999999";
+    const retention = new SQLiteRetentionRepository({ database });
+    const storage = new LocalMediaStorage({
+      root: join(directory, "media"),
+      ids: { next: () => transientMedia },
+      prober: {
+        probe: async () => ({
+          container: "mp4",
+          durationSeconds: 3,
+          displayWidth: 480,
+          displayHeight: 853,
+          nominalFps: 12,
+          codec: "h264",
+          sourceRotationDegrees: 0,
+        }),
+      },
+    });
+    const session = await storage.createUploadSession({
+      maxBytes: 16,
+      retention: {
+        repository: retention,
+        attemptId: ATTEMPT,
+        createdAt: "2030-01-15T12:00:00.000Z",
+      },
+    });
+    await session.write(
+      Buffer.from([
+        0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 1, 2, 3, 4,
+      ]),
+    );
+    await session.commit();
+    await expect(
+      readFile(join(directory, "media", "originals", transientMedia)),
+    ).resolves.toHaveLength(16);
+    database.close();
+    database = openSqliteDatabase(join(directory, "api.sqlite"));
+    const reopened = new SQLiteRetentionRepository({ database });
+    const reopenedStorage = new LocalMediaStorage({
+      root: join(directory, "media"),
+      ids: { next: () => transientMedia },
+      prober: {
+        probe: async () => {
+          throw new Error("unused");
+        },
+      },
+    });
+    const scavenger = new RetentionScavenger({
+      repository: reopened,
+      objects: new LocalRetentionObjectStore({ storage: reopenedStorage }),
+      maxBatchSize: 10,
+      log: { event: () => undefined },
+    });
+    await scavenger.run("2040-01-01T00:00:00.000Z");
+    await expect(
+      readFile(join(directory, "media", "originals", transientMedia)),
+    ).rejects.toThrow();
+    await expect(
+      reopened.listDue({ now: "2040-01-01T00:00:00.000Z", limit: 10 }),
+    ).resolves.not.toContainEqual(
+      expect.objectContaining({ id: transientMedia }),
+    );
   });
 });

@@ -1,4 +1,4 @@
-import { evaluateMediaEligibility, type MediaMode } from "./eligibility.js";
+import { isMediaProbeAdmissible, type MediaMode } from "./eligibility.js";
 import { MediaPipelineError } from "./probe.js";
 import {
   LocalMediaStorage,
@@ -20,8 +20,6 @@ export class MediaPipeline {
       mode: MediaMode;
       source: AsyncIterable<Uint8Array>;
       maxBytes: number;
-      timestamps?: readonly number[];
-      activeSceneChangeScores?: readonly number[];
     }>,
   ): Promise<StoredLocalMedia> {
     const session = await this.openUpload(input);
@@ -39,8 +37,6 @@ export class MediaPipeline {
     input: Readonly<{
       mode: MediaMode;
       maxBytes: number;
-      timestamps?: readonly number[];
-      activeSceneChangeScores?: readonly number[];
       retention?: Readonly<{
         repository: UploadRetentionRepository;
         attemptId: string;
@@ -52,13 +48,7 @@ export class MediaPipeline {
       maxBytes: input.maxBytes,
       retention: input.retention,
       validate: ({ probe }) => {
-        const eligibility = evaluateMediaEligibility({
-          mode: input.mode,
-          probe,
-          timestamps: input.timestamps,
-          activeSceneChangeScores: input.activeSceneChangeScores,
-        });
-        if (eligibility.kind !== "eligible")
+        if (!isMediaProbeAdmissible(input.mode, probe))
           throw new MediaPipelineError("media_requirements_not_met");
       },
     });

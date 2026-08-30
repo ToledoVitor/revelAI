@@ -73,7 +73,6 @@ describe("MediaPipeline", () => {
         mode: "verified",
         source: chunks(bytes),
         maxBytes: bytes.length,
-        timestamps: [],
       }),
     ).rejects.toThrow(new MediaPipelineError("media_requirements_not_met"));
     expect(await readdir(join(root, "originals"))).toEqual([]);

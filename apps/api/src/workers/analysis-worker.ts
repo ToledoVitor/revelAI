@@ -181,7 +181,10 @@ export class AnalysisWorker {
           leaseId: claim.leaseId,
           generation: claim.generation,
         });
-        return;
+        // A fulfilled queue callback is an ACK. Preserve at-least-once
+        // delivery after safely releasing the lease so the attempt is not
+        // left uploaded and unqueued.
+        throw error;
       } catch {
         const deadLetter = await this.repository.deadLetterProcessingClaim({
           attemptId: job.attemptId,

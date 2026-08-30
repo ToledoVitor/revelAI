@@ -226,15 +226,20 @@ function assertVerifiedFrames(
 ): void {
   if (frames.length !== 640)
     throw new Error("Invalid verified extraction cardinality.");
+  let previous = -Infinity;
   for (let index = 0; index < frames.length; index += 1) {
     const frame = frames[index];
     assertFrameReference(frame.reference);
-    const expected = index / 10;
     if (
       !Number.isFinite(frame.timestampSeconds) ||
-      frame.timestampSeconds !== expected
+      frame.timestampSeconds <= previous ||
+      (index > 0 && frame.timestampSeconds - previous > 0.25) ||
+      (index < 40
+        ? frame.timestampSeconds < 0 || frame.timestampSeconds >= 4
+        : frame.timestampSeconds < 4 || frame.timestampSeconds >= 64)
     )
       throw new Error("Invalid verified extraction timeline.");
+    previous = frame.timestampSeconds;
   }
 }
 
@@ -245,10 +250,17 @@ function assertFreeFrames(
   const expected = freeSampleTimestamps(duration);
   if (frames.length !== expected.length)
     throw new Error("Invalid Free extraction cardinality.");
+  let previous = -Infinity;
   for (let index = 0; index < frames.length; index += 1) {
     assertFrameReference(frames[index].reference);
-    if (frames[index].timestampSeconds !== expected[index])
+    if (
+      !Number.isFinite(frames[index].timestampSeconds) ||
+      frames[index].timestampSeconds <= previous ||
+      frames[index].timestampSeconds < 0 ||
+      frames[index].timestampSeconds > duration
+    )
       throw new Error("Invalid Free extraction timeline.");
+    previous = frames[index].timestampSeconds;
   }
 }
 

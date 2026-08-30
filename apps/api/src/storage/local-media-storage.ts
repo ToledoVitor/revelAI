@@ -1,6 +1,16 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, rename, rm } from "node:fs/promises";
+import {
+  chmod,
+  link,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rm,
+  unlink,
+} from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { temporaryDeleteAt } from "../media/retention-deadlines.js";
 import type { RetentionRecord } from "../media/retention-scavenger.js";
@@ -46,9 +56,9 @@ export interface UploadCleanupLog {
 }
 
 /**
- * The publisher is the only visibility boundary. Production reserves one
- * target with O_EXCL directory creation, then atomically renames; tests can
- * inject failures without turning local paths into an application interface.
+ * The publisher is the only visibility boundary. Production links an already
+ * private temporary with the OS no-replace primitive; tests can inject
+ * ambiguous post-publication failures without exposing storage paths.
  */
 export interface NoReplacePublisher {
   publish(temporaryPath: string, finalPath: string): Promise<void>;
@@ -65,6 +75,8 @@ export type StoredLocalMedia = Readonly<{
 export interface LocalMediaUploadSession {
   write(chunk: Uint8Array): Promise<void>;
   commit(): Promise<StoredLocalMedia>;
+  /** Call only after the attempt transaction persists original retention. */
+  handoffToOriginalRetention(): Promise<void>;
   abort(): Promise<void>;
 }
 
@@ -138,6 +150,17 @@ export class LocalMediaStorage {
       throw new MediaPipelineError("media_probe_failed");
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
+      // The transition fact exists before a byte path can be created. Until an
+      // attachment installs the durable original-retention fact, this one fact
+      // covers both possible names (temporary and final).
+      if (input.retention) {
+        await input.retention.repository.schedule({
+          id,
+          attemptId: input.retention.attemptId,
+          kind: "temporary",
+          deleteAt: temporaryDeleteAt(input.retention.createdAt),
+        });
+      }
       handle = await open(
         temporaryPath,
         constants.O_WRONLY |
@@ -147,14 +170,6 @@ export class LocalMediaStorage {
         0o600,
       );
       await handle.chmod(0o600);
-      if (input.retention) {
-        await input.retention.repository.schedule({
-          id,
-          attemptId: input.retention.attemptId,
-          kind: "temporary",
-          deleteAt: temporaryDeleteAt(input.retention.createdAt),
-        });
-      }
     } catch (error) {
       await handle?.close().catch(() => undefined);
       await removeQuietly(temporaryPath);
@@ -200,11 +215,40 @@ export class LocalMediaStorage {
   public async deleteFrame(id: string): Promise<void> {
     if (!isOpaqueUuid(id)) return;
     await removeStrict(this.safePath(this.frames, id));
+    await removeStrict(this.safePath(this.temporary, `${id}.frames`));
   }
 
   public async deleteTemporary(id: string): Promise<void> {
     if (!isOpaqueUuid(id)) return;
     await removeStrict(this.safePath(this.temporary, `${id}.uploading`));
+    // A transition record may survive an interrupted publication, where the
+    // bytes are already at the final name but no original fact exists yet.
+    await removeStrict(this.safePath(this.originals, id));
+  }
+
+  /** Bounded restart reconciliation input; callers resolve opaque IDs to facts. */
+  public async discoverReservedOrphans(
+    limit: number,
+  ): Promise<readonly Readonly<{ id: string; kind: "temporary" | "frame" }>[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1)
+      throw new MediaPipelineError("media_probe_failed");
+    await this.initialize();
+    const found: Array<Readonly<{ id: string; kind: "temporary" | "frame" }>> =
+      [];
+    for (const name of (await readdir(this.temporary)).sort()) {
+      const temporary = /^([0-9a-f-]{36})\.uploading$/i.exec(name);
+      const frame = /^([0-9a-f-]{36})\.frames$/i.exec(name);
+      const match = temporary ?? frame;
+      if (!match || !isOpaqueUuid(match[1]!)) continue;
+      found.push(
+        Object.freeze({
+          id: match[1]!,
+          kind: temporary ? "temporary" : "frame",
+        }),
+      );
+      if (found.length === limit) break;
+    }
+    return Object.freeze(found);
   }
 
   private safePath(directory: string, name: string): string {
@@ -224,7 +268,7 @@ class LocalUploadSession implements LocalMediaUploadSession {
   private bytes = 0;
   private handle: Awaited<ReturnType<typeof open>> | undefined;
   private settled = false;
-  private published = false;
+  private committed = false;
 
   public constructor(
     private readonly state: Readonly<{
@@ -290,15 +334,11 @@ class LocalUploadSession implements LocalMediaUploadSession {
         this.state.temporaryPath,
         this.state.finalPath,
       );
-      this.published = true;
+      await unlink(this.state.temporaryPath);
       this.settled = true;
-      await this.acknowledgeTemporary().catch(() => {
-        this.state.cleanupLog?.event({
-          category: "retention_cleanup_failed",
-          attempt: redact(this.state.options.retention?.attemptId),
-          resource: redact(this.state.id),
-        });
-      });
+      this.committed = true;
+      // Do not acknowledge the transition fact here: attempt attachment owns
+      // the durable original fact and is the only point where handoff is safe.
       return Object.freeze({
         id: this.state.id,
         bytes: this.bytes,
@@ -320,7 +360,10 @@ class LocalUploadSession implements LocalMediaUploadSession {
     this.handle = undefined;
     try {
       await removeStrict(this.state.temporaryPath);
-      if (this.published) await removeStrict(this.state.finalPath);
+      await removeOwnedFinal(
+        this.state.finalPath,
+        this.digest.copy().digest("hex"),
+      );
       await this.acknowledgeTemporary();
     } catch {
       this.state.cleanupLog?.event({
@@ -328,6 +371,20 @@ class LocalUploadSession implements LocalMediaUploadSession {
         attempt: redact(this.state.options.retention?.attemptId),
         resource: redact(this.state.id),
       });
+    }
+  }
+
+  public async handoffToOriginalRetention(): Promise<void> {
+    if (!this.committed) throw new MediaPipelineError("media_probe_failed");
+    try {
+      await this.acknowledgeTemporary();
+    } catch {
+      this.state.cleanupLog?.event({
+        category: "retention_cleanup_failed",
+        attempt: redact(this.state.options.retention?.attemptId),
+        resource: redact(this.state.id),
+      });
+      throw new MediaPipelineError("media_probe_failed");
     }
   }
 
@@ -362,20 +419,7 @@ async function publishNoReplace(
   temporaryPath: string,
   finalPath: string,
 ): Promise<void> {
-  const reservation = `${finalPath}.publishing`;
-  await mkdir(reservation, { mode: 0o700 });
-  try {
-    if (await pathExists(finalPath))
-      throw new MediaPipelineError("media_probe_failed");
-    await rename(temporaryPath, finalPath);
-  } finally {
-    // A stale private reservation prevents replacement; the hourly temporary
-    // sweep can safely remove it on restart. Never turn a completed rename
-    // into a failed upload while leaving the final object unreported.
-    await rm(reservation, { recursive: true, force: true }).catch(
-      () => undefined,
-    );
-  }
+  await link(temporaryPath, finalPath);
 }
 
 async function ensurePrivateDirectory(directory: string): Promise<void> {
@@ -405,6 +449,21 @@ async function removeStrict(path: string): Promise<void> {
 
 async function removeQuietly(path: string): Promise<void> {
   await removeStrict(path).catch(() => undefined);
+}
+
+async function removeOwnedFinal(
+  path: string,
+  expectedSha256: string,
+): Promise<void> {
+  try {
+    const bytes = await readFile(path);
+    if (createHash("sha256").update(bytes).digest("hex") !== expectedSha256)
+      throw new Error("final ownership is ambiguous");
+    await removeStrict(path);
+  } catch (error) {
+    if (isNotFound(error)) return;
+    throw error;
+  }
 }
 
 function redact(value: string | undefined): string {
