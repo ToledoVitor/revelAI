@@ -11,6 +11,7 @@ import {
   type WallPassRankableResult as DomainWallPassRankableResult,
 } from "@revelai/domain";
 import type { AnalysisJob } from "../queue/analysis-queue.js";
+import { originalOrFrameDeleteAt } from "../media/retention-deadlines.js";
 import type { SqliteDatabase } from "../database/sqlite-database.js";
 import type {
   AttemptRecord,
@@ -290,6 +291,11 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     }>,
   ): Promise<AnalysisJob> {
     return this.transaction(() => {
+      if (
+        input.media.uploadedAt &&
+        input.media.deleteAt !== originalOrFrameDeleteAt(input.media.uploadedAt)
+      )
+        throw new RepositoryError("invalid_input");
       const row = this.mustGetScopedAttempt(input.attemptId, input.athleteId);
       const attempt = parseAttemptRow(row);
       if (attempt.media !== null)
@@ -319,6 +325,15 @@ export class SQLiteAttemptRepository implements AttemptRepository {
           input.media.deleteAt,
           now,
         );
+      if (input.media.transitionResourceId) {
+        const acknowledged = this.raw
+          .prepare(
+            "DELETE FROM retention_cleanup_records WHERE resource_id = ? AND attempt_id = ? AND resource_kind = 'temporary'",
+          )
+          .run(input.media.transitionResourceId, input.attemptId);
+        if (acknowledged.changes !== 1)
+          throw new RepositoryError("invalid_input");
+      }
       this.event(
         input.attemptId,
         row.processing_generation + 1,

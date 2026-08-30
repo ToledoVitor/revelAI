@@ -1,5 +1,7 @@
 import { isMediaProbeAdmissible, type MediaMode } from "./eligibility.js";
 import { MediaPipelineError } from "./probe.js";
+import type { ExtractionManifest } from "./extraction-manifest.js";
+import { originalOrFrameDeleteAt } from "./retention-deadlines.js";
 import {
   LocalMediaStorage,
   type LocalMediaUploadSession,
@@ -7,12 +9,42 @@ import {
   type UploadRetentionRepository,
 } from "../storage/local-media-storage.js";
 
-/** C5 orchestration: byte/probe eligibility only; no integrity or score facts. */
+/** C5 owns this seam; C8 may only provide process execution. */
+export interface MediaEvidenceExtractor {
+  extract(
+    input: Readonly<{
+      mode: MediaMode;
+      attemptId: string;
+      generation: number;
+      mediaId: string;
+      mediaSha256: string;
+      probe: StoredLocalMedia["probe"];
+      uploadedAt: string;
+      source: "staged";
+    }>,
+  ): Promise<ExtractionManifest>;
+}
+
+export type AcceptedMedia = StoredLocalMedia &
+  Readonly<{
+    manifest: ExtractionManifest;
+    uploadedAt: string;
+    deleteAt: string;
+  }>;
+
+/** The public acceptance capability cannot publish a probe-only upload. */
 export class MediaPipeline {
   private readonly storage: LocalMediaStorage;
+  private readonly extractor: MediaEvidenceExtractor;
 
-  public constructor(input: Readonly<{ storage: LocalMediaStorage }>) {
+  public constructor(
+    input: Readonly<{
+      storage: LocalMediaStorage;
+      extractor: MediaEvidenceExtractor;
+    }>,
+  ) {
     this.storage = input.storage;
+    this.extractor = input.extractor;
   }
 
   public async accept(
@@ -20,24 +52,55 @@ export class MediaPipeline {
       mode: MediaMode;
       source: AsyncIterable<Uint8Array>;
       maxBytes: number;
+      retention: Readonly<{
+        repository: UploadRetentionRepository;
+        attemptId: string;
+        generation: number;
+        uploadedAt: string;
+      }>;
     }>,
-  ): Promise<StoredLocalMedia> {
-    const session = await this.openUpload(input);
+  ): Promise<AcceptedMedia> {
+    const session = await this.openUpload({
+      mode: input.mode,
+      maxBytes: input.maxBytes,
+      retention: {
+        repository: input.retention.repository,
+        attemptId: input.retention.attemptId,
+        createdAt: input.retention.uploadedAt,
+      },
+    });
     try {
       for await (const chunk of input.source) await session.write(chunk);
-      return await session.commit();
+      const staged = await session.inspect();
+      const manifest = await this.extractor.extract({
+        mode: input.mode,
+        attemptId: input.retention.attemptId,
+        generation: input.retention.generation,
+        mediaId: staged.id,
+        mediaSha256: staged.sha256,
+        probe: staged.probe,
+        uploadedAt: input.retention.uploadedAt,
+        source: "staged",
+      });
+      const stored = await session.publish();
+      return Object.freeze({
+        ...stored,
+        manifest,
+        uploadedAt: input.retention.uploadedAt,
+        deleteAt: originalOrFrameDeleteAt(input.retention.uploadedAt),
+      });
     } catch (error) {
       await session.abort();
       throw error;
     }
   }
 
-  /** One storage-backed upload session; callers cannot publish pre-validation. */
-  public async openUpload(
+  /** One storage-backed upload session hidden behind C5 acceptance. */
+  private async openUpload(
     input: Readonly<{
       mode: MediaMode;
       maxBytes: number;
-      retention?: Readonly<{
+      retention: Readonly<{
         repository: UploadRetentionRepository;
         attemptId: string;
         createdAt: string;

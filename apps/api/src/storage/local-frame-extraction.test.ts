@@ -46,7 +46,7 @@ describe("LocalFrameExtraction", () => {
           return completedEvidence(verifiedTimeline(), verifiedScenes());
         },
       },
-      retention: { schedule: async () => undefined },
+      retention: { schedule: async () => ({ kind: "created" as const }) },
     });
     const manifest = await extractor.extract({
       mode: "verified",
@@ -56,6 +56,7 @@ describe("LocalFrameExtraction", () => {
       mediaSha256: "a".repeat(64),
       probe: verifiedProbe,
       uploadedAt: "2030-01-15T12:00:00.000Z",
+      source: "staged",
     });
     expect(manifest.frames.items[1]?.timestampSeconds).toBeCloseTo(0.1, 4);
     expect(manifest).toMatchObject({
@@ -64,9 +65,9 @@ describe("LocalFrameExtraction", () => {
     });
     await expect(
       extractor.readFrame(manifest.frames.items[0]!.reference),
-    ).resolves.toEqual(Uint8Array.of(0));
+    ).resolves.toEqual(jpeg(0));
     expect(JSON.stringify(calls)).toContain("showinfo");
-    expect(JSON.stringify(calls)).toContain("revelai-frame-evidence-ndjson-v1");
+    expect(JSON.stringify(calls)).toContain("scene");
   });
 
   it("selects cardinality-exact Free samples from real 12/24/30fps decoded timelines", async () => {
@@ -85,7 +86,7 @@ describe("LocalFrameExtraction", () => {
             return completedEvidence(decoded, []);
           },
         },
-        retention: { schedule: async () => undefined },
+        retention: { schedule: async () => ({ kind: "created" as const }) },
       });
       const manifest = await extractor.extract({
         mode: "free",
@@ -95,6 +96,7 @@ describe("LocalFrameExtraction", () => {
         mediaSha256: "a".repeat(64),
         probe: { ...verifiedProbe, durationSeconds: 3 },
         uploadedAt: "2030-01-15T12:00:00.000Z",
+        source: "staged",
       });
       expect(manifest.frames.count).toBe(12);
       expect(manifest.frames.items[0]?.timestampSeconds).toBe(0);
@@ -118,7 +120,7 @@ describe("LocalFrameExtraction", () => {
           );
         },
       },
-      retention: { schedule: async () => undefined },
+      retention: { schedule: async () => ({ kind: "created" as const }) },
     });
     await expect(
       extractor.extract({
@@ -129,11 +131,113 @@ describe("LocalFrameExtraction", () => {
         mediaSha256: "a".repeat(64),
         probe: verifiedProbe,
         uploadedAt: "2030-01-15T12:00:00.000Z",
+        source: "staged",
       }),
     ).rejects.toThrow("media_probe_failed");
     await expect(
       readFile(join(root, "frames", batchId, ".complete")),
     ).rejects.toThrow();
+  });
+
+  it("binds each verified active scene score to its selected decoded timestamp", async () => {
+    const root = await setupRoot(roots);
+    const extractor = new LocalFrameExtraction({
+      root,
+      ids: { next: () => batchId },
+      runner: {
+        run: async (command) => {
+          await writeDecoded(command.outputDirectory, verifiedTimeline());
+          return completedEvidence(
+            verifiedTimeline(),
+            Array.from({ length: 600 }, (_, index) => 4 + index / 20_000),
+          );
+        },
+      },
+      retention: { schedule: async () => ({ kind: "created" as const }) },
+    });
+    await expect(
+      extractor.extract({
+        mode: "verified",
+        attemptId,
+        generation: 1,
+        mediaId,
+        mediaSha256: "a".repeat(64),
+        probe: verifiedProbe,
+        uploadedAt: "2030-01-15T12:00:00.000Z",
+        source: "staged",
+      }),
+    ).rejects.toThrow("media_probe_failed");
+  });
+
+  it("does not remove a pre-existing completed frame set after an exclusive publication collision", async () => {
+    const root = await setupRoot(roots);
+    const existing = join(root, "frames", batchId);
+    await mkdir(existing, { mode: 0o700 });
+    await writeFile(join(existing, ".complete"), "v1", { mode: 0o600 });
+    const extractor = new LocalFrameExtraction({
+      root,
+      ids: { next: () => batchId },
+      runner: {
+        run: async (command) => {
+          const timeline = Array.from({ length: 37 }, (_, index) => index / 12);
+          await writeDecoded(command.outputDirectory, timeline);
+          return completedEvidence(timeline, []);
+        },
+      },
+      retention: { schedule: async () => ({ kind: "created" as const }) },
+    });
+    await expect(
+      extractor.extract({
+        mode: "free",
+        attemptId,
+        generation: 1,
+        mediaId,
+        mediaSha256: "a".repeat(64),
+        probe: { ...verifiedProbe, durationSeconds: 3 },
+        uploadedAt: "2030-01-15T12:00:00.000Z",
+        source: "staged",
+      }),
+    ).rejects.toThrow("media_probe_failed");
+    await expect(readFile(join(existing, ".complete"), "utf8")).resolves.toBe(
+      "v1",
+    );
+  });
+
+  it("rejects fabricated NDJSON because the runner contract carries raw FFmpeg output", async () => {
+    const root = await setupRoot(roots);
+    const extractor = new LocalFrameExtraction({
+      root,
+      ids: { next: () => batchId },
+      runner: {
+        run: async (command) => {
+          const timeline = Array.from({ length: 37 }, (_, index) => index / 12);
+          await writeDecoded(command.outputDirectory, timeline);
+          return {
+            exitCode: 0,
+            termination: "completed" as const,
+            stdout: JSON.stringify({
+              kind: "decoded",
+              index: 0,
+              timestampSeconds: 0,
+            }),
+            stderr: rawShowinfo(timeline),
+          };
+        },
+      },
+      retention: { schedule: async () => ({ kind: "created" as const }) },
+    });
+    await expect(
+      extractor.extract({
+        mode: "free",
+        attemptId,
+        generation: 1,
+        mediaId,
+        mediaSha256: "a".repeat(64),
+        probe: { ...verifiedProbe, durationSeconds: 3 },
+        uploadedAt: "2030-01-15T12:00:00.000Z",
+        source: "staged",
+      }),
+    ).rejects.toThrow("media_probe_failed");
   });
 });
 
@@ -141,14 +245,18 @@ async function setupRoot(roots: string[]): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "revelai-c5-frames-"));
   roots.push(root);
   await Promise.all(
-    ["originals", "frames", "temporary"].map((name) =>
+    ["frames", "temporary"].map((name) =>
       mkdir(join(root, name), { mode: 0o700 }),
     ),
   );
-  await writeFile(join(root, "originals", mediaId), Buffer.from([1, 2, 3]), {
-    mode: 0o600,
-  });
-  await chmod(join(root, "originals", mediaId), 0o600);
+  await writeFile(
+    join(root, "temporary", `${mediaId}.uploading`),
+    Buffer.from([1, 2, 3]),
+    {
+      mode: 0o600,
+    },
+  );
+  await chmod(join(root, "temporary", `${mediaId}.uploading`), 0o600);
   return root;
 }
 
@@ -167,9 +275,13 @@ async function writeDecoded(
   for (let index = 0; index < timestamps.length; index += 1)
     await writeFile(
       join(directory, `decoded-${String(index).padStart(6, "0")}.jpg`),
-      Buffer.from([index % 256]),
+      jpeg(index),
       { mode: 0o600 },
     );
+}
+
+function jpeg(index: number): Uint8Array {
+  return Uint8Array.of(0xff, 0xd8, 0xff, 0xe0, index % 256, 0xff, 0xd9);
 }
 
 function completedEvidence(
@@ -184,14 +296,21 @@ function completedEvidence(
   return {
     exitCode: 0,
     termination: "completed",
-    stdout: [
-      ...timestamps.map((timestampSeconds, index) =>
-        JSON.stringify({ kind: "decoded", index, timestampSeconds }),
-      ),
-      ...sceneTimestamps.map((timestampSeconds) =>
-        JSON.stringify({ kind: "scene", timestampSeconds, score: 0.1 }),
-      ),
-    ].join("\n"),
-    stderr: "",
+    stdout: sceneTimestamps
+      .flatMap((timestampSeconds, index) => [
+        `frame:${index} pts:${Math.round(timestampSeconds * 1000)} pts_time:${timestampSeconds.toFixed(6)}`,
+        "lavfi.scene_score=0.1",
+      ])
+      .join("\n"),
+    stderr: rawShowinfo(timestamps),
   };
+}
+
+function rawShowinfo(timestamps: readonly number[]): string {
+  return timestamps
+    .map(
+      (timestampSeconds, index) =>
+        `[Parsed_showinfo_0] n: ${index} pts: ${Math.round(timestampSeconds * 1000)} pts_time:${timestampSeconds.toFixed(6)}`,
+    )
+    .join("\n");
 }

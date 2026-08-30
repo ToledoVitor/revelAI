@@ -3,8 +3,10 @@ import {
   chmod,
   lstat,
   mkdir,
+  open,
   readdir,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -17,11 +19,14 @@ import {
 import { freeSampleTimestamps } from "../media/eligibility.js";
 import { originalOrFrameDeleteAt } from "../media/retention-deadlines.js";
 import { MediaPipelineError, type MediaProbe } from "../media/probe.js";
-import type { OpaqueMediaIdGenerator } from "./local-media-storage.js";
+import type {
+  OpaqueMediaIdGenerator,
+  RetentionScheduleResult,
+} from "./local-media-storage.js";
 
 /**
- * C8 supplies child-process spawning. C5 owns this fixed NDJSON evidence
- * protocol, bounded output, deadline and termination contract.
+ * C8 supplies child-process spawning. C5 owns the exact FFmpeg argv and
+ * parses bounded raw `showinfo`/`metadata=print` output itself.
  */
 export interface BoundedFrameProcessRunner {
   run(
@@ -35,7 +40,7 @@ export interface BoundedFrameProcessRunner {
       maxStdoutBytes: number;
       maxStderrBytes: number;
       maxOutputBytes: number;
-      evidenceFormat: "revelai-frame-evidence-ndjson-v1";
+      evidenceFormat: "ffmpeg-showinfo-metadata-v1";
     }>,
   ): Promise<
     Readonly<{
@@ -55,7 +60,7 @@ export interface FrameRetentionRepository {
       kind: "frame";
       deleteAt: string;
     }>,
-  ): Promise<void>;
+  ): Promise<RetentionScheduleResult>;
 }
 
 type DecodedFrame = Readonly<{ index: number; timestampSeconds: number }>;
@@ -64,7 +69,6 @@ type SceneEvidence = Readonly<{ timestampSeconds: number; score: number }>;
 /** Private stored-media capability: callers see only opaque IDs and manifests. */
 export class LocalFrameExtraction {
   private readonly root: string;
-  private readonly originals: string;
   private readonly frames: string;
   private readonly temporary: string;
   private readonly ids: OpaqueMediaIdGenerator;
@@ -86,7 +90,6 @@ export class LocalFrameExtraction {
     }>,
   ) {
     this.root = resolve(input.root);
-    this.originals = join(this.root, "originals");
     this.frames = join(this.root, "frames");
     this.temporary = join(this.root, "temporary");
     this.ids = input.ids;
@@ -106,25 +109,31 @@ export class LocalFrameExtraction {
       mediaSha256: string;
       probe: MediaProbe;
       uploadedAt: string;
+      /** Acceptance always extracts from the private staged upload. */
+      source: "staged";
     }>,
   ): Promise<ExtractionManifest> {
     const batchId = this.ids.next();
     if (!isOpaqueUuid(batchId) || !isOpaqueUuid(input.mediaId))
       throw new MediaPipelineError("media_probe_failed");
-    const inputPath = safeChild(this.originals, input.mediaId);
+    const inputPath = safeChild(this.temporary, `${input.mediaId}.uploading`);
     const staging = safeChild(this.temporary, `${batchId}.frames`);
     const published = safeChild(this.frames, batchId);
+    let stagingOwned = false;
     try {
       // One durable frame fact covers temporary/{batch}.frames and frames/{batch}
       // before either is created. Missing-file deletion is idempotent.
-      await this.retention.schedule({
+      const scheduled = await this.retention.schedule({
         id: batchId,
         attemptId: input.attemptId,
         kind: "frame",
         deleteAt: originalOrFrameDeleteAt(input.uploadedAt),
       });
+      if (scheduled.kind === "conflict")
+        throw new MediaPipelineError("media_probe_failed");
       await assertPrivateRegularFile(inputPath);
       await mkdir(staging, { mode: 0o700 });
+      stagingOwned = true;
       await chmod(staging, 0o700);
       const result = await this.runner.run({
         executable: this.executable,
@@ -139,7 +148,7 @@ export class LocalFrameExtraction {
         maxStdoutBytes: 2 * 1024 * 1024,
         maxStderrBytes: 64 * 1024,
         maxOutputBytes: 128 * 1024 * 1024,
-        evidenceFormat: "revelai-frame-evidence-ndjson-v1",
+        evidenceFormat: "ffmpeg-showinfo-metadata-v1",
       });
       if (result.exitCode !== 0 || result.termination !== "completed")
         throw new MediaPipelineError("media_probe_failed");
@@ -151,7 +160,7 @@ export class LocalFrameExtraction {
       );
       if (
         input.mode === "verified" &&
-        !hasVerifiedSceneEvidence(evidence.scenes)
+        !hasVerifiedSceneEvidence(evidence.scenes, selected.slice(40))
       )
         throw new MediaPipelineError("media_probe_failed");
       const frames = await materializeFrames(
@@ -166,8 +175,10 @@ export class LocalFrameExtraction {
     } catch (error) {
       // The retention record intentionally remains due: it can clean either
       // staging or final state after an ambiguous process/publication failure.
-      await remove(staging);
-      await remove(published);
+      if (stagingOwned) await remove(staging);
+      // A collision or an ambiguous publisher failure is not ours to destroy.
+      // Its still-due retention fact reconciles only resources it can prove it
+      // owns on restart.
       if (error instanceof MediaPipelineError) throw error;
       throw new MediaPipelineError("media_probe_failed");
     }
@@ -186,13 +197,31 @@ export class LocalFrameExtraction {
       safeChild(this.frames, match[1]!),
       ".complete",
     );
-    const completionStat = await lstat(completion);
-    if (!completionStat.isFile() || completionStat.isSymbolicLink())
+    try {
+      const completionStat = await lstat(completion);
+      if (!completionStat.isFile() || completionStat.isSymbolicLink())
+        throw new MediaPipelineError("media_probe_failed");
+      const stat = await lstat(path);
+      if (
+        !stat.isFile() ||
+        stat.isSymbolicLink() ||
+        stat.size < 4 ||
+        stat.size > this.maxFrameBytes
+      )
+        throw new MediaPipelineError("media_probe_failed");
+      const handle = await open(
+        path,
+        constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+      );
+      const bytes = new Uint8Array(
+        await handle.readFile().finally(() => handle.close()),
+      );
+      if (!isJpeg(bytes)) throw new MediaPipelineError("media_probe_failed");
+      return bytes;
+    } catch {
+      // Do not surface an OS error that embeds the private filesystem layout.
       throw new MediaPipelineError("media_probe_failed");
-    const stat = await lstat(path);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1)
-      throw new MediaPipelineError("media_probe_failed");
-    return new Uint8Array(await readFile(path));
+    }
   }
 }
 
@@ -206,15 +235,22 @@ function extractionArguments(
   return Object.freeze([
     "-nostdin",
     "-v",
-    "error",
+    "info",
     "-i",
     inputPath,
-    "-vf",
-    "showinfo",
+    "-filter_complex",
+    "[0:v]fps=10,split=2[decoded][active];[decoded]showinfo[frames];[active]select='gte(t,4)*lt(t,64)*gte(scene,0)',metadata=print:file=-[scene]",
+    "-map",
+    "[frames]",
     "-vsync",
     "0",
     "-y",
     outputPattern,
+    "-map",
+    "[scene]",
+    "-f",
+    "null",
+    "-",
   ]);
 }
 
@@ -231,61 +267,61 @@ function parseEvidence(
     Buffer.byteLength(result.stderr, "utf8") > maxStderrBytes
   )
     throw new MediaPipelineError("media_probe_failed");
-  const decoded: DecodedFrame[] = [];
-  const scenes: SceneEvidence[] = [];
-  for (const line of result.stdout.split("\n")) {
-    if (!line.trim()) continue;
-    let item: unknown;
-    try {
-      item = JSON.parse(line);
-    } catch {
-      throw new MediaPipelineError("media_probe_failed");
-    }
-    if (!isRecord(item)) throw new MediaPipelineError("media_probe_failed");
-    if (item.kind === "decoded") {
-      if (
-        !hasOnlyKeys(item, ["kind", "index", "timestampSeconds"]) ||
-        !Number.isSafeInteger(item.index) ||
-        item.index !== decoded.length ||
-        typeof item.timestampSeconds !== "number" ||
-        !Number.isFinite(item.timestampSeconds) ||
-        item.timestampSeconds < 0 ||
-        (decoded.length > 0 &&
-          item.timestampSeconds <= decoded.at(-1)!.timestampSeconds)
-      )
-        throw new MediaPipelineError("media_probe_failed");
-      decoded.push(
-        Object.freeze({
-          index: item.index,
-          timestampSeconds: item.timestampSeconds,
-        }),
-      );
-      continue;
-    }
-    if (item.kind === "scene") {
-      if (
-        !hasOnlyKeys(item, ["kind", "timestampSeconds", "score"]) ||
-        typeof item.timestampSeconds !== "number" ||
-        !Number.isFinite(item.timestampSeconds) ||
-        typeof item.score !== "number" ||
-        !Number.isFinite(item.score)
-      )
-        throw new MediaPipelineError("media_probe_failed");
-      scenes.push(
-        Object.freeze({
-          timestampSeconds: item.timestampSeconds,
-          score: item.score,
-        }),
-      );
-      continue;
-    }
-    throw new MediaPipelineError("media_probe_failed");
-  }
+  const decoded = parseShowinfo(result.stderr);
+  const scenes = parseSceneMetadata(result.stdout);
   if (decoded.length === 0) throw new MediaPipelineError("media_probe_failed");
   return Object.freeze({
     decoded: Object.freeze(decoded),
     scenes: Object.freeze(scenes),
   });
+}
+
+function parseShowinfo(output: string): readonly DecodedFrame[] {
+  const decoded: DecodedFrame[] = [];
+  const lines = output.split("\n").filter((line) => line.trim());
+  for (const line of lines) {
+    const match =
+      /\bn:\s*(\d+)\s+pts:\s*-?\d+\s+pts_time:([-+]?\d+(?:\.\d+)?)/.exec(line);
+    if (!match) continue;
+    const index = Number(match[1]);
+    const timestampSeconds = Number(match[2]);
+    if (
+      !Number.isSafeInteger(index) ||
+      index !== decoded.length ||
+      !Number.isFinite(timestampSeconds) ||
+      timestampSeconds < 0 ||
+      (decoded.length > 0 &&
+        timestampSeconds <= decoded.at(-1)!.timestampSeconds)
+    )
+      throw new MediaPipelineError("media_probe_failed");
+    decoded.push(Object.freeze({ index, timestampSeconds }));
+  }
+  return Object.freeze(decoded);
+}
+
+function parseSceneMetadata(output: string): readonly SceneEvidence[] {
+  const lines = output.split("\n").filter((line) => line.trim());
+  const scenes: SceneEvidence[] = [];
+  for (let cursor = 0; cursor < lines.length; cursor += 2) {
+    const header =
+      /^frame:\d+\s+pts:\s*-?\d+\s+pts_time:\s*([-+]?\d+(?:\.\d+)?)\s*$/.exec(
+        lines[cursor]!,
+      );
+    const score = /^lavfi\.scene_score=([-+]?\d+(?:\.\d+)?)$/.exec(
+      lines[cursor + 1] ?? "",
+    );
+    if (!header || !score) throw new MediaPipelineError("media_probe_failed");
+    const timestampSeconds = Number(header[1]);
+    const value = Number(score[1]);
+    if (
+      !Number.isFinite(timestampSeconds) ||
+      !Number.isFinite(value) ||
+      (scenes.length > 0 && timestampSeconds <= scenes.at(-1)!.timestampSeconds)
+    )
+      throw new MediaPipelineError("media_probe_failed");
+    scenes.push(Object.freeze({ timestampSeconds, score: value }));
+  }
+  return Object.freeze(scenes);
 }
 
 function selectDecodedFrames(
@@ -342,13 +378,16 @@ function selectDecodedFrames(
   return Object.freeze(selected);
 }
 
-function hasVerifiedSceneEvidence(scenes: readonly SceneEvidence[]): boolean {
+function hasVerifiedSceneEvidence(
+  scenes: readonly SceneEvidence[],
+  active: readonly DecodedFrame[],
+): boolean {
   return (
-    scenes.length === 600 &&
+    scenes.length === active.length &&
+    active.length === 600 &&
     scenes.every(
       (scene, index) =>
-        scene.timestampSeconds >= 4 &&
-        scene.timestampSeconds < 64 &&
+        scene.timestampSeconds === active[index]!.timestampSeconds &&
         scene.score >= 0 &&
         scene.score < 0.42 &&
         (index === 0 ||
@@ -376,6 +415,7 @@ async function materializeFrames(
     )
       throw new MediaPipelineError("media_probe_failed");
     const rawBytes = await readFile(source);
+    if (!isJpeg(rawBytes)) throw new MediaPipelineError("media_probe_failed");
     const final = safeChild(staging, frameName(ordinal));
     await writeFile(final, rawBytes, { mode: 0o600, flag: "wx" });
     await chmod(final, 0o600);
@@ -404,16 +444,17 @@ async function publishFrameSet(
   staging: string,
   published: string,
 ): Promise<void> {
-  // O_EXCL reservation owns this opaque set; link each finished private frame
-  // into it and expose a completion marker only after all links succeed.
+  // O_EXCL reservation owns this opaque set; atomically rename each private
+  // frame into it and expose a completion marker only after all moves succeed.
+  let owned = false;
   await mkdir(published, { mode: 0o700 });
+  owned = true;
   try {
     const names = (await readdir(staging)).sort();
     for (const name of names) {
       const source = safeChild(staging, name);
       const target = safeChild(published, name);
-      const bytes = await readFile(source);
-      await writeFile(target, bytes, { mode: 0o600, flag: "wx" });
+      await rename(source, target);
       await chmod(target, 0o600);
     }
     await writeFile(safeChild(published, ".complete"), "v1", {
@@ -422,7 +463,7 @@ async function publishFrameSet(
     });
     await remove(staging);
   } catch (error) {
-    await remove(published);
+    if (owned) await remove(published);
     throw error;
   }
 }
@@ -464,16 +505,12 @@ function isOpaqueUuid(value: string): boolean {
   );
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasOnlyKeys(
-  value: Record<string, unknown>,
-  keys: readonly string[],
-): boolean {
+function isJpeg(bytes: Uint8Array): boolean {
   return (
-    Object.keys(value).length === keys.length &&
-    Object.keys(value).every((key) => keys.includes(key))
+    bytes.length >= 4 &&
+    bytes[0] === 0xff &&
+    bytes[1] === 0xd8 &&
+    bytes.at(-2) === 0xff &&
+    bytes.at(-1) === 0xd9
   );
 }

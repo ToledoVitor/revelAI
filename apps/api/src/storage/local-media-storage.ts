@@ -1,15 +1,16 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   chmod,
-  link,
   lstat,
   mkdir,
   open,
   readFile,
   readdir,
+  rename,
   rm,
   unlink,
+  writeFile,
 } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { temporaryDeleteAt } from "../media/retention-deadlines.js";
@@ -41,9 +42,14 @@ export interface UploadRetentionRepository {
       kind: "temporary";
       deleteAt: string;
     }>,
-  ): Promise<void>;
+  ): Promise<RetentionScheduleResult>;
   acknowledge(record: RetentionRecord): Promise<void>;
 }
+
+/** Scheduling must identify whether the current writer owns this fact. */
+export type RetentionScheduleResult = Readonly<{
+  kind: "created" | "existing-owned" | "conflict";
+}>;
 
 export interface UploadCleanupLog {
   event(
@@ -56,12 +62,19 @@ export interface UploadCleanupLog {
 }
 
 /**
- * The publisher is the only visibility boundary. Production links an already
- * private temporary with the OS no-replace primitive; tests can inject
- * ambiguous post-publication failures without exposing storage paths.
+ * The publisher is the only visibility boundary. Production reserves an
+ * opaque final directory then atomically renames its private payload; tests
+ * can inject ambiguous post-publication failures without exposing paths.
  */
 export interface NoReplacePublisher {
-  publish(temporaryPath: string, finalPath: string): Promise<void>;
+  publish(
+    input: Readonly<{
+      temporaryPath: string;
+      finalDirectory: string;
+      payloadPath: string;
+      ownerToken: string;
+    }>,
+  ): Promise<void>;
 }
 
 export type StoredLocalMedia = Readonly<{
@@ -70,13 +83,23 @@ export type StoredLocalMedia = Readonly<{
   contentType: "video/mp4" | "video/quicktime" | "video/webm";
   sha256: string;
   probe: MediaProbe;
+  transitionResourceId: string;
+}>;
+
+export type StagedLocalMedia = Readonly<{
+  id: string;
+  bytes: number;
+  contentType: "video/mp4" | "video/quicktime" | "video/webm";
+  sha256: string;
+  probe: MediaProbe;
+  transitionResourceId: string;
 }>;
 
 export interface LocalMediaUploadSession {
   write(chunk: Uint8Array): Promise<void>;
+  inspect(): Promise<StagedLocalMedia>;
+  publish(): Promise<StoredLocalMedia>;
   commit(): Promise<StoredLocalMedia>;
-  /** Call only after the attempt transaction persists original retention. */
-  handoffToOriginalRetention(): Promise<void>;
   abort(): Promise<void>;
 }
 
@@ -85,7 +108,7 @@ type UploadOptions = Readonly<{
   validate?: (
     input: Readonly<{ bytes: number; probe: MediaProbe }>,
   ) => void | Promise<void>;
-  retention?: Readonly<{
+  retention: Readonly<{
     repository: UploadRetentionRepository;
     attemptId: string;
     createdAt: string;
@@ -144,23 +167,27 @@ export class LocalMediaStorage {
     await this.initialize();
     const id = this.ids.next();
     if (!isOpaqueUuid(id)) throw new MediaPipelineError("media_probe_failed");
-    const finalPath = this.safePath(this.originals, id);
+    // Owning this final directory is the no-replace boundary. A payload rename
+    // inside a freshly-reserved directory is atomic and cannot replace another
+    // upload's opaque id.
+    const finalDirectory = this.safePath(this.originals, id);
+    const finalPath = this.safePath(finalDirectory, "payload");
     const temporaryPath = this.safePath(this.temporary, `${id}.uploading`);
-    if (await pathExists(finalPath))
+    if (await pathExists(finalDirectory))
       throw new MediaPipelineError("media_probe_failed");
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
       // The transition fact exists before a byte path can be created. Until an
       // attachment installs the durable original-retention fact, this one fact
       // covers both possible names (temporary and final).
-      if (input.retention) {
-        await input.retention.repository.schedule({
-          id,
-          attemptId: input.retention.attemptId,
-          kind: "temporary",
-          deleteAt: temporaryDeleteAt(input.retention.createdAt),
-        });
-      }
+      const scheduled = await input.retention.repository.schedule({
+        id,
+        attemptId: input.retention.attemptId,
+        kind: "temporary",
+        deleteAt: temporaryDeleteAt(input.retention.createdAt),
+      });
+      if (scheduled.kind === "conflict")
+        throw new MediaPipelineError("media_probe_failed");
       handle = await open(
         temporaryPath,
         constants.O_WRONLY |
@@ -172,12 +199,14 @@ export class LocalMediaStorage {
       await handle.chmod(0o600);
     } catch (error) {
       await handle?.close().catch(() => undefined);
-      await removeQuietly(temporaryPath);
+      // An EEXIST path can only belong to another operation. Do not remove it.
+      if (handle) await removeQuietly(temporaryPath);
       if (error instanceof MediaPipelineError) throw error;
       throw new MediaPipelineError("media_probe_failed");
     }
     return new LocalUploadSession({
       id,
+      finalDirectory,
       finalPath,
       temporaryPath,
       handle,
@@ -195,6 +224,7 @@ export class LocalMediaStorage {
       validate?: (
         input: Readonly<{ bytes: number; probe: MediaProbe }>,
       ) => void | Promise<void>;
+      retention: UploadOptions["retention"];
     }>,
   ): Promise<StoredLocalMedia> {
     const session = await this.createUploadSession(input);
@@ -268,11 +298,13 @@ class LocalUploadSession implements LocalMediaUploadSession {
   private bytes = 0;
   private handle: Awaited<ReturnType<typeof open>> | undefined;
   private settled = false;
-  private committed = false;
+  private inspected: StagedLocalMedia | undefined;
+  private readonly ownerToken = randomUUID();
 
   public constructor(
     private readonly state: Readonly<{
       id: string;
+      finalDirectory: string;
       finalPath: string;
       temporaryPath: string;
       handle: Awaited<ReturnType<typeof open>>;
@@ -307,9 +339,10 @@ class LocalUploadSession implements LocalMediaUploadSession {
     }
   }
 
-  public async commit(): Promise<StoredLocalMedia> {
-    if (this.settled || !this.handle)
-      throw new MediaPipelineError("media_probe_failed");
+  public async inspect(): Promise<StagedLocalMedia> {
+    if (this.settled) throw new MediaPipelineError("media_probe_failed");
+    if (this.inspected) return this.inspected;
+    if (!this.handle) throw new MediaPipelineError("media_probe_failed");
     try {
       if (this.bytes === 0) throw new MediaPipelineError("media_empty");
       await this.handle.close();
@@ -330,27 +363,47 @@ class LocalUploadSession implements LocalMediaUploadSession {
         }),
       );
       await chmod(this.state.temporaryPath, 0o600);
-      await this.state.publisher.publish(
-        this.state.temporaryPath,
-        this.state.finalPath,
-      );
-      await unlink(this.state.temporaryPath);
-      this.settled = true;
-      this.committed = true;
-      // Do not acknowledge the transition fact here: attempt attachment owns
-      // the durable original fact and is the only point where handoff is safe.
-      return Object.freeze({
+      this.inspected = Object.freeze({
         id: this.state.id,
         bytes: this.bytes,
         contentType: contentTypeFor(magicContainer),
         sha256: this.digest.digest("hex"),
         probe: Object.freeze({ ...probe }),
+        transitionResourceId: this.state.id,
       });
+      return this.inspected;
     } catch (error) {
       await this.abort();
       if (error instanceof MediaPipelineError) throw error;
       throw new MediaPipelineError("media_probe_failed");
     }
+  }
+
+  public async publish(): Promise<StoredLocalMedia> {
+    const inspected = await this.inspect();
+    try {
+      await this.state.publisher.publish({
+        temporaryPath: this.state.temporaryPath,
+        finalDirectory: this.state.finalDirectory,
+        payloadPath: this.state.finalPath,
+        ownerToken: this.ownerToken,
+      });
+      // The publisher performs the atomic move; missing temp is expected.
+      await unlink(this.state.temporaryPath).catch((error: unknown) => {
+        if (isNotFound(error)) return;
+        throw error;
+      });
+      this.settled = true;
+      return inspected;
+    } catch {
+      await this.abort();
+      throw new MediaPipelineError("media_probe_failed");
+    }
+  }
+
+  public async commit(): Promise<StoredLocalMedia> {
+    await this.inspect();
+    return this.publish();
   }
 
   public async abort(): Promise<void> {
@@ -360,37 +413,25 @@ class LocalUploadSession implements LocalMediaUploadSession {
     this.handle = undefined;
     try {
       await removeStrict(this.state.temporaryPath);
-      await removeOwnedFinal(
+      const publicationClean = await removeOwnedPublication(
+        this.state.finalDirectory,
         this.state.finalPath,
-        this.digest.copy().digest("hex"),
+        this.ownerToken,
       );
+      if (!publicationClean)
+        throw new Error("publication ownership is ambiguous");
       await this.acknowledgeTemporary();
     } catch {
       this.state.cleanupLog?.event({
         category: "retention_cleanup_failed",
-        attempt: redact(this.state.options.retention?.attemptId),
+        attempt: redact(this.state.options.retention.attemptId),
         resource: redact(this.state.id),
       });
-    }
-  }
-
-  public async handoffToOriginalRetention(): Promise<void> {
-    if (!this.committed) throw new MediaPipelineError("media_probe_failed");
-    try {
-      await this.acknowledgeTemporary();
-    } catch {
-      this.state.cleanupLog?.event({
-        category: "retention_cleanup_failed",
-        attempt: redact(this.state.options.retention?.attemptId),
-        resource: redact(this.state.id),
-      });
-      throw new MediaPipelineError("media_probe_failed");
     }
   }
 
   private async acknowledgeTemporary(): Promise<void> {
     const retention = this.state.options.retention;
-    if (!retention) return;
     await retention.repository.acknowledge({
       id: this.state.id,
       attemptId: retention.attemptId,
@@ -416,10 +457,24 @@ function isOpaqueUuid(value: string): boolean {
 }
 
 async function publishNoReplace(
-  temporaryPath: string,
-  finalPath: string,
+  input: Readonly<{
+    temporaryPath: string;
+    finalDirectory: string;
+    payloadPath: string;
+    ownerToken: string;
+  }>,
 ): Promise<void> {
-  await link(temporaryPath, finalPath);
+  // mkdir is the exclusive ownership primitive. It never overwrites another
+  // opaque media id; the payload move is then an atomic same-filesystem rename.
+  await mkdir(input.finalDirectory, { mode: 0o700 });
+  await chmod(input.finalDirectory, 0o700);
+  await writeFile(join(input.finalDirectory, ".owner"), input.ownerToken, {
+    mode: 0o600,
+    flag: "wx",
+  });
+  await rename(input.temporaryPath, input.payloadPath);
+  await chmod(input.payloadPath, 0o600);
+  await unlink(join(input.finalDirectory, ".owner"));
 }
 
 async function ensurePrivateDirectory(directory: string): Promise<void> {
@@ -451,17 +506,19 @@ async function removeQuietly(path: string): Promise<void> {
   await removeStrict(path).catch(() => undefined);
 }
 
-async function removeOwnedFinal(
-  path: string,
-  expectedSha256: string,
-): Promise<void> {
+async function removeOwnedPublication(
+  directory: string,
+  payloadPath: string,
+  ownerToken: string,
+): Promise<boolean> {
   try {
-    const bytes = await readFile(path);
-    if (createHash("sha256").update(bytes).digest("hex") !== expectedSha256)
-      throw new Error("final ownership is ambiguous");
-    await removeStrict(path);
+    const owner = await readFile(join(directory, ".owner"), "utf8");
+    if (owner !== ownerToken) return false;
+    await removeStrict(payloadPath);
+    await removeStrict(directory);
+    return true;
   } catch (error) {
-    if (isNotFound(error)) return;
+    if (isNotFound(error)) return !(await pathExists(directory));
     throw error;
   }
 }

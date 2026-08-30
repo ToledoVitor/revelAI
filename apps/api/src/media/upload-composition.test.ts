@@ -8,7 +8,6 @@ import {
   RawMultipartByteCounter,
   type MultipartPart,
 } from "./multipart-intake.js";
-import { MediaPipeline } from "./media-pipeline.js";
 import { MediaPipelineError, type MediaProbe } from "./probe.js";
 
 const mediaId = "11111111-1111-4111-8111-111111111111";
@@ -24,6 +23,15 @@ const probe: MediaProbe = {
   codec: "h264",
   sourceRotationDegrees: 0,
 };
+const retention = {
+  schedule: async () => ({ kind: "created" as const }),
+  acknowledge: async () => undefined,
+};
+const retentionInput = {
+  repository: retention,
+  attemptId: "22222222-2222-4222-8222-222222222222",
+  createdAt: "2030-01-15T12:00:00.000Z",
+};
 
 describe("media upload composition", () => {
   const roots: string[] = [];
@@ -36,12 +44,10 @@ describe("media upload composition", () => {
   it("counts a chunked raw envelope, validates the staged upload, and publishes only after commit", async () => {
     const root = await mkdtemp(join(tmpdir(), "revelai-c5-composition-"));
     roots.push(root);
-    const pipeline = new MediaPipeline({
-      storage: new LocalMediaStorage({
-        root,
-        ids: { next: () => mediaId },
-        prober: { probe: async () => probe },
-      }),
+    const storage = new LocalMediaStorage({
+      root,
+      ids: { next: () => mediaId },
+      prober: { probe: async () => probe },
     });
     const raw = new RawMultipartByteCounter(96);
     const parsedRaw: number[] = [];
@@ -54,9 +60,9 @@ describe("media upload composition", () => {
     ))
       parsedRaw.push(...chunk);
 
-    const session = await pipeline.openUpload({
-      mode: "free",
+    const session = await storage.createUploadSession({
       maxBytes: mp4.length,
+      retention: retentionInput,
     });
     const accepted = await acceptSingleMediaPart({
       parts: parts({
@@ -78,9 +84,9 @@ describe("media upload composition", () => {
       id: mediaId,
       probe,
     });
-    await expect(readFile(join(root, "originals", mediaId))).resolves.toEqual(
-      mp4,
-    );
+    await expect(
+      readFile(join(root, "originals", mediaId, "payload")),
+    ).resolves.toEqual(mp4);
   });
 
   it("aborts the sole session when raw transport or multipart shape fails", async () => {
@@ -103,9 +109,9 @@ describe("media upload composition", () => {
       })(),
     ).rejects.toThrow(new MediaPipelineError("multipart_body_too_large"));
 
-    const session = await new MediaPipeline({ storage }).openUpload({
-      mode: "free",
+    const session = await storage.createUploadSession({
       maxBytes: mp4.length,
+      retention: retentionInput,
     });
     const validRaw = new RawMultipartByteCounter(96);
     validRaw.observe(Buffer.from([1]));

@@ -12,6 +12,9 @@ export type StoredMedia = Readonly<{
   contentType: string;
   bytes: number;
   deleteAt: string;
+  uploadedAt?: string;
+  /** C5 temporary fact deleted atomically with original-retention creation. */
+  transitionResourceId?: string;
 }>;
 
 export type CalibrationSessionRecord = Readonly<{

@@ -87,6 +87,28 @@ describe("SQLiteRetentionRepository", () => {
     ).resolves.toEqual([]);
   });
 
+  it("reports created, idempotent ownership, and incompatible retention collisions", async () => {
+    const repository = new SQLiteRetentionRepository({ database });
+    const fact = {
+      id: "55555555-5555-4555-8555-555555555555",
+      attemptId: ATTEMPT,
+      kind: "frame" as const,
+      deleteAt: "2030-01-16T10:00:00.000Z",
+    };
+    await expect(repository.schedule(fact)).resolves.toEqual({
+      kind: "created",
+    });
+    await expect(repository.schedule(fact)).resolves.toEqual({
+      kind: "existing-owned",
+    });
+    await expect(
+      repository.schedule({
+        ...fact,
+        attemptId: "99999999-9999-4999-8999-999999999999",
+      }),
+    ).resolves.toEqual({ kind: "conflict" });
+  });
+
   it("makes terminal cleanup due immediately without leaking metadata", async () => {
     const repository = new SQLiteRetentionRepository({ database });
     await repository.requestAttemptCleanup({
@@ -104,6 +126,63 @@ describe("SQLiteRetentionRepository", () => {
         cleanupRequestedAt: "2030-01-15T12:00:00.000Z",
       },
     ]);
+  });
+
+  it("atomically installs original retention and acknowledges the owned upload transition", async () => {
+    const secondAttempt = "99999999-9999-4999-8999-999999999999";
+    const secondMedia = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const attempts = new SQLiteAttemptRepository({
+      database,
+      clock: { now: () => "2030-01-15T12:00:00.000Z" },
+      ids: { next: () => "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+    });
+    await attempts.createAttempt({
+      id: secondAttempt,
+      athleteId: ATHLETE,
+      input: { mode: "free" },
+    });
+    const retention = new SQLiteRetentionRepository({ database });
+    await retention.schedule({
+      id: secondMedia,
+      attemptId: secondAttempt,
+      kind: "temporary",
+      deleteAt: "2030-01-15T13:00:00.000Z",
+    });
+
+    // The transition survives a real process boundary immediately before the
+    // attachment transaction; the next reopen observes only original retention.
+    database.close();
+    database = openSqliteDatabase(join(directory, "api.sqlite"));
+    const reopenedAttempts = new SQLiteAttemptRepository({
+      database,
+      clock: { now: () => "2030-01-15T12:00:00.000Z" },
+      ids: { next: () => "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+    });
+    await reopenedAttempts.attachValidatedMedia({
+      attemptId: secondAttempt,
+      athleteId: ATHLETE,
+      media: {
+        id: secondMedia,
+        contentType: "video/mp4",
+        bytes: 1,
+        deleteAt: "2030-01-16T11:00:00.000Z",
+        transitionResourceId: secondMedia,
+      },
+    });
+
+    database.close();
+    database = openSqliteDatabase(join(directory, "api.sqlite"));
+    const afterAttach = new SQLiteRetentionRepository({ database });
+    await expect(
+      afterAttach.listDue({ now: "2030-01-15T13:00:00.000Z", limit: 10 }),
+    ).resolves.not.toContainEqual(
+      expect.objectContaining({ id: secondMedia, kind: "temporary" }),
+    );
+    await expect(
+      afterAttach.listDue({ now: "2030-01-16T11:00:00.000Z", limit: 10 }),
+    ).resolves.toContainEqual(
+      expect.objectContaining({ id: secondMedia, kind: "original" }),
+    );
   });
 
   it("deletes the canonical observation in the same transaction before acknowledging its fact", async () => {
@@ -190,7 +269,9 @@ describe("SQLiteRetentionRepository", () => {
     );
     await session.commit();
     await expect(
-      readFile(join(directory, "media", "originals", transientMedia)),
+      readFile(
+        join(directory, "media", "originals", transientMedia, "payload"),
+      ),
     ).resolves.toHaveLength(16);
     database.close();
     database = openSqliteDatabase(join(directory, "api.sqlite"));
@@ -212,7 +293,9 @@ describe("SQLiteRetentionRepository", () => {
     });
     await scavenger.run("2040-01-01T00:00:00.000Z");
     await expect(
-      readFile(join(directory, "media", "originals", transientMedia)),
+      readFile(
+        join(directory, "media", "originals", transientMedia, "payload"),
+      ),
     ).rejects.toThrow();
     await expect(
       reopened.listDue({ now: "2040-01-01T00:00:00.000Z", limit: 10 }),

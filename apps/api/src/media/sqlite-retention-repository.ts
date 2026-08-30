@@ -3,6 +3,7 @@ import type {
   RetentionRecord,
   RetentionRepository,
 } from "./retention-scavenger.js";
+import type { RetentionScheduleResult } from "../storage/local-media-storage.js";
 
 type RetentionRow = Readonly<{
   id: string;
@@ -27,14 +28,35 @@ export class SQLiteRetentionRepository implements RetentionRepository {
       kind: "frame" | "temporary" | "observation";
       deleteAt: string;
     }>,
-  ): Promise<void> {
+  ): Promise<RetentionScheduleResult> {
     assertIdentifier(input.id);
     assertIdentifier(input.attemptId);
     assertTimestamp(input.deleteAt);
-    this.transaction(() => {
+    return this.transaction(() => {
+      const existing = this.raw
+        .prepare(
+          "SELECT attempt_id, resource_kind, delete_at FROM retention_cleanup_records WHERE resource_id = ?",
+        )
+        .get(input.id) as
+        | Readonly<{
+            attempt_id: string;
+            resource_kind: string;
+            delete_at: string;
+          }>
+        | undefined;
+      if (existing) {
+        return Object.freeze({
+          kind:
+            existing.attempt_id === input.attemptId &&
+            existing.resource_kind === input.kind &&
+            existing.delete_at === input.deleteAt
+              ? "existing-owned"
+              : "conflict",
+        });
+      }
       this.raw
         .prepare(
-          "INSERT INTO retention_cleanup_records (resource_id, attempt_id, resource_kind, delete_at, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(resource_id) DO NOTHING",
+          "INSERT INTO retention_cleanup_records (resource_id, attempt_id, resource_kind, delete_at, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .run(
           input.id,
@@ -43,6 +65,7 @@ export class SQLiteRetentionRepository implements RetentionRepository {
           input.deleteAt,
           input.deleteAt,
         );
+      return Object.freeze({ kind: "created" });
     });
   }
 

@@ -1,5 +1,6 @@
 import {
   lstat,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
@@ -32,6 +33,15 @@ const probe: MediaProbe = {
   codec: "h264",
   sourceRotationDegrees: 0,
 };
+const retention = {
+  schedule: async () => ({ kind: "created" as const }),
+  acknowledge: async () => undefined,
+};
+const retentionInput = {
+  repository: retention,
+  attemptId: "22222222-2222-4222-8222-222222222222",
+  createdAt: "2030-01-15T12:00:00.000Z",
+};
 
 describe("LocalMediaStorage", () => {
   const directories: string[] = [];
@@ -55,6 +65,7 @@ describe("LocalMediaStorage", () => {
     const stored = await storage.store({
       source: chunks(validMp4, 3),
       maxBytes: validMp4.length,
+      retention: retentionInput,
     });
 
     expect(stored).toMatchObject({
@@ -63,14 +74,18 @@ describe("LocalMediaStorage", () => {
       contentType: "video/mp4",
       probe,
     });
-    expect(await readFile(join(root, "originals", MEDIA_ID))).toEqual(validMp4);
+    expect(
+      await readFile(join(root, "originals", MEDIA_ID, "payload")),
+    ).toEqual(validMp4);
     expect((await lstat(root)).mode & 0o777).toBe(0o700);
     expect((await lstat(join(root, "originals"))).mode & 0o777).toBe(0o700);
-    expect((await lstat(join(root, "originals", MEDIA_ID))).mode & 0o777).toBe(
-      0o600,
-    );
+    expect(
+      (await lstat(join(root, "originals", MEDIA_ID, "payload"))).mode & 0o777,
+    ).toBe(0o600);
     expect(await storage.delete(MEDIA_ID)).toBeUndefined();
-    await expect(readFile(join(root, "originals", MEDIA_ID))).rejects.toThrow();
+    await expect(
+      readFile(join(root, "originals", MEDIA_ID, "payload")),
+    ).rejects.toThrow();
   });
 
   it("accepts exact stream limit and removes all temporary bytes on first byte over", async () => {
@@ -83,6 +98,7 @@ describe("LocalMediaStorage", () => {
     await storage.store({
       source: chunks(validMp4),
       maxBytes: validMp4.length,
+      retention: retentionInput,
     });
     await storage.delete(MEDIA_ID);
 
@@ -90,6 +106,7 @@ describe("LocalMediaStorage", () => {
       storage.store({
         source: chunks(Buffer.concat([validMp4, Buffer.from([9])]), 2),
         maxBytes: validMp4.length,
+        retention: retentionInput,
       }),
     ).rejects.toThrow(new MediaPipelineError("media_too_large"));
     expect(await readdir(join(root, "temporary"))).toEqual([]);
@@ -106,21 +123,30 @@ describe("LocalMediaStorage", () => {
       prober: { probe: async () => probe },
     });
     await storage.initialize();
-    await writeFile(join(originalDirectory, MEDIA_ID), "existing", {
+    await mkdir(join(originalDirectory, MEDIA_ID), { mode: 0o700 });
+    await writeFile(join(originalDirectory, MEDIA_ID, "payload"), "existing", {
       mode: 0o600,
     });
 
     await expect(
-      storage.store({ source: chunks(validMp4), maxBytes: validMp4.length }),
+      storage.store({
+        source: chunks(validMp4),
+        maxBytes: validMp4.length,
+        retention: retentionInput,
+      }),
     ).rejects.toThrow(new MediaPipelineError("media_probe_failed"));
-    expect(await readFile(join(originalDirectory, MEDIA_ID), "utf8")).toBe(
-      "existing",
-    );
+    expect(
+      await readFile(join(originalDirectory, MEDIA_ID, "payload"), "utf8"),
+    ).toBe("existing");
 
-    await rm(join(originalDirectory, MEDIA_ID));
+    await rm(join(originalDirectory, MEDIA_ID), { recursive: true });
     await symlink(join(root, "outside"), join(originalDirectory, MEDIA_ID));
     await expect(
-      storage.store({ source: chunks(validMp4), maxBytes: validMp4.length }),
+      storage.store({
+        source: chunks(validMp4),
+        maxBytes: validMp4.length,
+        retention: retentionInput,
+      }),
     ).rejects.toThrow(new MediaPipelineError("media_probe_failed"));
     expect(await readdir(join(root, "temporary"))).toEqual([]);
   });
@@ -132,6 +158,7 @@ describe("LocalMediaStorage", () => {
     const retention = {
       schedule: async (fact: Omit<RetentionRecord, "cleanupRequestedAt">) => {
         facts.push({ ...fact, cleanupRequestedAt: null });
+        return { kind: "created" as const };
       },
       acknowledge: async (fact: RetentionRecord) => {
         acknowledged.push(fact.id);
@@ -190,6 +217,7 @@ describe("LocalMediaStorage", () => {
     const retention = {
       schedule: async (fact: Omit<RetentionRecord, "cleanupRequestedAt">) => {
         facts.push({ ...fact, cleanupRequestedAt: null });
+        return { kind: "created" as const };
       },
       acknowledge: async (fact: RetentionRecord) => {
         acknowledged.push(fact.id);
@@ -200,8 +228,15 @@ describe("LocalMediaStorage", () => {
       ids: { next: () => MEDIA_ID },
       prober: { probe: async () => probe },
       publisher: {
-        publish: async (temporaryPath, finalPath) => {
-          await rename(temporaryPath, finalPath);
+        publish: async ({
+          temporaryPath,
+          finalDirectory,
+          payloadPath,
+          ownerToken,
+        }) => {
+          await mkdir(finalDirectory, { mode: 0o700 });
+          await writeFile(join(finalDirectory, ".owner"), ownerToken);
+          await rename(temporaryPath, payloadPath);
           throw new Error("after rename");
         },
       },
@@ -245,6 +280,72 @@ describe("LocalMediaStorage", () => {
       }),
     ).rejects.toThrow(new MediaPipelineError("media_probe_failed"));
     expect(await readdir(join(root, "temporary"))).toEqual([]);
+  });
+
+  it("never removes another same-id session's exclusive temporary on collision", async () => {
+    const root = await temporaryRoot(directories);
+    const storage = new LocalMediaStorage({
+      root,
+      ids: { next: () => MEDIA_ID },
+      prober: { probe: async () => probe },
+    });
+    const first = await storage.createUploadSession({
+      maxBytes: validMp4.length,
+      retention: retentionInput,
+    });
+    await expect(
+      storage.createUploadSession({
+        maxBytes: validMp4.length,
+        retention: retentionInput,
+      }),
+    ).rejects.toThrow(new MediaPipelineError("media_probe_failed"));
+    expect(await readdir(join(root, "temporary"))).toEqual([
+      `${MEDIA_ID}.uploading`,
+    ]);
+    await first.write(validMp4);
+    await expect(first.commit()).resolves.toMatchObject({ id: MEDIA_ID });
+  });
+
+  it("keeps the transition fact when an ambiguous publisher cannot prove final ownership", async () => {
+    const root = await temporaryRoot(directories);
+    const facts: RetentionRecord[] = [];
+    const acknowledged: string[] = [];
+    const trackedRetention = {
+      schedule: async (fact: Omit<RetentionRecord, "cleanupRequestedAt">) => {
+        facts.push({ ...fact, cleanupRequestedAt: null });
+        return { kind: "created" as const };
+      },
+      acknowledge: async (fact: RetentionRecord) => {
+        acknowledged.push(fact.id);
+      },
+    };
+    const storage = new LocalMediaStorage({
+      root,
+      ids: { next: () => MEDIA_ID },
+      prober: { probe: async () => probe },
+      publisher: {
+        publish: async ({ temporaryPath, finalDirectory, payloadPath }) => {
+          await mkdir(finalDirectory, { mode: 0o700 });
+          await rename(temporaryPath, payloadPath);
+          throw new Error("after rename without ownership receipt");
+        },
+      },
+    });
+    const session = await storage.createUploadSession({
+      maxBytes: validMp4.length,
+      retention: {
+        repository: trackedRetention,
+        attemptId: "22222222-2222-4222-8222-222222222222",
+        createdAt: "2030-01-15T12:00:00.000Z",
+      },
+    });
+    await session.write(validMp4);
+    await expect(session.commit()).rejects.toThrow("media_probe_failed");
+    await expect(
+      readFile(join(root, "originals", MEDIA_ID, "payload")),
+    ).resolves.toEqual(validMp4);
+    expect(acknowledged).toEqual([]);
+    expect(facts).toHaveLength(1);
   });
 });
 
