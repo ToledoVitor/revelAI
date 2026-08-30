@@ -36,6 +36,18 @@ describe("parseApiEnv", () => {
     ).toThrow("HTTPS");
   });
 
+  it("does not treat a DNS name beginning with 127 as a loopback provider", () => {
+    expect(() =>
+      parseApiEnv({
+        ROBOFLOW_API_KEY: "test-key",
+        ROBOFLOW_BASE_URL: "http://127.attacker.test",
+        ROBOFLOW_WORKSPACE_ID: "workspace",
+        ROBOFLOW_WORKFLOW_ID: "workflow",
+        ROBOFLOW_WORKFLOW_VERSION: "1",
+      }),
+    ).toThrow("HTTPS");
+  });
+
   it("rejects an HTTP public base URL in production", () => {
     expect(() =>
       parseApiEnv({
@@ -49,6 +61,20 @@ describe("parseApiEnv", () => {
     expect(() => parseApiEnv({ HOST: "0.0.0.0" })).toThrow(
       "ALLOW_UNAUTHENTICATED_PUBLIC=true",
     );
+  });
+
+  it("does not treat a DNS name beginning with 127 as a loopback bind", () => {
+    expect(() => parseApiEnv({ HOST: "127.attacker.test" })).toThrow(
+      "ALLOW_UNAUTHENTICATED_PUBLIC=true",
+    );
+  });
+
+  it("creates a valid public URL for an unbracketed IPv6 loopback bind", () => {
+    expect(parseApiEnv({ HOST: "::1" })).toMatchObject({
+      host: "::1",
+      publicBaseUrl: "http://[::1]:3000",
+      startupWarnings: [],
+    });
   });
 
   it("exposes a redacted warning for an explicitly opted-in public bind", () => {

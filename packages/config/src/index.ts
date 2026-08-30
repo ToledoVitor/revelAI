@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { z } from "zod";
 
 const nodeEnvironmentSchema = z.enum(["development", "test", "production"]);
@@ -78,11 +79,21 @@ export type ApiEnv = {
 function isLoopbackHost(host: string): boolean {
   const normalizedHost = host.toLowerCase().replace(/^\[|\]$/g, "");
 
-  return (
-    normalizedHost === "localhost" ||
-    normalizedHost === "::1" ||
-    normalizedHost.startsWith("127.")
-  );
+  if (normalizedHost === "localhost") {
+    return true;
+  }
+
+  if (isIP(normalizedHost) === 4) {
+    return normalizedHost.split(".")[0] === "127";
+  }
+
+  return isIP(normalizedHost) === 6 && normalizedHost === "::1";
+}
+
+function formatHostForUrl(host: string): string {
+  const normalizedHost = host.replace(/^\[|\]$/g, "");
+
+  return isIP(normalizedHost) === 6 ? `[${normalizedHost}]` : host;
 }
 
 function parseHttpUrl(value: string, variableName: string): URL {
@@ -179,7 +190,8 @@ export function parseApiEnv(source: ApiEnvInput): ApiEnv {
     ROBOFLOW_WORKFLOW_VERSION: source.ROBOFLOW_WORKFLOW_VERSION,
   });
   const publicBaseUrl = parseHttpUrl(
-    input.PUBLIC_BASE_URL ?? `http://${input.HOST}:${input.PORT}`,
+    input.PUBLIC_BASE_URL ??
+      `http://${formatHostForUrl(input.HOST)}:${input.PORT}`,
     "PUBLIC_BASE_URL",
   );
 
