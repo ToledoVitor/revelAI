@@ -132,9 +132,11 @@ export {
   missingWorkflowBenchmarkReceiptFixture,
   passingWorkflowBenchmarkReceiptFixture,
   staleWorkflowBenchmarkReceiptFixture,
+  WorkflowBenchmarkInvalidationReasonSchema,
   WorkflowBenchmarkReceiptSchema,
   workflowBenchmarkReceiptDigest,
   type WorkflowBenchmarkReceipt,
+  type WorkflowBenchmarkInvalidationReason,
   type WorkflowBenchmarkReceiptPayload,
 } from "./workflow-benchmark-receipt.js";
 export { UtcIsoTimestampSchema, type UtcIsoTimestamp } from "./primitives.js";

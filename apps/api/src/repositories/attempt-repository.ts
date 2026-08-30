@@ -45,6 +45,7 @@ export type AttemptRecord = Readonly<{
 export type ProcessingClaim = Readonly<{
   leaseId: string;
   generation: number;
+  mode: AttemptMode;
 }>;
 
 export type FinalizedAttempt = Readonly<{
@@ -131,8 +132,6 @@ export interface AttemptRepository {
   rollbackMediaAttachment(
     input: Readonly<{
       attemptId: string;
-      athleteId: string;
-      mediaId: string;
       generation: number;
     }>,
   ): Promise<void>;

@@ -4,12 +4,16 @@ import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import {
   failedWorkflowBenchmarkReceiptFixture,
+  FailureMessageByCode,
   passingWorkflowBenchmarkReceiptFixture,
   staleWorkflowBenchmarkReceiptFixture,
   workflowBenchmarkReceiptDigest,
 } from "@revelai/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { openSqliteDatabase } from "../database/sqlite-database.js";
+import {
+  openSqliteDatabase,
+  openSqliteDatabaseAtVersionForTest,
+} from "../database/sqlite-database.js";
 import {
   InMemoryAnalysisQueue,
   type QueueScheduler,
@@ -75,13 +79,192 @@ class ManualScheduler implements QueueScheduler {
   }
 }
 
-function startLockingSqliteActor(
+type RepositoryActorInput = Readonly<{
+  filename: string;
+  now: string;
+  ids: readonly string[];
+  delayMilliseconds: number;
+  holdAtBegin?: SharedArrayBuffer;
+  action: "finalize" | "tombstone" | "create-verified";
+  input: unknown;
+}>;
+
+type RepositoryActorResult = Readonly<{
+  value?: unknown;
+  error?: Readonly<{ code?: string; message: string }>;
+}>;
+
+function startRepositoryActor(input: RepositoryActorInput): Readonly<{
+  ready: Promise<void>;
+  attempting: Promise<void>;
+  acquired: Promise<void>;
+  done: Promise<RepositoryActorResult>;
+  start(): void;
+}> {
+  let resolveReady!: () => void;
+  let rejectReady!: (error: Error) => void;
+  let resolveAttempting!: () => void;
+  let rejectAttempting!: (error: Error) => void;
+  let resolveAcquired!: () => void;
+  let rejectAcquired!: (error: Error) => void;
+  let resolveDone!: (result: RepositoryActorResult) => void;
+  let rejectDone!: (error: Error) => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const attempting = new Promise<void>((resolve, reject) => {
+    resolveAttempting = resolve;
+    rejectAttempting = reject;
+  });
+  const acquired = new Promise<void>((resolve, reject) => {
+    resolveAcquired = resolve;
+    rejectAcquired = reject;
+  });
+  const done = new Promise<RepositoryActorResult>((resolve, reject) => {
+    resolveDone = resolve;
+    rejectDone = reject;
+  });
+  const worker = new Worker(
+    `
+      const fs = require("node:fs");
+      const Module = require("node:module");
+      const ts = require("typescript");
+      const { parentPort, workerData } = require("node:worker_threads");
+      const originalResolveFilename = Module._resolveFilename;
+      Module._resolveFilename = function (request, parent, isMain, options) {
+        if (request === "@revelai/contracts") return workerData.contractsModule;
+        if (request === "@revelai/domain") return workerData.domainModule;
+        try {
+          return originalResolveFilename.call(this, request, parent, isMain, options);
+        } catch (error) {
+          if (typeof request === "string" && request.startsWith(".") && request.endsWith(".js")) {
+            return originalResolveFilename.call(this, request.slice(0, -3) + ".ts", parent, isMain, options);
+          }
+          throw error;
+        }
+      };
+      require.extensions[".ts"] = function (module, filename) {
+        const output = ts.transpileModule(fs.readFileSync(filename, "utf8"), {
+          compilerOptions: {
+            target: ts.ScriptTarget.ES2022,
+            module: ts.ModuleKind.CommonJS,
+            moduleResolution: ts.ModuleResolutionKind.NodeNext,
+            esModuleInterop: true,
+          },
+          fileName: filename,
+        }).outputText;
+        module._compile(output, filename);
+      };
+      const { openSqliteDatabase } = require(workerData.databaseModule);
+      const { SQLiteAttemptRepository } = require(workerData.repositoryModule);
+      class ActorClock { now() { return workerData.now; } }
+      class ActorIds {
+        constructor(ids) { this.ids = [...ids]; }
+        next() {
+          const id = this.ids.shift();
+          if (!id) throw new Error("Repository actor ran out of identifiers");
+          return id;
+        }
+      }
+      const database = openSqliteDatabase(workerData.filename);
+      const repository = new SQLiteAttemptRepository({
+        database,
+        clock: new ActorClock(),
+        ids: new ActorIds(workerData.ids),
+      });
+      const originalExec = database.raw.exec.bind(database.raw);
+      const holdAtBegin = workerData.holdAtBegin
+        ? new Int32Array(workerData.holdAtBegin)
+        : null;
+      database.raw.exec = (sql) => {
+        if (sql !== "BEGIN IMMEDIATE") return originalExec(sql);
+        parentPort.postMessage({ type: "attempting" });
+        const result = originalExec(sql);
+        if (holdAtBegin) {
+          parentPort.postMessage({ type: "acquired" });
+          Atomics.wait(holdAtBegin, 0, 0, 5_000);
+        }
+        return result;
+      };
+      parentPort.postMessage({ type: "ready" });
+      parentPort.once("message", async (message) => {
+        if (message.type !== "start") return;
+        try {
+          if (workerData.delayMilliseconds > 0)
+            await new Promise((resolve) => setTimeout(resolve, workerData.delayMilliseconds));
+          let value;
+          if (workerData.action === "finalize")
+            value = await repository.finalizeTerminalResult(workerData.input);
+          else if (workerData.action === "tombstone")
+            value = await repository.tombstoneAttempt(workerData.input);
+          else
+            value = await repository.createAttempt(workerData.input);
+          database.close();
+          parentPort.postMessage({ type: "done", value });
+        } catch (error) {
+          database.close();
+          parentPort.postMessage({
+            type: "done",
+            error: {
+              code: error && typeof error === "object" ? error.code : undefined,
+              message: error instanceof Error ? error.message : String(error),
+            },
+          });
+        }
+      });
+    `,
+    {
+      eval: true,
+      workerData: {
+        ...input,
+        databaseModule: join(process.cwd(), "src/database/sqlite-database.ts"),
+        repositoryModule: join(
+          process.cwd(),
+          "src/repositories/sqlite-attempt-repository.ts",
+        ),
+        contractsModule: join(
+          process.cwd(),
+          "../../packages/contracts/src/index.ts",
+        ),
+        domainModule: join(process.cwd(), "../../packages/domain/src/index.ts"),
+      },
+    },
+  );
+  worker.on("message", (message: unknown) => {
+    const value = message as {
+      type?: string;
+      value?: unknown;
+      error?: Readonly<{ code?: string; message: string }>;
+    };
+    if (value.type === "ready") resolveReady();
+    if (value.type === "attempting") resolveAttempting();
+    if (value.type === "acquired") resolveAcquired();
+    if (value.type === "done") {
+      resolveDone({ value: value.value, error: value.error });
+      void worker.terminate();
+    }
+  });
+  worker.on("error", (error) => {
+    rejectReady(error);
+    rejectAttempting(error);
+    rejectAcquired(error);
+    rejectDone(error);
+    void worker.terminate();
+  });
+  return Object.freeze({
+    ready,
+    attempting,
+    acquired,
+    done,
+    start: () => worker.postMessage({ type: "start" }),
+  });
+}
+
+function startSqliteLockBarrier(
   input: Readonly<{
     filename: string;
-    action: "finalize" | "tombstone";
-    attemptId: string;
-    generation: number;
-    now: string;
+    holdMilliseconds?: number;
   }>,
 ): Readonly<{ locked: Promise<void>; done: Promise<void> }> {
   let resolveLocked!: () => void;
@@ -104,15 +287,6 @@ function startLockingSqliteActor(
       parentPort.postMessage({ type: "locked" });
       setTimeout(() => {
         try {
-          if (workerData.action === "finalize") {
-            const outcome = JSON.stringify({ state: "failed", attemptId: workerData.attemptId, mode: "free", code: "analysis_temporary_unavailable", message: "A análise está indisponível temporariamente.", retryable: true });
-            database.prepare("INSERT INTO terminal_results (id, attempt_id, lease_id, generation, terminal_state, outcome_json, candidate_json, completed_at, created_at) VALUES (?, ?, 'worker-lease', ?, 'failed', ?, ?, ?, ?)").run("worker-result", workerData.attemptId, workerData.generation, outcome, outcome, workerData.now, workerData.now);
-            database.prepare("UPDATE attempts SET status = 'failed' WHERE id = ?").run(workerData.attemptId);
-          } else {
-            database.prepare("DELETE FROM leaderboard_entries WHERE attempt_id = ?").run(workerData.attemptId);
-            database.prepare("DELETE FROM terminal_results WHERE attempt_id = ?").run(workerData.attemptId);
-            database.prepare("UPDATE attempts SET deletion_state = 'tombstoned', processing_generation = processing_generation + 1, processing_lease_id = NULL, processing_lease_expires_at = NULL WHERE id = ?").run(workerData.attemptId);
-          }
           database.exec("COMMIT");
           database.close();
           parentPort.postMessage({ type: "done" });
@@ -121,7 +295,7 @@ function startLockingSqliteActor(
           database.close();
           parentPort.postMessage({ type: "error", message: String(error) });
         }
-      }, 75);
+      }, workerData.holdMilliseconds ?? 150);
     `,
     { eval: true, workerData: input },
   );
@@ -217,6 +391,39 @@ function rankedOutcome(
       completedAt,
       competitiveStatus: "ranked",
       competitiveEligible: true,
+    },
+  };
+}
+
+function legacyRankedOutcome(
+  attemptId: string,
+  completedAt: string,
+  score: number,
+) {
+  const candidate = rankedOutcome(attemptId, completedAt, score);
+  if (
+    candidate.state !== "valid" ||
+    candidate.result.kind !== "verified-result" ||
+    candidate.result.competitiveStatus !== "ranked"
+  )
+    throw new Error("Expected a ranked candidate fixture");
+  return {
+    state: "valid" as const,
+    result: {
+      ...candidate.result,
+      rankingSnapshot: {
+        kind: "frozen" as const,
+        challengeId: "wall-pass" as const,
+        challengeVersion: 1 as const,
+        ruleVersion: "wall-pass-v1-score-1" as const,
+        rank: 1,
+        cohortSize: 1,
+        percentile: 100,
+        topPercent: 0,
+        scoreCountAtFinalization: 1,
+        asOfAttemptId: attemptId,
+        calculatedAt: completedAt,
+      },
     },
   };
 }
@@ -382,6 +589,112 @@ describe("SQLiteAttemptRepository", () => {
     ).rejects.toMatchObject({ code: "calibration_session_consumed" });
   });
 
+  it("allows exactly one independently-connected actor to consume a ready calibration session", async () => {
+    await fixture.repository.issueCalibrationSession({
+      id: SESSION_A,
+      athleteId: ATHLETE_A,
+      nonce: "a".repeat(43),
+      challengeId: "wall-pass",
+      challengeVersion: 1,
+    });
+    await fixture.repository.readyCalibrationSession({
+      id: SESSION_A,
+      athleteId: ATHLETE_A,
+      requiredGates: ["device", "space", "athlete", "rehearsal", "record"],
+    });
+    const firstHold = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+    const first = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: fixture.clock.now(),
+      ids: [],
+      delayMilliseconds: 0,
+      holdAtBegin: firstHold,
+      action: "create-verified",
+      input: {
+        id: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+        input: {
+          mode: "verified",
+          challengeId: "wall-pass",
+          challengeVersion: 1,
+          calibrationSessionId: SESSION_A,
+        },
+      },
+    });
+    const second = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: fixture.clock.now(),
+      ids: [],
+      delayMilliseconds: 0,
+      action: "create-verified",
+      input: {
+        id: ATTEMPT_B,
+        athleteId: ATHLETE_A,
+        input: {
+          mode: "verified",
+          challengeId: "wall-pass",
+          challengeVersion: 1,
+          calibrationSessionId: SESSION_A,
+        },
+      },
+    });
+    await Promise.all([first.ready, second.ready]);
+    first.start();
+    await first.acquired;
+    second.start();
+    await second.attempting;
+    Atomics.store(new Int32Array(firstHold), 0, 1);
+    Atomics.notify(new Int32Array(firstHold), 0);
+    const [firstResult, secondResult] = await Promise.all([
+      first.done,
+      second.done,
+    ]);
+
+    expect(
+      [firstResult, secondResult].filter((result) => !result.error),
+    ).toHaveLength(1);
+    expect(
+      [firstResult, secondResult].find((result) => result.error !== undefined)
+        ?.error?.code,
+    ).toBe("calibration_session_consumed");
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM attempts WHERE calibration_session_id = ?",
+        )
+        .get(SESSION_A),
+    ).toMatchObject({ count: 1 });
+  });
+
+  it("rejects corrupt calibration rows before returning or consuming them", async () => {
+    await fixture.repository.issueCalibrationSession({
+      id: SESSION_A,
+      athleteId: ATHLETE_A,
+      nonce: "a".repeat(43),
+      challengeId: "wall-pass",
+      challengeVersion: 1,
+    });
+    fixture.database.raw
+      .prepare(
+        "UPDATE calibration_sessions SET nonce = ?, issued_at = ? WHERE id = ?",
+      )
+      .run("bad", "not-a-time", SESSION_A);
+
+    await expect(
+      fixture.repository.getCalibrationSession({
+        id: SESSION_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).rejects.toMatchObject({ code: "persisted_data_corrupt" });
+    await expect(
+      fixture.repository.readyCalibrationSession({
+        id: SESSION_A,
+        athleteId: ATHLETE_A,
+        requiredGates: ["device", "space", "athlete", "rehearsal", "record"],
+      }),
+    ).rejects.toMatchObject({ code: "persisted_data_corrupt" });
+  });
+
   it("returns reverse-created stable pages without leaking another athlete's attempts", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
@@ -434,8 +747,6 @@ describe("SQLiteAttemptRepository", () => {
 
     await fixture.repository.rollbackMediaAttachment({
       attemptId: ATTEMPT_A,
-      athleteId: ATHLETE_A,
-      mediaId: "media-a",
       generation: job.generation,
     });
     expect(
@@ -522,7 +833,7 @@ describe("SQLiteAttemptRepository", () => {
     ).toEqual([]);
   });
 
-  it("serializes ranked completions into frozen same-score snapshots and one entry per result", async () => {
+  it("serializes independently-run ranked completions into frozen cohorts while preserving live ties", async () => {
     const secondDatabase = fixture.openSecondaryDatabase();
     const second = new SQLiteAttemptRepository({
       database: secondDatabase,
@@ -581,33 +892,81 @@ describe("SQLiteAttemptRepository", () => {
     const firstClaim = (await fixture.repository.claimProcessing(firstJob))!;
     const secondClaim = (await second.claimProcessing(secondJob))!;
     const completedAt = fixture.clock.now();
-    await fixture.repository.finalizeTerminalResult({
-      attemptId: ATTEMPT_A,
-      leaseId: firstClaim.leaseId,
-      generation: firstClaim.generation,
-      candidate: rankedOutcome(ATTEMPT_A, completedAt, 80),
+    const first = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: completedAt,
+      ids: [ENTRY_A, "dddddddd-dddd-4ddd-8ddd-dddddddddddd"],
+      delayMilliseconds: 0,
+      action: "finalize",
+      input: {
+        attemptId: ATTEMPT_A,
+        leaseId: firstClaim.leaseId,
+        generation: firstClaim.generation,
+        candidate: rankedOutcome(ATTEMPT_A, completedAt, 80),
+      },
     });
-    const secondInput = {
-      attemptId: ATTEMPT_B,
-      leaseId: secondClaim.leaseId,
-      generation: secondClaim.generation,
-      candidate: rankedOutcome(ATTEMPT_B, completedAt, 80),
-    };
-    const finalized = await second.finalizeTerminalResult(secondInput);
-    const duplicate = await second.finalizeTerminalResult(secondInput);
+    const secondActor = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: completedAt,
+      ids: [ENTRY_B, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"],
+      delayMilliseconds: 50,
+      action: "finalize",
+      input: {
+        attemptId: ATTEMPT_B,
+        leaseId: secondClaim.leaseId,
+        generation: secondClaim.generation,
+        candidate: rankedOutcome(ATTEMPT_B, completedAt, 80),
+      },
+    });
+    await Promise.all([first.ready, secondActor.ready]);
+    const barrier = startSqliteLockBarrier({
+      filename: join(fixture.directory, "api.sqlite"),
+    });
+    await barrier.locked;
+    first.start();
+    await first.attempting;
+    secondActor.start();
+    await secondActor.attempting;
+    const [firstResult, secondResult] = await Promise.all([
+      first.done,
+      secondActor.done,
+    ]);
+    await barrier.done;
 
-    expect(finalized?.outcome).toMatchObject({
-      state: "valid",
-      result: { rankingSnapshot: { cohortSize: 2, rank: 1 } },
-    });
-    expect(duplicate).toEqual(finalized);
+    expect(firstResult.error).toBeUndefined();
+    expect(secondResult.error).toBeUndefined();
+    const frozenRows = fixture.database.raw
+      .prepare(
+        "SELECT attempt_id, outcome_json FROM terminal_results WHERE attempt_id IN (?, ?) ORDER BY attempt_id",
+      )
+      .all(ATTEMPT_A, ATTEMPT_B) as readonly Readonly<{
+      attempt_id: string;
+      outcome_json: string;
+    }>[];
+    const snapshots = Object.fromEntries(
+      frozenRows.map((row) => [
+        row.attempt_id,
+        (
+          JSON.parse(row.outcome_json) as {
+            result: { rankingSnapshot: object };
+          }
+        ).result.rankingSnapshot,
+      ]),
+    );
+    expect(Object.values(snapshots)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ cohortSize: 1, rank: 1 }),
+        expect.objectContaining({ cohortSize: 2, rank: 1 }),
+      ]),
+    );
     const leaderboard = await fixture.repository.listLiveLeaderboard({
       calculatedAt: completedAt,
     });
-    expect(leaderboard.entries).toHaveLength(2);
-    expect(
-      new Set(leaderboard.entries.map((entry) => entry.entryId)).size,
-    ).toBe(2);
+    expect(leaderboard).toMatchObject({ cohortSize: 2 });
+    expect(leaderboard.entries).toEqual([
+      expect.objectContaining({ entryId: ENTRY_A, rank: 1, score: 80 }),
+      expect.objectContaining({ entryId: ENTRY_B, rank: 1, score: 80 }),
+    ]);
   });
 
   it("never projects demo or experimental verified candidates onto the leaderboard", async () => {
@@ -760,7 +1119,7 @@ describe("SQLiteAttemptRepository", () => {
     ).toBeNull();
   });
 
-  it("uses SQLite's write lock to make one overlapping finalizer the sole terminal winner", async () => {
+  it("makes independently-run overlapping finalizers choose one canonical terminal candidate", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
       athleteId: ATHLETE_A,
@@ -777,24 +1136,63 @@ describe("SQLiteAttemptRepository", () => {
       },
     });
     const claim = (await fixture.repository.claimProcessing(job))!;
-    const actor = startLockingSqliteActor({
-      filename: join(fixture.directory, "api.sqlite"),
-      action: "finalize",
+    const firstCandidate = freeOutcome(ATTEMPT_A, fixture.clock.now());
+    const secondCandidate: TerminalCandidate = {
+      state: "failed",
       attemptId: ATTEMPT_A,
-      generation: claim.generation,
+      mode: "free",
+      code: "analysis_internal_error",
+      message: FailureMessageByCode.analysis_internal_error,
+      retryable: false,
+    };
+    const first = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
       now: fixture.clock.now(),
-    });
-    await actor.locked;
-
-    await expect(
-      fixture.repository.finalizeTerminalResult({
+      ids: ["dddddddd-dddd-4ddd-8ddd-dddddddddddd"],
+      delayMilliseconds: 0,
+      action: "finalize",
+      input: {
         attemptId: ATTEMPT_A,
         leaseId: claim.leaseId,
         generation: claim.generation,
-        candidate: freeOutcome(ATTEMPT_A, fixture.clock.now()),
-      }),
-    ).rejects.toMatchObject({ code: "terminal_result_conflict" });
-    await actor.done;
+        candidate: firstCandidate,
+      },
+    });
+    const second = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: fixture.clock.now(),
+      ids: ["eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"],
+      delayMilliseconds: 50,
+      action: "finalize",
+      input: {
+        attemptId: ATTEMPT_A,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+        candidate: secondCandidate,
+      },
+    });
+    await Promise.all([first.ready, second.ready]);
+    const barrier = startSqliteLockBarrier({
+      filename: join(fixture.directory, "api.sqlite"),
+    });
+    await barrier.locked;
+    first.start();
+    await first.attempting;
+    second.start();
+    await second.attempting;
+    const [firstResult, secondResult] = await Promise.all([
+      first.done,
+      second.done,
+    ]);
+    await barrier.done;
+
+    expect(
+      [firstResult, secondResult].filter((result) => !result.error),
+    ).toHaveLength(1);
+    const conflict = [firstResult, secondResult].find(
+      (result) => result.error !== undefined,
+    );
+    expect(conflict?.error?.message).toBe("terminal_result_conflict");
     expect(
       fixture.database.raw
         .prepare(
@@ -804,7 +1202,7 @@ describe("SQLiteAttemptRepository", () => {
     ).toMatchObject({ count: 1 });
   });
 
-  it("lets an overlapping SQLite deletion lock win without permitting terminal resurrection", async () => {
+  it("lets a tombstone lock winner prevent a concurrently-finalizing actor from resurrecting", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
       athleteId: ATHLETE_A,
@@ -821,28 +1219,119 @@ describe("SQLiteAttemptRepository", () => {
       },
     });
     const claim = (await fixture.repository.claimProcessing(job))!;
-    const actor = startLockingSqliteActor({
+    const tombstoneHold = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+    const tombstone = startRepositoryActor({
       filename: join(fixture.directory, "api.sqlite"),
-      action: "tombstone",
-      attemptId: ATTEMPT_A,
-      generation: claim.generation,
       now: fixture.clock.now(),
+      ids: [],
+      delayMilliseconds: 0,
+      holdAtBegin: tombstoneHold,
+      action: "tombstone",
+      input: { attemptId: ATTEMPT_A, athleteId: ATHLETE_A },
     });
-    await actor.locked;
-
-    await expect(
-      fixture.repository.finalizeTerminalResult({
+    const finalizer = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: fixture.clock.now(),
+      ids: ["dddddddd-dddd-4ddd-8ddd-dddddddddddd"],
+      delayMilliseconds: 50,
+      action: "finalize",
+      input: {
         attemptId: ATTEMPT_A,
         leaseId: claim.leaseId,
         generation: claim.generation,
         candidate: freeOutcome(ATTEMPT_A, fixture.clock.now()),
-      }),
-    ).resolves.toBeNull();
-    await actor.done;
+      },
+    });
+    await Promise.all([tombstone.ready, finalizer.ready]);
+    tombstone.start();
+    await tombstone.acquired;
+    finalizer.start();
+    await finalizer.attempting;
+    Atomics.store(new Int32Array(tombstoneHold), 0, 1);
+    Atomics.notify(new Int32Array(tombstoneHold), 0);
+    const [tombstoneResult, finalizerResult] = await Promise.all([
+      tombstone.done,
+      finalizer.done,
+    ]);
+
+    expect(tombstoneResult.error).toBeUndefined();
+    expect(finalizerResult).toEqual({ value: null, error: undefined });
     expect(
       await fixture.repository.getAttempt({
         attemptId: ATTEMPT_A,
         athleteId: ATHLETE_A,
+      }),
+    ).toBeNull();
+  });
+
+  it("allows a finalizer lock winner to commit once before a concurrent tombstone retracts it", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const claim = (await fixture.repository.claimProcessing(job))!;
+    const finalizerHold = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+    const finalizer = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: fixture.clock.now(),
+      ids: ["dddddddd-dddd-4ddd-8ddd-dddddddddddd"],
+      delayMilliseconds: 0,
+      holdAtBegin: finalizerHold,
+      action: "finalize",
+      input: {
+        attemptId: ATTEMPT_A,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+        candidate: freeOutcome(ATTEMPT_A, fixture.clock.now()),
+      },
+    });
+    const tombstone = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: fixture.clock.now(),
+      ids: [],
+      delayMilliseconds: 0,
+      action: "tombstone",
+      input: { attemptId: ATTEMPT_A, athleteId: ATHLETE_A },
+    });
+    await Promise.all([finalizer.ready, tombstone.ready]);
+    finalizer.start();
+    await finalizer.acquired;
+    tombstone.start();
+    await tombstone.attempting;
+    Atomics.store(new Int32Array(finalizerHold), 0, 1);
+    Atomics.notify(new Int32Array(finalizerHold), 0);
+    const [finalizerResult, tombstoneResult] = await Promise.all([
+      finalizer.done,
+      tombstone.done,
+    ]);
+
+    expect(finalizerResult.error).toBeUndefined();
+    expect(finalizerResult.value).not.toBeNull();
+    expect(tombstoneResult.error).toBeUndefined();
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({ count: 0 });
+    expect(
+      await fixture.repository.finalizeTerminalResult({
+        attemptId: ATTEMPT_A,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+        candidate: freeOutcome(ATTEMPT_A, fixture.clock.now()),
       }),
     ).toBeNull();
   });
@@ -865,8 +1354,6 @@ describe("SQLiteAttemptRepository", () => {
     });
     await fixture.repository.rollbackMediaAttachment({
       attemptId: ATTEMPT_A,
-      athleteId: ATHLETE_A,
-      mediaId: "media-a",
       generation: firstJob.generation,
     });
     const secondJob = await fixture.repository.attachValidatedMedia({
@@ -881,8 +1368,6 @@ describe("SQLiteAttemptRepository", () => {
     });
     await fixture.repository.rollbackMediaAttachment({
       attemptId: ATTEMPT_A,
-      athleteId: ATHLETE_A,
-      mediaId: "media-b",
       generation: firstJob.generation,
     });
 
@@ -946,11 +1431,99 @@ describe("SQLiteAttemptRepository", () => {
     ).toMatchObject({ status: "valid", outcome: { state: "valid" } });
   });
 
-  it("retracts a terminal fact atomically with its ranked projection", async () => {
+  it("settles a permanent processor failure through bounded yielded retries with one terminal fact", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
       athleteId: ATHLETE_A,
       input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    let calls = 0;
+    const delays: number[] = [];
+    const worker = new AnalysisWorker({
+      queue,
+      repository: fixture.repository,
+      process: async () => {
+        calls += 1;
+        throw new Error("permanent processor failure");
+      },
+      unexpectedRetryPolicy: {
+        maxAttempts: 2,
+        wait: async (attempt) => {
+          delays.push(attempt);
+        },
+        terminalCandidate: ({ job: failedJob, claim }) => ({
+          state: "failed",
+          attemptId: failedJob.attemptId,
+          mode: claim.mode,
+          code: "analysis_internal_error",
+          message: "A análise não pôde ser concluída.",
+          retryable: false,
+        }),
+      },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue(job);
+    await scheduler.runAll();
+    stop();
+
+    expect({ calls, delays, scheduled: scheduler.tasks.length }).toEqual({
+      calls: 2,
+      delays: [1],
+      scheduled: 0,
+    });
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({
+      status: "failed",
+      outcome: { code: "analysis_internal_error", retryable: false },
+    });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({ count: 1 });
+  });
+
+  it("retracts a ranked terminal fact, observations, and retained media without resurrection", async () => {
+    await fixture.repository.issueCalibrationSession({
+      id: SESSION_A,
+      athleteId: ATHLETE_A,
+      nonce: "a".repeat(43),
+      challengeId: "wall-pass",
+      challengeVersion: 1,
+    });
+    await fixture.repository.readyCalibrationSession({
+      id: SESSION_A,
+      athleteId: ATHLETE_A,
+      requiredGates: ["device", "space", "athlete", "rehearsal", "record"],
+    });
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: {
+        mode: "verified",
+        challengeId: "wall-pass",
+        challengeVersion: 1,
+        calibrationSessionId: SESSION_A,
+      },
     });
     const job = await fixture.repository.attachValidatedMedia({
       attemptId: ATTEMPT_A,
@@ -967,8 +1540,19 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       leaseId: claim.leaseId,
       generation: claim.generation,
-      candidate: freeOutcome(ATTEMPT_A, fixture.clock.now()),
+      candidate: rankedOutcome(ATTEMPT_A, fixture.clock.now(), 80),
     });
+    fixture.database.raw
+      .prepare(
+        "INSERT INTO canonical_observations (id, attempt_id, payload_json, delete_at, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(
+        "observation-a",
+        ATTEMPT_A,
+        '{"kind":"test"}',
+        "2030-01-16T12:00:00.000Z",
+        fixture.clock.now(),
+      );
     await fixture.repository.tombstoneAttempt({
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
@@ -981,6 +1565,28 @@ describe("SQLiteAttemptRepository", () => {
         )
         .get(ATTEMPT_A),
     ).toMatchObject({ count: 0 });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM canonical_observations WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({ count: 0 });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT cleanup_requested_at FROM media_retention_records WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({ cleanup_requested_at: fixture.clock.now() });
+    expect(
+      await fixture.repository.finalizeTerminalResult({
+        attemptId: ATTEMPT_A,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+        candidate: rankedOutcome(ATTEMPT_A, fixture.clock.now(), 80),
+      }),
+    ).toBeNull();
     expect(
       fixture.database.raw
         .prepare(
@@ -1044,6 +1650,95 @@ describe("SQLiteAttemptRepository", () => {
         athleteId: ATHLETE_A,
       }),
     ).toMatchObject({ id: ATTEMPT_A });
+  });
+
+  it("canonicalizes a v4 ranked request into its candidate so upgraded redelivery stays idempotent", async () => {
+    const filename = join(fixture.directory, "legacy-v4.sqlite");
+    const legacy = openSqliteDatabaseAtVersionForTest(filename, 4);
+    const completedAt = fixture.clock.now();
+    const legacyOutcome = legacyRankedOutcome(ATTEMPT_A, completedAt, 80);
+    legacy.raw
+      .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+      .run(ATHLETE_A, completedAt);
+    legacy.raw
+      .prepare(
+        "INSERT INTO calibration_sessions (id, athlete_id, nonce, challenge_id, challenge_version, state, issued_at, expires_at, consumed_at) VALUES (?, ?, ?, 'wall-pass', 1, 'consumed', ?, ?, ?)",
+      )
+      .run(
+        SESSION_A,
+        ATHLETE_A,
+        "a".repeat(43),
+        completedAt,
+        "2030-01-15T12:15:00.000Z",
+        completedAt,
+      );
+    legacy.raw
+      .prepare(
+        "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, processing_lease_id, processing_lease_expires_at, created_at, updated_at) VALUES (?, ?, 'verified', 'wall-pass', 1, ?, 'processing', 'active', ?, 1, ?, ?, ?, ?)",
+      )
+      .run(
+        ATTEMPT_A,
+        ATHLETE_A,
+        SESSION_A,
+        JSON.stringify({
+          id: "media-a",
+          contentType: "video/mp4",
+          bytes: 10,
+          deleteAt: "2030-01-16T12:00:00.000Z",
+        }),
+        LEASE_A,
+        "2030-01-15T12:05:00.000Z",
+        completedAt,
+        completedAt,
+      );
+    legacy.raw
+      .prepare(
+        "INSERT INTO terminal_results (id, attempt_id, lease_id, generation, terminal_state, outcome_json, completed_at, created_at, request_outcome_json) VALUES (?, ?, ?, 1, 'valid', ?, ?, ?, ?)",
+      )
+      .run(
+        "legacy-result",
+        ATTEMPT_A,
+        LEASE_A,
+        JSON.stringify(legacyOutcome),
+        completedAt,
+        completedAt,
+        JSON.stringify(legacyOutcome),
+      );
+    legacy.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    const repository = new SQLiteAttemptRepository({
+      database: upgraded,
+      clock: fixture.clock,
+      ids: new TestIds(ENTRY_A),
+    });
+    const candidate = rankedOutcome(ATTEMPT_A, completedAt, 80);
+    const duplicate = await repository.finalizeTerminalResult({
+      attemptId: ATTEMPT_A,
+      leaseId: LEASE_A,
+      generation: 1,
+      candidate,
+    });
+
+    expect(duplicate?.outcome).toEqual(legacyOutcome);
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT candidate_json FROM terminal_results WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({
+      candidate_json: expect.not.stringContaining("rankingSnapshot"),
+    });
+    await expect(
+      repository.finalizeTerminalResult({
+        attemptId: ATTEMPT_A,
+        leaseId: LEASE_A,
+        generation: 1,
+        candidate: rankedOutcome(ATTEMPT_A, completedAt, 81),
+      }),
+    ).rejects.toMatchObject({ code: "terminal_result_conflict" });
+    upgraded.close();
   });
 
   it("stores parsed receipts but activates only a current passed exact tuple", async () => {
@@ -1140,11 +1835,34 @@ describe("SQLiteAttemptRepository", () => {
     await fixture.policy.invalidateBenchmarkReceipt({
       receiptId: renewal.id,
       invalidatedAt: fixture.clock.now(),
-      reason: "benchmark revoked",
+      reason: "operator_revoked",
     });
     await expect(
       fixture.policy.getActiveCompetitivePolicy(policy),
     ).resolves.toBeNull();
+    await expect(
+      fixture.policy.invalidateBenchmarkReceipt({
+        receiptId: renewal.id,
+        invalidatedAt: fixture.clock.now(),
+        reason: "operator_revoked",
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      fixture.policy.invalidateBenchmarkReceipt({
+        receiptId: renewal.id,
+        invalidatedAt: "2030-01-31T00:00:01.000Z",
+        reason: "operator_revoked",
+      }),
+    ).rejects.toMatchObject({ code: "competitive_policy_conflict" });
+    await expect(
+      fixture.policy.invalidateBenchmarkReceipt({
+        receiptId: renewal.id,
+        invalidatedAt: "not-a-timestamp",
+        reason: "not-a-reason" as never,
+      }),
+    ).rejects.toMatchObject({
+      code: "competitive_policy_invalid_invalidation",
+    });
     await fixture.policy.deactivateCompetitivePolicy({ id: renewedPolicy.id });
   });
 
@@ -1246,6 +1964,30 @@ describe("SQLiteAttemptRepository", () => {
     await fixture.policy.storeBenchmarkReceipt(
       passingWorkflowBenchmarkReceiptFixture,
     );
+    expect(() =>
+      fixture.database.raw
+        .prepare(
+          "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .run(
+          passingWorkflowBenchmarkReceiptFixture.id,
+          "not-a-timestamp",
+          "operator_revoked",
+          now,
+        ),
+    ).toThrow();
+    expect(() =>
+      fixture.database.raw
+        .prepare(
+          "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .run(
+          passingWorkflowBenchmarkReceiptFixture.id,
+          now,
+          "not-a-reason",
+          now,
+        ),
+    ).toThrow();
     expect(() =>
       fixture.database.raw
         .prepare(

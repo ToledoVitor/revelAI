@@ -13,8 +13,6 @@ export type AttachmentRepository = Readonly<{
   rollbackMediaAttachment(
     input: Readonly<{
       attemptId: string;
-      athleteId: string;
-      mediaId: string;
       generation: number;
     }>,
   ): Promise<void>;
@@ -47,8 +45,6 @@ export class AttemptService {
     } catch (error) {
       await this.repository.rollbackMediaAttachment({
         attemptId: input.attemptId,
-        athleteId: input.athleteId,
-        mediaId: input.media.id,
         generation: job.generation,
       });
       if (error instanceof QueueUnavailableError) throw error;

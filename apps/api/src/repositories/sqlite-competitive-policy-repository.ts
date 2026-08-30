@@ -1,5 +1,9 @@
 import {
+  UtcIsoTimestampSchema,
+  WorkflowBenchmarkInvalidationReasonSchema,
   WorkflowBenchmarkReceiptSchema,
+  type UtcIsoTimestamp,
+  type WorkflowBenchmarkInvalidationReason,
   type WorkflowBenchmarkReceipt,
 } from "@revelai/contracts";
 import type { SqliteDatabase } from "../database/sqlite-database.js";
@@ -18,6 +22,7 @@ export class CompetitivePolicyRepositoryError extends Error {
       | "competitive_policy_receipt_not_approved"
       | "competitive_policy_receipt_mismatch"
       | "competitive_policy_conflict"
+      | "competitive_policy_invalid_invalidation"
       | "competitive_policy_persisted_data_corrupt",
   ) {
     super(code);
@@ -206,10 +211,17 @@ export class SQLiteCompetitivePolicyRepository
   public async invalidateBenchmarkReceipt(
     input: Readonly<{
       receiptId: string;
-      invalidatedAt: string;
-      reason: string;
+      invalidatedAt: UtcIsoTimestamp;
+      reason: WorkflowBenchmarkInvalidationReason;
     }>,
   ): Promise<void> {
+    if (
+      !UtcIsoTimestampSchema.safeParse(input.invalidatedAt).success ||
+      !WorkflowBenchmarkInvalidationReasonSchema.safeParse(input.reason).success
+    )
+      throw new CompetitivePolicyRepositoryError(
+        "competitive_policy_invalid_invalidation",
+      );
     await this.transaction(() => {
       const receipt = this.raw
         .prepare("SELECT id FROM workflow_benchmark_receipts WHERE id = ?")
@@ -218,9 +230,26 @@ export class SQLiteCompetitivePolicyRepository
         throw new CompetitivePolicyRepositoryError(
           "competitive_policy_receipt_not_found",
         );
+      const existing = this.raw
+        .prepare(
+          "SELECT invalidated_at, reason FROM workflow_benchmark_receipt_invalidations WHERE receipt_id = ?",
+        )
+        .get(input.receiptId) as
+        | { invalidated_at: string; reason: string }
+        | undefined;
+      if (existing) {
+        if (
+          existing.invalidated_at === input.invalidatedAt &&
+          existing.reason === input.reason
+        )
+          return;
+        throw new CompetitivePolicyRepositoryError(
+          "competitive_policy_conflict",
+        );
+      }
       this.raw
         .prepare(
-          "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(receipt_id) DO NOTHING",
+          "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, ?, ?)",
         )
         .run(
           input.receiptId,

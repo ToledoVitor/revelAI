@@ -1,4 +1,8 @@
-import type { WorkflowBenchmarkReceipt } from "@revelai/contracts";
+import type {
+  UtcIsoTimestamp,
+  WorkflowBenchmarkInvalidationReason,
+  WorkflowBenchmarkReceipt,
+} from "@revelai/contracts";
 
 export type CompetitivePolicyTuple = Readonly<{
   modelBundleId: string;
@@ -26,8 +30,8 @@ export interface CompetitivePolicyRepository {
   invalidateBenchmarkReceipt(
     input: Readonly<{
       receiptId: string;
-      invalidatedAt: string;
-      reason: string;
+      invalidatedAt: UtcIsoTimestamp;
+      reason: WorkflowBenchmarkInvalidationReason;
     }>,
   ): Promise<void>;
   getActiveCompetitivePolicy(

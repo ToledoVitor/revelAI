@@ -135,33 +135,26 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     return this.transaction(() => {
       const row = this.raw
         .prepare(
-          "SELECT id, nonce, state, issued_at, expires_at FROM calibration_sessions WHERE id = ? AND athlete_id = ?",
+          "SELECT id, athlete_id, nonce, challenge_id, challenge_version, state, issued_at, expires_at, ready_at, consumed_at FROM calibration_sessions WHERE id = ? AND athlete_id = ?",
         )
-        .get(input.id, input.athleteId) as
-        | {
-            id: string;
-            nonce: string;
-            state: "issued" | "ready" | "consumed" | "expired";
-            issued_at: string;
-            expires_at: string;
-          }
-        | undefined;
+        .get(input.id, input.athleteId);
       if (!row) return null;
-      if (row.expires_at <= this.clock.now()) {
+      const session = parseCalibrationRow(row);
+      if (session.expiresAt <= this.clock.now()) {
         this.raw
           .prepare(
             "UPDATE calibration_sessions SET state = 'expired' WHERE id = ? AND state IN ('issued', 'ready')",
           )
-          .run(row.id);
+          .run(session.id);
         return null;
       }
-      if (row.state !== "issued" && row.state !== "ready") return null;
+      if (session.state !== "issued" && session.state !== "ready") return null;
       return calibrationSession(
-        row.id,
-        row.nonce,
-        row.issued_at,
-        row.expires_at,
-        row.state,
+        session.id,
+        session.nonce,
+        session.issuedAt,
+        session.expiresAt,
+        session.state,
       );
     });
   }
@@ -182,14 +175,14 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     await this.transaction(() => {
       const row = this.raw
         .prepare(
-          "SELECT athlete_id, state, expires_at FROM calibration_sessions WHERE id = ?",
+          "SELECT id, athlete_id, nonce, challenge_id, challenge_version, state, issued_at, expires_at, ready_at, consumed_at FROM calibration_sessions WHERE id = ?",
         )
-        .get(input.id) as
-        | { athlete_id: string; state: string; expires_at: string }
-        | undefined;
-      if (!row || row.athlete_id !== input.athleteId)
+        .get(input.id);
+      if (!row) throw new RepositoryError("calibration_session_not_found");
+      const session = parseCalibrationRow(row);
+      if (session.athleteId !== input.athleteId)
         throw new RepositoryError("calibration_session_not_found");
-      if (row.expires_at <= this.clock.now()) {
+      if (session.expiresAt <= this.clock.now()) {
         this.raw
           .prepare(
             "UPDATE calibration_sessions SET state = 'expired' WHERE id = ? AND state IN ('issued', 'ready')",
@@ -197,9 +190,9 @@ export class SQLiteAttemptRepository implements AttemptRepository {
           .run(input.id);
         throw new RepositoryError("calibration_session_expired");
       }
-      if (row.state === "consumed")
+      if (session.state === "consumed")
         throw new RepositoryError("calibration_session_consumed");
-      if (row.state !== "issued")
+      if (session.state !== "issued")
         throw new RepositoryError("calibration_session_not_ready");
       this.raw
         .prepare(
@@ -337,19 +330,20 @@ export class SQLiteAttemptRepository implements AttemptRepository {
   public async rollbackMediaAttachment(
     input: Readonly<{
       attemptId: string;
-      athleteId: string;
-      mediaId: string;
       generation: number;
     }>,
   ): Promise<void> {
     await this.transaction(() => {
-      const row = this.selectScopedAttempt(input.attemptId, input.athleteId);
+      const row = this.raw
+        .prepare(
+          "SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version, a.status, a.deletion_state, a.media_json, a.processing_generation, a.processing_lease_id, a.processing_lease_expires_at, a.created_at, tr.outcome_json FROM attempts a LEFT JOIN terminal_results tr ON tr.attempt_id = a.id WHERE a.id = ? AND a.deletion_state = 'active'",
+        )
+        .get(input.attemptId) as AttemptRow | undefined;
       const attempt = row ? parseAttemptRow(row) : null;
       if (
         !row ||
         !attempt ||
         !attempt.media ||
-        attempt.media.id !== input.mediaId ||
         attempt.status !== "uploaded" ||
         row.processing_generation !== input.generation
       )
@@ -357,14 +351,14 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       const now = this.clock.now();
       this.raw
         .prepare(
-          "UPDATE attempts SET media_json = NULL, status = 'awaiting-upload', updated_at = ? WHERE id = ? AND athlete_id = ? AND status = 'uploaded' AND processing_generation = ? AND deletion_state = 'active'",
+          "UPDATE attempts SET media_json = NULL, status = 'awaiting-upload', updated_at = ? WHERE id = ? AND status = 'uploaded' AND processing_generation = ? AND deletion_state = 'active'",
         )
-        .run(now, input.attemptId, input.athleteId, input.generation);
+        .run(now, input.attemptId, input.generation);
       this.raw
         .prepare(
           "DELETE FROM media_retention_records WHERE media_id = ? AND attempt_id = ?",
         )
-        .run(input.mediaId, input.attemptId);
+        .run(attempt.media.id, input.attemptId);
       this.event(input.attemptId, input.generation, "media-rolled-back", now);
     });
   }
@@ -375,12 +369,13 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     return this.transaction(() => {
       const row = this.raw
         .prepare(
-          "SELECT id, status, deletion_state, processing_generation, processing_lease_expires_at FROM attempts WHERE id = ?",
+          "SELECT id, mode, status, deletion_state, processing_generation, processing_lease_expires_at FROM attempts WHERE id = ?",
         )
         .get(job.attemptId) as
         | Pick<
             AttemptRow,
             | "id"
+            | "mode"
             | "status"
             | "deletion_state"
             | "processing_generation"
@@ -406,7 +401,11 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         .run(leaseId, expiresAt, now, job.attemptId, job.generation, now);
       if (update.changes !== 1) return null;
       this.event(job.attemptId, job.generation, "processing-claimed", now);
-      return Object.freeze({ leaseId, generation: job.generation });
+      return Object.freeze({
+        leaseId,
+        generation: job.generation,
+        mode: row.mode,
+      });
     });
   }
 
@@ -689,22 +688,16 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     input: Extract<CreateAttemptInput, { mode: "verified" }>,
     now: string,
   ): void {
-    const session = this.raw
+    const row = this.raw
       .prepare(
-        "SELECT athlete_id, challenge_id, challenge_version, state, expires_at FROM calibration_sessions WHERE id = ?",
+        "SELECT id, athlete_id, nonce, challenge_id, challenge_version, state, issued_at, expires_at, ready_at, consumed_at FROM calibration_sessions WHERE id = ?",
       )
-      .get(input.calibrationSessionId) as
-      | {
-          athlete_id: string;
-          challenge_id: string;
-          challenge_version: number;
-          state: string;
-          expires_at: string;
-        }
-      | undefined;
-    if (!session || session.athlete_id !== athleteId)
+      .get(input.calibrationSessionId);
+    if (!row) throw new RepositoryError("calibration_session_not_found");
+    const session = parseCalibrationRow(row);
+    if (session.athleteId !== athleteId)
       throw new RepositoryError("calibration_session_not_found");
-    if (session.expires_at <= now) {
+    if (session.expiresAt <= now) {
       this.raw
         .prepare(
           "UPDATE calibration_sessions SET state = 'expired' WHERE id = ? AND state IN ('issued', 'ready')",
@@ -715,8 +708,8 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     if (session.state === "consumed")
       throw new RepositoryError("calibration_session_consumed");
     if (
-      session.challenge_id !== input.challengeId ||
-      session.challenge_version !== input.challengeVersion
+      session.challengeId !== input.challengeId ||
+      session.challengeVersion !== input.challengeVersion
     )
       throw new RepositoryError("calibration_session_challenge_mismatch");
     if (session.state !== "ready")
@@ -823,6 +816,74 @@ function parseAttemptRow(row: unknown): AttemptRecord {
     media:
       value.media_json === null ? null : parseStoredMedia(value.media_json),
   });
+}
+
+type PersistedCalibrationSession = Readonly<{
+  id: string;
+  athleteId: string;
+  nonce: string;
+  challengeId: "wall-pass";
+  challengeVersion: 1;
+  state: "issued" | "ready" | "consumed" | "expired";
+  issuedAt: string;
+  expiresAt: string;
+}>;
+
+function parseCalibrationRow(row: unknown): PersistedCalibrationSession {
+  const value = asRecord(row);
+  const requiredStrings = [
+    "id",
+    "athlete_id",
+    "nonce",
+    "challenge_id",
+    "state",
+    "issued_at",
+    "expires_at",
+  ];
+  if (requiredStrings.some((key) => typeof value[key] !== "string"))
+    throw new RepositoryError("persisted_data_corrupt");
+  if (
+    !isUuid(value.id) ||
+    !isUuid(value.athlete_id) ||
+    !/^[A-Za-z0-9_-]{43}$/.test(value.nonce as string) ||
+    value.challenge_id !== "wall-pass" ||
+    value.challenge_version !== 1 ||
+    (value.state !== "issued" &&
+      value.state !== "ready" &&
+      value.state !== "consumed" &&
+      value.state !== "expired") ||
+    !UtcIsoTimestampSchema.safeParse(value.issued_at).success ||
+    !UtcIsoTimestampSchema.safeParse(value.expires_at).success ||
+    !isNullableString(value.ready_at) ||
+    !isNullableString(value.consumed_at) ||
+    (value.ready_at !== null &&
+      !UtcIsoTimestampSchema.safeParse(value.ready_at).success) ||
+    (value.consumed_at !== null &&
+      !UtcIsoTimestampSchema.safeParse(value.consumed_at).success) ||
+    Date.parse(value.expires_at as string) -
+      Date.parse(value.issued_at as string) !==
+      15 * 60_000
+  )
+    throw new RepositoryError("persisted_data_corrupt");
+  return Object.freeze({
+    id: value.id as string,
+    athleteId: value.athlete_id as string,
+    nonce: value.nonce as string,
+    challengeId: "wall-pass",
+    challengeVersion: 1,
+    state: value.state as PersistedCalibrationSession["state"],
+    issuedAt: value.issued_at as string,
+    expiresAt: value.expires_at as string,
+  });
+}
+
+function isUuid(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+  );
 }
 
 function parseStoredMedia(value: string): StoredMedia {

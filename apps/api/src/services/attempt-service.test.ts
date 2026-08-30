@@ -16,6 +16,7 @@ const media: StoredMedia = {
 
 class AttachmentStore {
   public attached: StoredMedia | null = null;
+  public rollbackInput: unknown = null;
 
   public async attachValidatedMedia(
     input: Readonly<{
@@ -28,7 +29,8 @@ class AttachmentStore {
     return { attemptId: input.attemptId, generation: 1 };
   }
 
-  public async rollbackMediaAttachment(): Promise<void> {
+  public async rollbackMediaAttachment(input: unknown): Promise<void> {
+    this.rollbackInput = input;
     this.attached = null;
   }
 }
@@ -51,6 +53,7 @@ describe("AttemptService", () => {
       }),
     ).rejects.toBeInstanceOf(QueueUnavailableError);
     expect(store.attached).toBeNull();
+    expect(store.rollbackInput).toBeNull();
   });
 
   it("rolls an attachment back when the separate queue rejects enqueue", async () => {
@@ -72,6 +75,10 @@ describe("AttemptService", () => {
       }),
     ).rejects.toBeInstanceOf(QueueUnavailableError);
     expect(store.attached).toBeNull();
+    expect(store.rollbackInput).toEqual({
+      attemptId: "attempt-a",
+      generation: 1,
+    });
   });
 
   it("preserves an attachment repository failure instead of misreporting it as queue failure", async () => {

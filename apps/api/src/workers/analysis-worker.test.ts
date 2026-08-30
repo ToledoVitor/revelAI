@@ -3,7 +3,10 @@ import {
   InMemoryAnalysisQueue,
   type QueueScheduler,
 } from "../queue/in-memory-analysis-queue.js";
-import { AnalysisWorker } from "./analysis-worker.js";
+import {
+  AnalysisWorker,
+  ExpectedProcessingFailure,
+} from "./analysis-worker.js";
 import type { TerminalCandidate } from "../repositories/attempt-repository.js";
 
 class ManualScheduler implements QueueScheduler {
@@ -37,7 +40,7 @@ describe("AnalysisWorker", () => {
       claimProcessing: async () => {
         if (claimed) return null;
         claimed = true;
-        return { leaseId: "lease-a", generation: 1 };
+        return { leaseId: "lease-a", generation: 1, mode: "free" as const };
       },
       releaseProcessingClaim: async () => true,
       finalizeTerminalResult: async (
@@ -73,7 +76,11 @@ describe("AnalysisWorker", () => {
     const worker = new AnalysisWorker({
       queue,
       repository: {
-        claimProcessing: async () => ({ leaseId: "lease-a", generation: 1 }),
+        claimProcessing: async () => ({
+          leaseId: "lease-a",
+          generation: 1,
+          mode: "free",
+        }),
         releaseProcessingClaim: async () => {
           released += 1;
           return true;
@@ -100,5 +107,116 @@ describe("AnalysisWorker", () => {
       released: 1,
       finalized: 1,
     });
+  });
+
+  it("finalizes a classified processor failure without redelivery", async () => {
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    let released = 0;
+    let finalized = 0;
+    const worker = new AnalysisWorker({
+      queue,
+      repository: {
+        claimProcessing: async () => ({
+          leaseId: "lease-a",
+          generation: 1,
+          mode: "free",
+        }),
+        releaseProcessingClaim: async () => {
+          released += 1;
+          return true;
+        },
+        finalizeTerminalResult: async () => {
+          finalized += 1;
+          return null;
+        },
+      },
+      process: async () => {
+        throw new ExpectedProcessingFailure(outcome);
+      },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue({ attemptId: "attempt-a", generation: 1 });
+    await scheduler.runAll();
+    stop();
+
+    expect({ released, finalized, scheduled: scheduler.tasks.length }).toEqual({
+      released: 0,
+      finalized: 1,
+      scheduled: 0,
+    });
+  });
+
+  it("bounds permanent unexpected failures with yielded retries and one terminal failure", async () => {
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    let processCalls = 0;
+    let releases = 0;
+    const finalized: TerminalCandidate[] = [];
+    const backoffAttempts: number[] = [];
+    const worker = new AnalysisWorker({
+      queue,
+      repository: {
+        claimProcessing: async () => ({
+          leaseId: `lease-${processCalls}`,
+          generation: 1,
+          mode: "free",
+        }),
+        releaseProcessingClaim: async () => {
+          releases += 1;
+          return true;
+        },
+        finalizeTerminalResult: async (input) => {
+          finalized.push(input.candidate);
+          return null;
+        },
+      },
+      process: async () => {
+        processCalls += 1;
+        throw new Error("permanent processor error");
+      },
+      unexpectedRetryPolicy: {
+        maxAttempts: 3,
+        wait: async (attempt) => {
+          backoffAttempts.push(attempt);
+        },
+        terminalCandidate: ({ job, claim }) => ({
+          state: "failed",
+          attemptId: job.attemptId,
+          mode: claim.mode,
+          code: "analysis_internal_error",
+          message: "A análise não pôde ser concluída.",
+          retryable: false,
+        }),
+      },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue({ attemptId: "attempt-a", generation: 1 });
+    await scheduler.runAll();
+    stop();
+
+    expect({
+      processCalls,
+      releases,
+      backoffAttempts,
+      scheduled: scheduler.tasks.length,
+    }).toEqual({
+      processCalls: 3,
+      releases: 2,
+      backoffAttempts: [1, 2],
+      scheduled: 0,
+    });
+    expect(finalized).toEqual([
+      {
+        state: "failed",
+        attemptId: "attempt-a",
+        mode: "free",
+        code: "analysis_internal_error",
+        message: "A análise não pôde ser concluída.",
+        retryable: false,
+      },
+    ]);
   });
 });

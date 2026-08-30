@@ -172,6 +172,12 @@ const BenchmarkRunsSchema = z.tuple([
   BenchmarkRunSchema,
 ]);
 
+export const WorkflowBenchmarkInvalidationReasonSchema = z.enum([
+  "tuple_changed",
+  "manifest_set_changed",
+  "operator_revoked",
+]);
+
 export const WorkflowBenchmarkReceiptSchema = z
   .object({
     schemaVersion: z.literal("workflow-benchmark-receipt-v1"),
@@ -216,9 +222,7 @@ export const WorkflowBenchmarkReceiptSchema = z
     validUntil: UtcIsoTimestampSchema,
     status: z.enum(["passed", "failed"]),
     invalidatedAt: UtcIsoTimestampSchema.nullable(),
-    invalidationReason: z
-      .enum(["tuple_changed", "manifest_set_changed", "operator_revoked"])
-      .nullable(),
+    invalidationReason: WorkflowBenchmarkInvalidationReasonSchema.nullable(),
     receiptSha256: Sha256Schema,
   })
   .strict()
@@ -413,6 +417,9 @@ export const missingWorkflowBenchmarkReceiptFixture = undefined;
 
 export type WorkflowBenchmarkReceipt = z.infer<
   typeof WorkflowBenchmarkReceiptSchema
+>;
+export type WorkflowBenchmarkInvalidationReason = z.infer<
+  typeof WorkflowBenchmarkInvalidationReasonSchema
 >;
 export type WorkflowBenchmarkReceiptPayload = DeepReadonly<
   Omit<WorkflowBenchmarkReceipt, "receiptSha256">

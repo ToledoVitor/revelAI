@@ -1,6 +1,10 @@
 import Database from "better-sqlite3";
 
-type Migration = Readonly<{ version: number; sql: string }>;
+type Migration = Readonly<{
+  version: number;
+  sql: string;
+  afterApply?: (raw: Database.Database) => void;
+}>;
 
 export type SqliteDatabase = Readonly<{
   raw: Database.Database;
@@ -317,17 +321,65 @@ const migrations: readonly Migration[] = [
         ON approved_competitive_model_policies(model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, challenge_id, challenge_version, rule_version)
         WHERE active = 1;
     `,
+    afterApply: canonicalizeLegacyTerminalCandidates,
+  },
+  {
+    version: 6,
+    sql: `
+      CREATE TABLE workflow_benchmark_receipt_invalidations_v6 (
+        receipt_id TEXT PRIMARY KEY NOT NULL REFERENCES workflow_benchmark_receipts(id),
+        invalidated_at TEXT NOT NULL CHECK (
+          invalidated_at GLOB '????-??-??T??:??:??.???Z'
+          AND strftime('%Y-%m-%dT%H:%M:%fZ', invalidated_at) IS NOT NULL
+          AND strftime('%Y-%m-%dT%H:%M:%fZ', invalidated_at) = invalidated_at
+        ),
+        reason TEXT NOT NULL CHECK (reason IN ('tuple_changed', 'manifest_set_changed', 'operator_revoked')),
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO workflow_benchmark_receipt_invalidations_v6
+        SELECT
+          receipt_id,
+          CASE
+            WHEN strftime('%Y-%m-%dT%H:%M:%fZ', invalidated_at) = invalidated_at
+              THEN invalidated_at
+            ELSE created_at
+          END,
+          CASE
+            WHEN reason IN ('tuple_changed', 'manifest_set_changed', 'operator_revoked')
+              THEN reason
+            ELSE 'operator_revoked'
+          END,
+          created_at
+        FROM workflow_benchmark_receipt_invalidations;
+      DROP TABLE workflow_benchmark_receipt_invalidations;
+      ALTER TABLE workflow_benchmark_receipt_invalidations_v6 RENAME TO workflow_benchmark_receipt_invalidations;
+    `,
   },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {
+  return openSqliteDatabaseInternal(filename);
+}
+
+/** Test-only fixture helper for proving an upgrade from a historical schema. */
+export function openSqliteDatabaseAtVersionForTest(
+  filename: string,
+  migrationVersion: number,
+): SqliteDatabase {
+  return openSqliteDatabaseInternal(filename, migrationVersion);
+}
+
+function openSqliteDatabaseInternal(
+  filename: string,
+  migrationVersion?: number,
+): SqliteDatabase {
   let raw: Database.Database | undefined;
   try {
     raw = new Database(filename);
     raw.pragma("foreign_keys = ON");
     raw.pragma("journal_mode = WAL");
     raw.pragma("busy_timeout = 5000");
-    applyMigrations(raw);
+    applyMigrations(raw, migrationVersion);
   } catch (error) {
     raw?.close();
     throw error;
@@ -335,12 +387,15 @@ export function openSqliteDatabase(filename: string): SqliteDatabase {
 
   return Object.freeze({
     raw,
-    reopen: () => openSqliteDatabase(filename),
+    reopen: () => openSqliteDatabaseInternal(filename, migrationVersion),
     close: () => raw.close(),
   });
 }
 
-function applyMigrations(raw: Database.Database): void {
+function applyMigrations(
+  raw: Database.Database,
+  migrationVersion?: number,
+): void {
   raw.exec(
     "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY NOT NULL, applied_at TEXT NOT NULL)",
   );
@@ -352,10 +407,13 @@ function applyMigrations(raw: Database.Database): void {
   );
 
   for (const migration of migrations) {
+    if (migrationVersion !== undefined && migration.version > migrationVersion)
+      break;
     if (applied.has(migration.version)) continue;
     raw.exec("BEGIN IMMEDIATE");
     try {
       raw.exec(migration.sql);
+      migration.afterApply?.(raw);
       raw
         .prepare(
           "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
@@ -367,4 +425,60 @@ function applyMigrations(raw: Database.Database): void {
       throw error;
     }
   }
+}
+
+function canonicalizeLegacyTerminalCandidates(raw: Database.Database): void {
+  const rows = raw
+    .prepare("SELECT id, candidate_json FROM terminal_results")
+    .all() as readonly Readonly<{ id: string; candidate_json: string }>[];
+  const update = raw.prepare(
+    "UPDATE terminal_results SET candidate_json = ? WHERE id = ?",
+  );
+  for (const row of rows) {
+    const canonical = canonicalizeLegacyTerminalCandidate(row.candidate_json);
+    if (canonical !== row.candidate_json) update.run(canonical, row.id);
+  }
+}
+
+function canonicalizeLegacyTerminalCandidate(value: string): string {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const result = parsed.result;
+    if (
+      parsed.state !== "valid" ||
+      !result ||
+      typeof result !== "object" ||
+      Array.isArray(result)
+    )
+      return value;
+    const verified = result as Record<string, unknown>;
+    if (
+      verified.kind !== "verified-result" ||
+      verified.competitiveStatus !== "ranked" ||
+      !("rankingSnapshot" in verified)
+    )
+      return value;
+    const { rankingSnapshot: _legacySnapshot, ...candidateResult } = verified;
+    void _legacySnapshot;
+    return canonicalJson({ ...parsed, result: candidateResult });
+  } catch {
+    return value;
+  }
+}
+
+function canonicalJson(value: unknown): string {
+  if (
+    value === null ||
+    typeof value === "boolean" ||
+    typeof value === "number" ||
+    typeof value === "string"
+  )
+    return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object")
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
+      .join(",")}}`;
+  throw new Error("Cannot canonicalize non-JSON terminal candidate");
 }
