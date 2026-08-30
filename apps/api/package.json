@@ -1,0 +1,22 @@
+{
+  "name": "@revelai/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json",
+    "lint": "eslint src",
+    "typecheck": "tsc --project tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@revelai/contracts": "workspace:*",
+    "@revelai/domain": "workspace:*",
+    "better-sqlite3": "13.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}
