@@ -2144,6 +2144,108 @@ describe("SQLiteAttemptRepository", () => {
     ).toMatchObject({ count: 0 });
   });
 
+  it("saturates a persisted maximum recovery budget into one durable terminal outcome", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const initialClaim = (await fixture.repository.claimProcessing(job))!;
+    fixture.database.raw
+      .prepare(
+        "INSERT INTO processing_recovery_records (attempt_id, generation, retry_attempts, state, created_at, updated_at) VALUES (?, ?, ?, 'retrying', ?, ?)",
+      )
+      .run(
+        ATTEMPT_A,
+        initialClaim.generation,
+        Number.MAX_SAFE_INTEGER,
+        fixture.clock.now(),
+        fixture.clock.now(),
+      );
+    await fixture.repository.releaseProcessingClaim({
+      attemptId: ATTEMPT_A,
+      leaseId: initialClaim.leaseId,
+      generation: initialClaim.generation,
+    });
+
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    const worker = new AnalysisWorker({
+      queue,
+      repository: fixture.repository,
+      process: async () => {
+        throw new Error("processor fault after exhausted recovery budget");
+      },
+      unexpectedRetryPolicy: {
+        maxAttempts: 1,
+        delayMilliseconds: 0,
+        terminalCandidate: ({ job: failedJob, claim }) => ({
+          state: "failed",
+          attemptId: failedJob.attemptId,
+          mode: claim.mode,
+          code: "analysis_internal_error",
+          message: FailureMessageByCode.analysis_internal_error,
+          retryable: false,
+        }),
+      },
+      retryWaiter: { wait: async () => undefined },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue(job);
+    await scheduler.runAll();
+    stop();
+
+    expect(scheduler.tasks).toHaveLength(0);
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({
+      status: "failed",
+      outcome: { code: "analysis_internal_error" },
+    });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({ count: 1 });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT status, processing_lease_id AS leaseId FROM attempts WHERE id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toEqual({ status: "failed", leaseId: null });
+
+    const reopened = fixture.openSecondaryDatabase();
+    const resumed = new SQLiteAttemptRepository({
+      database: reopened,
+      clock: fixture.clock,
+      ids: new TestIds(LEASE_B),
+    });
+    expect(
+      await resumed.getAttempt({ attemptId: ATTEMPT_A, athleteId: ATHLETE_A }),
+    ).toMatchObject({
+      status: "failed",
+      outcome: { code: "analysis_internal_error" },
+    });
+    expect(await resumed.claimProcessing(job)).toBeNull();
+  });
+
   it("persists recovery attempts by attachment generation across repository instances", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,

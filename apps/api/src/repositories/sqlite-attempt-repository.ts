@@ -26,6 +26,8 @@ import type {
   TerminalCandidate,
 } from "./attempt-repository.js";
 
+const MAX_RECOVERY_ATTEMPTS = Number.MAX_SAFE_INTEGER;
+
 type AttemptRow = Readonly<{
   id: string;
   athlete_id: string;
@@ -468,6 +470,25 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       )
         return Object.freeze({ kind: "lost-claim" });
       const now = this.clock.now();
+      const existingRecovery = this.raw
+        .prepare(
+          "SELECT retry_attempts FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
+        )
+        .get(input.attemptId, input.generation) as
+        | { retry_attempts: number }
+        | undefined;
+      if (
+        existingRecovery &&
+        !Number.isSafeInteger(existingRecovery.retry_attempts)
+      )
+        throw new RepositoryError("persisted_data_corrupt");
+      if (existingRecovery?.retry_attempts === MAX_RECOVERY_ATTEMPTS) {
+        this.event(input.attemptId, input.generation, "processing-failed", now);
+        return Object.freeze({
+          kind: "recorded",
+          retryAttempt: MAX_RECOVERY_ATTEMPTS,
+        });
+      }
       this.raw
         .prepare(
           `INSERT INTO processing_recovery_records
@@ -655,7 +676,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         );
       this.raw
         .prepare(
-          "UPDATE attempts SET status = ?, updated_at = ? WHERE id = ? AND deletion_state = 'active' AND status = 'processing' AND processing_generation = ? AND processing_lease_id = ?",
+          "UPDATE attempts SET status = ?, processing_lease_id = NULL, processing_lease_expires_at = NULL, updated_at = ? WHERE id = ? AND deletion_state = 'active' AND status = 'processing' AND processing_generation = ? AND processing_lease_id = ?",
         )
         .run(
           outcome.state,
