@@ -1995,6 +1995,155 @@ describe("SQLiteAttemptRepository", () => {
     ).toMatchObject({ count: 1 });
   });
 
+  it("reclaims exact expiry at maxAttempts one and terminalizes only a later processing failure", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    let calls = 0;
+    const worker = new AnalysisWorker({
+      queue,
+      repository: fixture.repository,
+      process: async () => {
+        calls += 1;
+        if (calls === 1) {
+          fixture.clock.advance(5 * 60_000);
+          return freeOutcome(ATTEMPT_A, fixture.clock.now());
+        }
+        throw new Error("actual processing failure after reclaim");
+      },
+      unexpectedRetryPolicy: {
+        maxAttempts: 1,
+        delayMilliseconds: 0,
+        terminalCandidate: ({ job: failedJob, claim }) => ({
+          state: "failed",
+          attemptId: failedJob.attemptId,
+          mode: claim.mode,
+          code: "analysis_internal_error",
+          message: FailureMessageByCode.analysis_internal_error,
+          retryable: false,
+        }),
+      },
+      retryWaiter: { wait: async () => undefined },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue(job);
+    await scheduler.runAll();
+    stop();
+
+    expect({ calls, scheduled: scheduler.tasks.length }).toEqual({
+      calls: 2,
+      scheduled: 0,
+    });
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({
+      status: "failed",
+      outcome: { code: "analysis_internal_error" },
+    });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM processing_recovery_records WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({ count: 0 });
+  });
+
+  it("does not consume a pre-seeded at-limit recovery budget on exact lease expiry", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const preseedClaim = (await fixture.repository.claimProcessing(job))!;
+    await fixture.repository.recordProcessingFailure({
+      attemptId: ATTEMPT_A,
+      leaseId: preseedClaim.leaseId,
+      generation: preseedClaim.generation,
+    });
+    await fixture.repository.releaseProcessingClaim({
+      attemptId: ATTEMPT_A,
+      leaseId: preseedClaim.leaseId,
+      generation: preseedClaim.generation,
+    });
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    let calls = 0;
+    const worker = new AnalysisWorker({
+      queue,
+      repository: fixture.repository,
+      process: async () => {
+        calls += 1;
+        if (calls === 1) fixture.clock.advance(5 * 60_000);
+        return freeOutcome(ATTEMPT_A, fixture.clock.now());
+      },
+      unexpectedRetryPolicy: {
+        maxAttempts: 1,
+        delayMilliseconds: 0,
+        terminalCandidate: ({ job: failedJob, claim }) => ({
+          state: "failed",
+          attemptId: failedJob.attemptId,
+          mode: claim.mode,
+          code: "analysis_internal_error",
+          message: FailureMessageByCode.analysis_internal_error,
+          retryable: false,
+        }),
+      },
+      retryWaiter: { wait: async () => undefined },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue(job);
+    await scheduler.runAll();
+    stop();
+
+    expect({ calls, scheduled: scheduler.tasks.length }).toEqual({
+      calls: 2,
+      scheduled: 0,
+    });
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({ status: "valid", outcome: { state: "valid" } });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM processing_recovery_records WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({ count: 0 });
+  });
+
   it("persists recovery attempts by attachment generation across repository instances", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
@@ -2385,7 +2534,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 8 });
+    ).toMatchObject({ count: 9 });
     reopened.close();
     upgraded.close();
   });
@@ -2463,7 +2612,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 8 });
+    ).toMatchObject({ count: 9 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -2473,6 +2622,186 @@ describe("SQLiteAttemptRepository", () => {
           "SELECT COUNT(*) AS count FROM workflow_benchmark_receipt_invalidation_quarantine",
         )
         .get(),
+    ).toMatchObject({ count: 1 });
+    reopened.close();
+  });
+
+  it("upgrades an already-applied v7/v8 database with quarantine, policy, and invalidation invariants", async () => {
+    const filename = join(
+      fixture.directory,
+      "legacy-v8-without-quarantine.sqlite",
+    );
+    const legacy = openSqliteDatabaseAtVersionForTest(filename, 8);
+    const validReceipt = passingWorkflowBenchmarkReceiptFixture;
+    const invalidReceipt = renewedReceipt();
+    const legacyPolicy = new SQLiteCompetitivePolicyRepository({
+      database: legacy,
+      clock: fixture.clock,
+    });
+    await legacyPolicy.storeBenchmarkReceipt(validReceipt);
+    await legacyPolicy.storeBenchmarkReceipt(invalidReceipt);
+    legacy.raw.exec(
+      "DROP TABLE workflow_benchmark_receipt_invalidation_quarantine",
+    );
+    const insertPolicy = legacy.raw.prepare(
+      "INSERT INTO approved_competitive_model_policies (id, receipt_id, receipt_sha256, receipt_schema_version, model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, challenge_id, challenge_version, rule_version, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'wall-pass', 1, 'wall-pass-v1-score-1', 1, ?)",
+    );
+    insertPolicy.run(
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      validReceipt.id,
+      validReceipt.receiptSha256,
+      validReceipt.schemaVersion,
+      validReceipt.workflow.modelBundleId,
+      validReceipt.workflow.workflowId,
+      validReceipt.workflow.workflowVersion,
+      validReceipt.workflow.providerVersion,
+      "valid-evidence-v1",
+      fixture.clock.now(),
+    );
+    insertPolicy.run(
+      "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      invalidReceipt.id,
+      invalidReceipt.receiptSha256,
+      invalidReceipt.schemaVersion,
+      invalidReceipt.workflow.modelBundleId,
+      invalidReceipt.workflow.workflowId,
+      invalidReceipt.workflow.workflowVersion,
+      invalidReceipt.workflow.providerVersion,
+      "invalid-evidence-v1",
+      fixture.clock.now(),
+    );
+    legacy.raw.pragma("ignore_check_constraints = ON");
+    legacy.raw
+      .prepare(
+        "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, '2030-01-15T24:00:00.000Z', 'operator_revoked', ?)",
+      )
+      .run(invalidReceipt.id, fixture.clock.now());
+    legacy.raw.pragma("ignore_check_constraints = OFF");
+    legacy.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    const policy = new SQLiteCompetitivePolicyRepository({
+      database: upgraded,
+      clock: fixture.clock,
+    });
+    const validTuple = {
+      modelBundleId: validReceipt.workflow.modelBundleId,
+      workflowId: validReceipt.workflow.workflowId,
+      workflowVersion: validReceipt.workflow.workflowVersion,
+      providerVersion: validReceipt.workflow.providerVersion,
+      calibrationEvidenceVersion: "valid-evidence-v1",
+      challengeId: "wall-pass" as const,
+      challengeVersion: 1 as const,
+      ruleVersion: "wall-pass-v1-score-1" as const,
+    };
+    const invalidTuple = {
+      modelBundleId: invalidReceipt.workflow.modelBundleId,
+      workflowId: invalidReceipt.workflow.workflowId,
+      workflowVersion: invalidReceipt.workflow.workflowVersion,
+      providerVersion: invalidReceipt.workflow.providerVersion,
+      calibrationEvidenceVersion: "invalid-evidence-v1",
+      challengeId: "wall-pass" as const,
+      challengeVersion: 1 as const,
+      ruleVersion: "wall-pass-v1-score-1" as const,
+    };
+
+    await policy.activateCompetitivePolicy({
+      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      receiptId: validReceipt.id,
+      receiptSha256: validReceipt.receiptSha256,
+      receiptSchemaVersion: validReceipt.schemaVersion,
+      ...validTuple,
+    });
+    await expect(
+      policy.getActiveCompetitivePolicy(validTuple),
+    ).resolves.toMatchObject({
+      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    });
+    await expect(
+      policy.getActiveCompetitivePolicy(invalidTuple),
+    ).resolves.toBeNull();
+    await expect(
+      policy.activateCompetitivePolicy({
+        id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        receiptId: invalidReceipt.id,
+        receiptSha256: invalidReceipt.receiptSha256,
+        receiptSchemaVersion: invalidReceipt.schemaVersion,
+        ...invalidTuple,
+      }),
+    ).rejects.toMatchObject({
+      code: "competitive_policy_receipt_not_approved",
+    });
+    await expect(
+      policy.invalidateBenchmarkReceipt({
+        receiptId: invalidReceipt.id,
+        invalidatedAt: "2030-01-16T00:00:00.000Z",
+        reason: "operator_revoked",
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      policy.invalidateBenchmarkReceipt({
+        receiptId: invalidReceipt.id,
+        invalidatedAt: "2030-01-16T00:00:01.000Z",
+        reason: "operator_revoked",
+      }),
+    ).rejects.toMatchObject({ code: "competitive_policy_conflict" });
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM workflow_benchmark_receipt_invalidations WHERE receipt_id = ?",
+        )
+        .get(invalidReceipt.id),
+    ).toMatchObject({ count: 0 });
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM workflow_benchmark_receipt_invalidation_quarantine WHERE receipt_id = ?",
+        )
+        .get(invalidReceipt.id),
+    ).toMatchObject({ count: 1 });
+    expect(
+      upgraded.raw
+        .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+        .get(),
+    ).toMatchObject({ count: 9 });
+    upgraded.close();
+
+    const reopened = openSqliteDatabase(filename);
+    const reopenedPolicy = new SQLiteCompetitivePolicyRepository({
+      database: reopened,
+      clock: fixture.clock,
+    });
+    await expect(
+      reopenedPolicy.invalidateBenchmarkReceipt({
+        receiptId: invalidReceipt.id,
+        invalidatedAt: "2030-01-16T00:00:00.000Z",
+        reason: "operator_revoked",
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      reopenedPolicy.invalidateBenchmarkReceipt({
+        receiptId: invalidReceipt.id,
+        invalidatedAt: "2030-01-16T00:00:01.000Z",
+        reason: "operator_revoked",
+      }),
+    ).rejects.toMatchObject({ code: "competitive_policy_conflict" });
+    expect(() =>
+      reopened.raw
+        .prepare(
+          "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, 'operator_revoked', ?)",
+        )
+        .run(
+          invalidReceipt.id,
+          "2030-01-16T00:00:00.000Z",
+          fixture.clock.now(),
+        ),
+    ).toThrow();
+    expect(
+      reopened.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM workflow_benchmark_receipt_invalidation_quarantine WHERE receipt_id = ?",
+        )
+        .get(invalidReceipt.id),
     ).toMatchObject({ count: 1 });
     reopened.close();
   });
@@ -2789,5 +3118,27 @@ describe("SQLiteAttemptRepository", () => {
           now,
         ),
     ).toThrow();
+  });
+
+  it("enforces safe integer recovery generations and retry counters in SQLite", async () => {
+    const now = fixture.clock.now();
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const insert = (generation: number, retryAttempts: number) =>
+      fixture.database.raw
+        .prepare(
+          "INSERT INTO processing_recovery_records (attempt_id, generation, retry_attempts, state, created_at, updated_at) VALUES (?, ?, ?, 'retrying', ?, ?)",
+        )
+        .run(ATTEMPT_A, generation, retryAttempts, now, now);
+
+    expect(() => insert(1.5, 0)).toThrow();
+    expect(() => insert(1, 0.5)).toThrow();
+    expect(() => insert(-1, 0)).toThrow();
+    expect(() => insert(1, -1)).toThrow();
+    expect(() => insert(9_007_199_254_740_992, 0)).toThrow();
+    expect(() => insert(1, 9_007_199_254_740_992)).toThrow();
   });
 });

@@ -435,6 +435,97 @@ const migrations: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 9,
+    sql: `
+      CREATE TABLE IF NOT EXISTS workflow_benchmark_receipt_invalidation_quarantine (
+        receipt_id TEXT PRIMARY KEY NOT NULL REFERENCES workflow_benchmark_receipts(id),
+        invalidated_at TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        quarantine_reason TEXT NOT NULL CHECK (quarantine_reason = 'invalid_v6_timestamp')
+      );
+      INSERT INTO workflow_benchmark_receipt_invalidation_quarantine
+        (receipt_id, invalidated_at, reason, created_at, quarantine_reason)
+        SELECT receipt_id, invalidated_at, reason, created_at, 'invalid_v6_timestamp'
+        FROM workflow_benchmark_receipt_invalidations
+        WHERE CASE
+          WHEN invalidated_at GLOB '????-??-??T??:??:??.???Z'
+            AND substr(invalidated_at, 6, 2) BETWEEN '01' AND '12'
+            AND substr(invalidated_at, 9, 2) BETWEEN '01' AND '31'
+            AND substr(invalidated_at, 12, 2) BETWEEN '00' AND '23'
+            AND strftime('%Y-%m-%dT%H:%M:%fZ', invalidated_at) IS NOT NULL
+            AND strftime('%Y-%m-%dT%H:%M:%fZ', invalidated_at) = invalidated_at
+            AND date(
+              substr(invalidated_at, 1, 8) || '01',
+              '+' || (CAST(substr(invalidated_at, 9, 2) AS INTEGER) - 1) || ' days'
+            ) = substr(invalidated_at, 1, 10)
+            THEN 1
+          ELSE 0
+        END = 0
+        ON CONFLICT(receipt_id) DO NOTHING;
+      DELETE FROM workflow_benchmark_receipt_invalidations
+      WHERE CASE
+        WHEN invalidated_at GLOB '????-??-??T??:??:??.???Z'
+          AND substr(invalidated_at, 6, 2) BETWEEN '01' AND '12'
+          AND substr(invalidated_at, 9, 2) BETWEEN '01' AND '31'
+          AND substr(invalidated_at, 12, 2) BETWEEN '00' AND '23'
+          AND strftime('%Y-%m-%dT%H:%M:%fZ', invalidated_at) IS NOT NULL
+          AND strftime('%Y-%m-%dT%H:%M:%fZ', invalidated_at) = invalidated_at
+          AND date(
+            substr(invalidated_at, 1, 8) || '01',
+            '+' || (CAST(substr(invalidated_at, 9, 2) AS INTEGER) - 1) || ' days'
+          ) = substr(invalidated_at, 1, 10)
+          THEN 1
+        ELSE 0
+      END = 0;
+
+      CREATE TABLE processing_recovery_records_v9 (
+        attempt_id TEXT NOT NULL REFERENCES attempts(id),
+        generation INTEGER NOT NULL CHECK (
+          typeof(generation) = 'integer'
+          AND generation BETWEEN 0 AND 9007199254740991
+        ),
+        retry_attempts INTEGER NOT NULL CHECK (
+          typeof(retry_attempts) = 'integer'
+          AND retry_attempts BETWEEN 0 AND 9007199254740991
+        ),
+        state TEXT NOT NULL CHECK (state IN ('retrying', 'dead-lettered')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (attempt_id, generation)
+      );
+      INSERT INTO processing_recovery_records_v9
+        (attempt_id, generation, retry_attempts, state, created_at, updated_at)
+        SELECT attempt_id, generation, retry_attempts, state, created_at, updated_at
+        FROM processing_recovery_records
+        WHERE typeof(generation) = 'integer'
+          AND generation BETWEEN 0 AND 9007199254740991
+          AND typeof(retry_attempts) = 'integer'
+          AND retry_attempts BETWEEN 0 AND 9007199254740991;
+      DROP TABLE processing_recovery_records;
+      ALTER TABLE processing_recovery_records_v9 RENAME TO processing_recovery_records;
+
+      CREATE TRIGGER workflow_benchmark_receipt_invalidations_reject_quarantined
+      BEFORE INSERT ON workflow_benchmark_receipt_invalidations
+      WHEN EXISTS (
+        SELECT 1 FROM workflow_benchmark_receipt_invalidation_quarantine
+        WHERE receipt_id = NEW.receipt_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'invalidation already quarantined');
+      END;
+      CREATE TRIGGER workflow_benchmark_receipt_invalidation_quarantine_reject_primary
+      BEFORE INSERT ON workflow_benchmark_receipt_invalidation_quarantine
+      WHEN EXISTS (
+        SELECT 1 FROM workflow_benchmark_receipt_invalidations
+        WHERE receipt_id = NEW.receipt_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'invalidation already recorded');
+      END;
+    `,
+  },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {

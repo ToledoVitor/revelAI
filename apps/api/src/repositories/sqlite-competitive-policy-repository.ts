@@ -235,14 +235,30 @@ export class SQLiteCompetitivePolicyRepository
         );
       const existing = this.raw
         .prepare(
-          "SELECT invalidated_at, reason FROM workflow_benchmark_receipt_invalidations WHERE receipt_id = ?",
+          `SELECT invalidated_at, reason, source FROM (
+             SELECT invalidated_at, reason, 'primary' AS source
+             FROM workflow_benchmark_receipt_invalidations
+             WHERE receipt_id = ?
+             UNION ALL
+             SELECT invalidated_at, reason, 'quarantine' AS source
+             FROM workflow_benchmark_receipt_invalidation_quarantine
+             WHERE receipt_id = ?
+           ) LIMIT 1`,
         )
-        .get(input.receiptId) as
-        | { invalidated_at: string; reason: string }
+        .get(input.receiptId, input.receiptId) as
+        | {
+            invalidated_at: string;
+            reason: string;
+            source: "primary" | "quarantine";
+          }
         | undefined;
       if (existing) {
+        const existingInvalidatedAt =
+          existing.source === "quarantine"
+            ? normalizeQuarantinedInvalidationTimestamp(existing.invalidated_at)
+            : existing.invalidated_at;
         if (
-          existing.invalidated_at === invalidatedAt &&
+          existingInvalidatedAt === invalidatedAt &&
           existing.reason === input.reason
         )
           return;
@@ -323,6 +339,37 @@ function isSqliteConstraintError(error: unknown): boolean {
     typeof error.code === "string" &&
     error.code.startsWith("SQLITE_CONSTRAINT")
   );
+}
+
+/**
+ * v6 admitted hour 24. Its next-day representation is the only quarantined
+ * timestamp that can be compared to the current UTC contract without changing
+ * the archived raw fact. Other quarantined values remain conflict-only.
+ */
+function normalizeQuarantinedInvalidationTimestamp(
+  value: string,
+): string | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T24:(\d{2}):(\d{2})\.(\d{3})Z$/.exec(
+    value,
+  );
+  if (!match) return null;
+  const [, year, month, day, minute, second, millisecond] = match;
+  const minuteValue = Number(minute);
+  const secondValue = Number(second);
+  if (minuteValue > 59 || secondValue > 59) return null;
+  const midnight = new Date(`${year}-${month}-${day}T00:00:00.000Z`);
+  if (
+    Number.isNaN(midnight.getTime()) ||
+    midnight.toISOString().slice(0, 10) !== `${year}-${month}-${day}`
+  )
+    return null;
+  return new Date(
+    midnight.getTime() +
+      24 * 60 * 60_000 +
+      minuteValue * 60_000 +
+      secondValue * 1_000 +
+      Number(millisecond),
+  ).toISOString();
 }
 
 function stableJson(value: unknown): string {

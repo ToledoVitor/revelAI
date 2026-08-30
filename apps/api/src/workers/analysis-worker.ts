@@ -148,8 +148,12 @@ export class AnalysisWorker {
           generation: claim.generation,
           candidate,
         });
-        if (!acknowledges(finalization)) throw new LostProcessingClaimError();
+        if (!acknowledges(finalization)) {
+          await this.releaseForRetry(job, claim);
+          throw new LostProcessingClaimError();
+        }
       } catch (error) {
+        if (error instanceof LostProcessingClaimError) throw error;
         await this.recover(job, claim, error);
       }
     });
@@ -184,14 +188,25 @@ export class AnalysisWorker {
           generation: claim.generation,
           candidate,
         });
-        if (!acknowledges(finalization)) throw new LostProcessingClaimError();
+        if (!acknowledges(finalization)) {
+          await this.releaseForRetry(job, claim);
+          throw new LostProcessingClaimError();
+        }
         return;
-      } catch {
-        await this.repository.deadLetterProcessingClaim({
+      } catch (terminalizationError) {
+        if (terminalizationError instanceof LostProcessingClaimError)
+          throw terminalizationError;
+        const deadLetter = await this.repository.deadLetterProcessingClaim({
           attemptId: job.attemptId,
           leaseId: claim.leaseId,
           generation: claim.generation,
         });
+        if (deadLetter.kind === "lost-claim") {
+          await this.retryWaiter.wait(
+            this.unexpectedRetryPolicy.delayMilliseconds,
+          );
+          throw terminalizationError;
+        }
         return;
       }
     }
