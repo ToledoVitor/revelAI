@@ -1,0 +1,31 @@
+{
+  "name": "revelai",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.20.0",
+  "engines": {
+    "node": ">=22.19.0",
+    "pnpm": "11.20.0"
+  },
+  "scripts": {
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "build": "turbo run build",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "import:design-assets": "node packages/design-system/scripts/import-approved-design-assets.mjs",
+    "verify:design-assets": "node packages/design-system/scripts/verify-design-assets.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.35.0",
+    "@types/node": "22.18.0",
+    "eslint": "9.35.0",
+    "prettier": "3.6.2",
+    "turbo": "2.5.6",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.42.0",
+    "vitest": "3.2.4"
+  }
+}
