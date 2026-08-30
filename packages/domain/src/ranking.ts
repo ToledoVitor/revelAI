@@ -133,7 +133,7 @@ export function rankWallPassV1Cohort(
     assertRankableResult(result);
     return isWallPassV1Result(result);
   });
-  assertNoDuplicateAttemptIds(compatibleResults);
+  assertNoDuplicateCohortIdentifiers(compatibleResults);
   const ordered = [...compatibleResults].sort(compareRankableResults);
 
   return Object.freeze(
@@ -184,8 +184,8 @@ function assertRankableResult(result: WallPassRankableResult): void {
     !Number.isInteger(result.score) ||
     result.score < WALL_PASS_V1_SCORE_RULE.scoring.minimumScore ||
     result.score > WALL_PASS_V1_SCORE_RULE.scoring.maximumScore ||
-    result.attemptId.trim().length === 0 ||
-    result.entryId.trim().length === 0
+    !isUuid(result.attemptId) ||
+    !isUuid(result.entryId)
   ) {
     throw new DomainError(
       "invalid_wall_pass_ranking_input",
@@ -196,14 +196,15 @@ function assertRankableResult(result: WallPassRankableResult): void {
   assertTimestamp(result.completedAt);
 }
 
-function assertNoDuplicateAttemptIds(
+function assertNoDuplicateCohortIdentifiers(
   results: readonly WallPassRankableResult[],
 ): void {
   const attemptIds = new Set(results.map((result) => result.attemptId));
-  if (attemptIds.size !== results.length) {
+  const entryIds = new Set(results.map((result) => result.entryId));
+  if (attemptIds.size !== results.length || entryIds.size !== results.length) {
     throw new DomainError(
       "invalid_wall_pass_ranking_input",
-      "A ranking cohort cannot contain the same attempt more than once.",
+      "A ranking cohort cannot contain duplicate attempt or entry identifiers.",
     );
   }
 }
@@ -211,11 +212,18 @@ function assertNoDuplicateAttemptIds(
 function assertTimestamp(timestamp: string): void {
   if (
     !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(timestamp) ||
-    Number.isNaN(Date.parse(timestamp))
+    Number.isNaN(Date.parse(timestamp)) ||
+    new Date(timestamp).toISOString() !== timestamp
   ) {
     throw new DomainError(
       "invalid_wall_pass_ranking_input",
       "Ranking timestamps must be UTC ISO-8601 instants with millisecond precision.",
     );
   }
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+    value,
+  );
 }

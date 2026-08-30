@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
@@ -21,6 +21,7 @@ import {
   type AttemptEvent,
   type AttemptLifecycleState,
   type CanonicalOutboundMovement,
+  type DomainErrorCode,
   type FootSide,
   type WallPassCanonicalContact,
   type WallPassCanonicalEvidence,
@@ -98,7 +99,7 @@ function completedAttempt(
 
 function expectDomainError(
   operation: () => unknown,
-  code: "invalid_attempt_transition" | "invalid_wall_pass_evidence",
+  code: DomainErrorCode,
 ): void {
   try {
     operation();
@@ -119,7 +120,7 @@ function rankable(
 ): WallPassRankableResult {
   return {
     attemptId,
-    entryId: `entry-${attemptId}`,
+    entryId: `f${attemptId.slice(1)}`,
     score,
     completedAt,
     state: "valid",
@@ -130,6 +131,35 @@ function rankable(
     ruleVersion: "wall-pass-v1-score-1",
     ...overrides,
   };
+}
+
+function attemptWithStatus(
+  status: AttemptLifecycleState["status"],
+): AttemptLifecycleState {
+  const awaitingUpload = createFreeAttempt(`attempt-${status}`);
+
+  switch (status) {
+    case "awaiting-upload":
+      return awaitingUpload;
+    case "uploaded":
+      return advanceAttempt(awaitingUpload, { type: "media-accepted" });
+    case "processing":
+      return advanceAttempt(
+        advanceAttempt(awaitingUpload, { type: "media-accepted" }),
+        { type: "queue-claimed" },
+      );
+    case "valid":
+    case "invalid":
+    case "failed":
+      return completedAttempt(status);
+  }
+}
+
+function advanceAtRuntime(
+  state: AttemptLifecycleState,
+  event: unknown,
+): unknown {
+  return Reflect.apply(advanceAttempt, undefined, [state, event]);
 }
 
 describe("attempt reducer public behavior", () => {
@@ -173,21 +203,16 @@ describe("attempt reducer public behavior", () => {
     });
   }
 
-  for (const status of ["awaiting-upload", "uploaded", "processing"] as const) {
+  for (const status of [
+    "awaiting-upload",
+    "uploaded",
+    "processing",
+    "valid",
+    "invalid",
+    "failed",
+  ] as const) {
     it(`tombstones an active ${status} attempt without exposing a seventh status`, () => {
-      const state =
-        status === "awaiting-upload"
-          ? createFreeAttempt(`attempt-${status}`)
-          : status === "uploaded"
-            ? advanceAttempt(createFreeAttempt(`attempt-${status}`), {
-                type: "media-accepted",
-              })
-            : advanceAttempt(
-                advanceAttempt(createFreeAttempt(`attempt-${status}`), {
-                  type: "media-accepted",
-                }),
-                { type: "queue-claimed" },
-              );
+      const state = attemptWithStatus(status);
       const tombstoned = tombstoneAttempt(state);
 
       expect(tombstoned.status).toBe(status);
@@ -228,13 +253,58 @@ describe("attempt reducer public behavior", () => {
       () => advanceAttempt(processing, { type: "media-accepted" }),
       () => advanceAttempt(terminal, { type: "queue-claimed" }),
       () => advanceAttempt(terminal, { type: "finalized", outcome: "failed" }),
-      () => tombstoneAttempt(terminal),
       () => retryAttempt(uploaded, "retry-active"),
       () => advanceAttempt(tombstoned, { type: "queue-claimed" }),
       () => tombstoneAttempt(tombstoned),
     ]) {
       expectDomainError(invalidOperation, "invalid_attempt_transition");
     }
+  });
+
+  it("rejects every event after tombstoning while preserving the terminal public status", () => {
+    for (const status of [
+      "awaiting-upload",
+      "uploaded",
+      "processing",
+      "valid",
+      "invalid",
+      "failed",
+    ] as const) {
+      const tombstoned = tombstoneAttempt(attemptWithStatus(status));
+
+      expect(tombstoned.status).toBe(status);
+      expectDomainError(
+        () => advanceAttempt(tombstoned, { type: "media-accepted" }),
+        "invalid_attempt_transition",
+      );
+      if (status === "valid" || status === "invalid" || status === "failed") {
+        expectDomainError(
+          () => retryAttempt(tombstoned, `retry-tombstoned-${status}`),
+          "invalid_attempt_transition",
+        );
+      }
+    }
+  });
+
+  it("rejects malformed finalized outcomes, unknown event types, and non-events at runtime", () => {
+    const processing = attemptWithStatus("processing");
+
+    expectDomainError(
+      () =>
+        advanceAtRuntime(processing, {
+          type: "finalized",
+          outcome: "bogus",
+        }),
+      "invalid_attempt_transition",
+    );
+    expectDomainError(
+      () => advanceAtRuntime(processing, { type: "unknown" }),
+      "invalid_attempt_transition",
+    );
+    expectDomainError(
+      () => advanceAtRuntime(processing, null),
+      "invalid_attempt_transition",
+    );
   });
 
   it("rejects every reducer event outside its one normative prior state", () => {
@@ -328,7 +398,7 @@ describe("wall-pass metrics and score", () => {
         contact(4_000, "left", outbound()),
         contact(5_000, "left", outbound()),
         contact(6_000, "right", outbound()),
-        contact(7_000, "left"),
+        contact(7_000, "right"),
       ],
       wallImpacts: [impact(4_300), impact(5_300), impact(6_300)],
     };
@@ -386,10 +456,12 @@ describe("wall-pass metrics and score", () => {
     expect(result.score).toBe(0);
   });
 
-  it("uses zero cadence for one valid pass", () => {
+  it("attributes a one-pass left-to-right sequence to its starting left foot", () => {
     const result = evaluateWallPassV1(continuousEvidence(1));
 
     expect(result.metrics.meanCadenceSeconds).toBe(0);
+    expect(result.metrics.leftFootPercent).toBe(100);
+    expect(result.metrics.rightFootPercent).toBe(0);
     expect(result.score).toBe(31);
   });
 
@@ -504,12 +576,12 @@ describe("wall-pass metrics and score", () => {
     expect(
       scoreWallPassV1({
         validPasses: 1,
-        accuracyPercent: 35,
+        accuracyPercent: 25,
         meanCadenceSeconds: 0,
         leftFootPercent: 100,
         rightFootPercent: 0,
       }).score,
-    ).toBe(12);
+    ).toBe(9);
     expect(
       scoreWallPassV1({
         validPasses: 100,
@@ -519,6 +591,60 @@ describe("wall-pass metrics and score", () => {
         rightFootPercent: 50,
       }).score,
     ).toBe(100);
+  });
+
+  it("rejects score tuples that cannot arise from the normative metrics", () => {
+    const impossibleInputs = [
+      {
+        validPasses: 0,
+        accuracyPercent: 0,
+        meanCadenceSeconds: 0,
+        leftFootPercent: 50,
+        rightFootPercent: 50,
+      },
+      {
+        validPasses: 0,
+        accuracyPercent: 0,
+        meanCadenceSeconds: 1,
+        leftFootPercent: 0,
+        rightFootPercent: 0,
+      },
+      {
+        validPasses: 1,
+        accuracyPercent: 35,
+        meanCadenceSeconds: 0,
+        leftFootPercent: 100,
+        rightFootPercent: 0,
+      },
+      {
+        validPasses: 1,
+        accuracyPercent: 100,
+        meanCadenceSeconds: 0.75,
+        leftFootPercent: 100,
+        rightFootPercent: 0,
+      },
+      {
+        validPasses: 3,
+        accuracyPercent: 100,
+        meanCadenceSeconds: 1,
+        leftFootPercent: 50,
+        rightFootPercent: 50,
+      },
+      {
+        validPasses: 3,
+        accuracyPercent: 100,
+        meanCadenceSeconds: 1,
+        leftFootPercent: 66.67,
+        rightFootPercent: 33.33,
+      },
+    ];
+
+    for (const input of impossibleInputs) {
+      expectDomainError(
+        () => scoreWallPassV1(input),
+        "invalid_wall_pass_score_input",
+      );
+    }
   });
 
   it("is deterministic and leaves canonical evidence unchanged", () => {
@@ -568,25 +694,25 @@ describe("wall-pass ranking", () => {
 
     expect(leaderboard.entries).toEqual([
       {
-        entryId: "entry-00000000-0000-4000-8000-000000000001",
+        entryId: "f0000000-0000-4000-8000-000000000001",
         rank: 1,
         score: 80,
         completedAt: "2026-08-30T12:00:01.000Z",
       },
       {
-        entryId: "entry-00000000-0000-4000-8000-000000000002",
+        entryId: "f0000000-0000-4000-8000-000000000002",
         rank: 1,
         score: 80,
         completedAt: "2026-08-30T12:00:01.000Z",
       },
       {
-        entryId: "entry-00000000-0000-4000-8000-000000000003",
+        entryId: "f0000000-0000-4000-8000-000000000003",
         rank: 1,
         score: 80,
         completedAt: "2026-08-30T12:00:02.000Z",
       },
       {
-        entryId: "entry-00000000-0000-4000-8000-000000000004",
+        entryId: "f0000000-0000-4000-8000-000000000004",
         rank: 4,
         score: 79,
         completedAt: "2026-08-30T12:00:00.000Z",
@@ -597,27 +723,42 @@ describe("wall-pass ranking", () => {
   it("isolates a live cohort to the exact wall-pass challenge and rule version", () => {
     const leaderboard = calculateLiveWallPassLeaderboard(
       [
-        rankable("eligible", 50, "2026-08-30T12:00:00.000Z"),
-        rankable("other-rule", 100, "2026-08-30T11:00:00.000Z", {
-          ruleVersion: "wall-pass-v2-score-1",
-        }),
-        rankable("other-challenge", 100, "2026-08-30T10:00:00.000Z", {
-          challengeId: "other-challenge",
-          challengeVersion: 2,
-        }),
+        rankable(
+          "00000000-0000-4000-8000-000000000010",
+          50,
+          "2026-08-30T12:00:00.000Z",
+        ),
+        rankable(
+          "00000000-0000-4000-8000-000000000011",
+          100,
+          "2026-08-30T11:00:00.000Z",
+          { ruleVersion: "wall-pass-v2-score-1" },
+        ),
+        rankable(
+          "00000000-0000-4000-8000-000000000012",
+          100,
+          "2026-08-30T10:00:00.000Z",
+          { challengeId: "other-challenge", challengeVersion: 2 },
+        ),
       ],
       "2026-08-30T13:00:00.000Z",
     );
 
     expect(leaderboard.cohortSize).toBe(1);
-    expect(leaderboard.entries[0]?.entryId).toBe("entry-eligible");
+    expect(leaderboard.entries[0]?.entryId).toBe(
+      "f0000000-0000-4000-8000-000000000010",
+    );
   });
 
   it("creates normative one-member frozen values", () => {
-    const result = rankable("solo", 77, "2026-08-30T12:00:00.000Z");
+    const result = rankable(
+      "00000000-0000-4000-8000-000000000020",
+      77,
+      "2026-08-30T12:00:00.000Z",
+    );
     const snapshot = calculateFrozenWallPassSnapshot(
       [result],
-      "solo",
+      "00000000-0000-4000-8000-000000000020",
       "2026-08-30T12:00:01.000Z",
     );
 
@@ -631,20 +772,32 @@ describe("wall-pass ranking", () => {
       percentile: 100,
       topPercent: 0,
       scoreCountAtFinalization: 1,
-      asOfAttemptId: "solo",
+      asOfAttemptId: "00000000-0000-4000-8000-000000000020",
       calculatedAt: "2026-08-30T12:00:01.000Z",
     });
   });
 
   it("distinguishes percentile from the top-percent phrase", () => {
     const cohort = [
-      rankable("high", 100, "2026-08-30T12:00:00.000Z"),
-      rankable("middle", 50, "2026-08-30T12:01:00.000Z"),
-      rankable("low", 10, "2026-08-30T12:02:00.000Z"),
+      rankable(
+        "00000000-0000-4000-8000-000000000030",
+        100,
+        "2026-08-30T12:00:00.000Z",
+      ),
+      rankable(
+        "00000000-0000-4000-8000-000000000031",
+        50,
+        "2026-08-30T12:01:00.000Z",
+      ),
+      rankable(
+        "00000000-0000-4000-8000-000000000032",
+        10,
+        "2026-08-30T12:02:00.000Z",
+      ),
     ];
     const snapshot = calculateFrozenWallPassSnapshot(
       cohort,
-      "middle",
+      "00000000-0000-4000-8000-000000000031",
       "2026-08-30T13:00:00.000Z",
     );
 
@@ -654,14 +807,25 @@ describe("wall-pass ranking", () => {
   });
 
   it("does not mutate a frozen snapshot when a later live cohort changes", () => {
-    const original = rankable("original", 50, "2026-08-30T12:00:00.000Z");
+    const original = rankable(
+      "00000000-0000-4000-8000-000000000040",
+      50,
+      "2026-08-30T12:00:00.000Z",
+    );
     const snapshot = calculateFrozenWallPassSnapshot(
       [original],
-      "original",
+      "00000000-0000-4000-8000-000000000040",
       "2026-08-30T12:00:01.000Z",
     );
     const laterLeaderboard = calculateLiveWallPassLeaderboard(
-      [original, rankable("later", 100, "2026-08-30T12:01:00.000Z")],
+      [
+        original,
+        rankable(
+          "00000000-0000-4000-8000-000000000041",
+          100,
+          "2026-08-30T12:01:00.000Z",
+        ),
+      ],
       "2026-08-30T12:02:00.000Z",
     );
 
@@ -669,15 +833,81 @@ describe("wall-pass ranking", () => {
     expect(snapshot.cohortSize).toBe(1);
     expect(
       laterLeaderboard.entries.find(
-        (entry) => entry.entryId === "entry-original",
+        (entry) => entry.entryId === "f0000000-0000-4000-8000-000000000040",
       )?.rank,
     ).toBe(2);
   });
 
+  it("rejects invalid UUIDs, non-canonical UTC instants, and duplicate cohort identifiers", () => {
+    const valid = rankable(
+      "00000000-0000-4000-8000-000000000060",
+      50,
+      "2026-08-30T12:00:00.000Z",
+    );
+
+    expectDomainError(
+      () =>
+        calculateLiveWallPassLeaderboard(
+          [rankable("not-a-uuid", 50, "2026-08-30T12:00:00.000Z")],
+          "2026-08-30T13:00:00.000Z",
+        ),
+      "invalid_wall_pass_ranking_input",
+    );
+    expectDomainError(
+      () =>
+        calculateLiveWallPassLeaderboard(
+          [
+            rankable(
+              "00000000-0000-4000-8000-000000000061",
+              50,
+              "2026-02-31T12:00:00.000Z",
+            ),
+          ],
+          "2026-08-30T13:00:00.000Z",
+        ),
+      "invalid_wall_pass_ranking_input",
+    );
+    expectDomainError(
+      () =>
+        calculateLiveWallPassLeaderboard(
+          [
+            valid,
+            { ...valid, entryId: "f0000000-0000-4000-8000-000000000061" },
+          ],
+          "2026-08-30T13:00:00.000Z",
+        ),
+      "invalid_wall_pass_ranking_input",
+    );
+    expectDomainError(
+      () =>
+        calculateLiveWallPassLeaderboard(
+          [
+            valid,
+            rankable(
+              "00000000-0000-4000-8000-000000000062",
+              50,
+              "2026-08-30T12:01:00.000Z",
+              { entryId: valid.entryId },
+            ),
+          ],
+          "2026-08-30T13:00:00.000Z",
+        ),
+      "invalid_wall_pass_ranking_input",
+    );
+  });
+
   it("does not mutate ranking input arrays or result records", () => {
     const input = [
-      rankable("second", 50, "2026-08-30T12:01:00.000Z"),
-      rankable("first", 60, "2026-08-30T12:00:00.000Z"),
+      rankable(
+        "00000000-0000-4000-8000-000000000050",
+        50,
+        "2026-08-30T12:01:00.000Z",
+      ),
+      rankable(
+        "00000000-0000-4000-8000-000000000051",
+        60,
+        "2026-08-30T12:00:00.000Z",
+      ),
     ];
     const before = structuredClone(input);
 
@@ -688,23 +918,100 @@ describe("wall-pass ranking", () => {
 });
 
 describe("domain dependency boundary", () => {
-  it("keeps production domain modules free of network, filesystem, provider, media, and API imports", () => {
-    const productionFiles = [
-      "attempt-machine.ts",
-      "wall-pass-v1.ts",
-      "scoring.ts",
-      "ranking.ts",
-      "index.ts",
+  it("recognizes static, side-effect, and dynamic runtime-import fixture forms", () => {
+    const fixtures = [
+      { source: 'import fs from "node:fs";', violations: ["node:fs"] },
+      { source: 'import "node:fs";', violations: ["node:fs"] },
+      {
+        source: 'const client = await import("undici");',
+        violations: ["undici"],
+      },
+      {
+        source: 'import type { RuntimeOnly } from "not-emitted";',
+        violations: [],
+      },
+      {
+        source: 'import { sibling } from "./sibling.js";',
+        violations: [],
+      },
     ];
-    const forbiddenImport =
-      /from\s+["'](?:node:|https?:|@revelai\/contracts|@revelai\/vision|.*(?:provider|media|api))["']/;
 
-    for (const file of productionFiles) {
-      const source = readFileSync(
-        fileURLToPath(new URL(`./${file}`, import.meta.url)),
-        "utf8",
+    for (const fixture of fixtures) {
+      expect(forbiddenRuntimeImports(fixture.source)).toEqual(
+        fixture.violations,
       );
-      expect(source).not.toMatch(forbiddenImport);
     }
   });
+
+  it("recursively rejects every non-relative production runtime import and runtime dependency", () => {
+    const productionFiles = productionTypeScriptFiles(
+      new URL("./", import.meta.url),
+    );
+    const sourcePaths = productionFiles.map((file) => fileURLToPath(file));
+
+    expect(sourcePaths).toContain(
+      fileURLToPath(new URL("./attempt-machine.ts", import.meta.url)),
+    );
+    expect(sourcePaths).toContain(
+      fileURLToPath(new URL("./ranking.ts", import.meta.url)),
+    );
+    expect(
+      productionFiles.flatMap((file) =>
+        forbiddenRuntimeImports(readFileSync(file, "utf8")),
+      ),
+    ).toEqual([]);
+    expect(runtimeDependencyNames()).toEqual([]);
+  });
 });
+
+function productionTypeScriptFiles(directory: URL): readonly URL[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const child = new URL(
+      entry.isDirectory() ? `${entry.name}/` : entry.name,
+      directory,
+    );
+
+    if (entry.isDirectory()) {
+      return productionTypeScriptFiles(child);
+    }
+
+    return entry.isFile() &&
+      entry.name.endsWith(".ts") &&
+      !entry.name.endsWith(".test.ts")
+      ? [child]
+      : [];
+  });
+}
+
+function forbiddenRuntimeImports(source: string): readonly string[] {
+  const staticImport =
+    /^\s*import\s+(?!type\b)(?:[^"'\n;]*\s+from\s+)?["']([^"']+)["']/gm;
+  const dynamicImport = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
+  const specifiers = [
+    ...Array.from(source.matchAll(staticImport), (match) => match[1]),
+    ...Array.from(source.matchAll(dynamicImport), (match) => match[1]),
+  ].filter((specifier): specifier is string => typeof specifier === "string");
+
+  return specifiers.filter((specifier) => !specifier.startsWith("."));
+}
+
+function runtimeDependencyNames(): readonly string[] {
+  const packageJson: unknown = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL("../package.json", import.meta.url)),
+      "utf8",
+    ),
+  );
+
+  if (
+    typeof packageJson !== "object" ||
+    packageJson === null ||
+    !("dependencies" in packageJson) ||
+    typeof packageJson.dependencies !== "object" ||
+    packageJson.dependencies === null
+  ) {
+    return [];
+  }
+
+  return Object.keys(packageJson.dependencies);
+}

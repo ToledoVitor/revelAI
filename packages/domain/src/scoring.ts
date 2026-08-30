@@ -202,14 +202,12 @@ function calculateRawMetrics(
   const leftPasses = completedPasses.filter(
     (completedPass) => completedPass.startingContact.side === "left",
   ).length;
-  const rightPasses = validPasses - leftPasses;
   const rawAccuracyPercent =
     opportunities === 0 ? 0 : (100 * validPasses) / opportunities;
   const rawCadenceSeconds = calculateRawCadenceSeconds(completedPasses);
   const rawLeftFootPercent =
     validPasses === 0 ? 0 : (100 * leftPasses) / validPasses;
-  const rawRightFootPercent =
-    validPasses === 0 ? 0 : (100 * rightPasses) / validPasses;
+  const rawRightFootPercent = validPasses === 0 ? 0 : 100 - rawLeftFootPercent;
 
   return Object.freeze({
     validPasses,
@@ -301,11 +299,69 @@ function assertScoreInput(input: WallPassScoreInput): void {
     !isWithin(input.leftFootPercent, 0, maximumScore) ||
     !isWithin(input.rightFootPercent, 0, maximumScore)
   ) {
-    throw new DomainError(
-      "invalid_wall_pass_score_input",
-      "Wall-pass scoring requires finite metrics within their rule bounds.",
-    );
+    return invalidScoreInput();
   }
+
+  if (input.validPasses === 0) {
+    if (
+      input.accuracyPercent !== 0 ||
+      input.meanCadenceSeconds !== 0 ||
+      input.leftFootPercent !== 0 ||
+      input.rightFootPercent !== 0
+    ) {
+      return invalidScoreInput();
+    }
+    return;
+  }
+
+  if (
+    (input.validPasses <
+      WALL_PASS_V1_SCORE_RULE.metrics.zeroCadenceBelowPassCount &&
+      input.meanCadenceSeconds !== 0) ||
+    input.leftFootPercent + input.rightFootPercent !==
+      WALL_PASS_V1_SCORE_RULE.scoring.maximumScore
+  ) {
+    return invalidScoreInput();
+  }
+
+  const opportunities =
+    (WALL_PASS_V1_SCORE_RULE.scoring.maximumScore * input.validPasses) /
+    input.accuracyPercent;
+  if (
+    !Number.isInteger(opportunities) ||
+    opportunities < input.validPasses ||
+    (WALL_PASS_V1_SCORE_RULE.scoring.maximumScore * input.validPasses) /
+      opportunities !==
+      input.accuracyPercent
+  ) {
+    return invalidScoreInput();
+  }
+
+  const leftPasses =
+    (input.leftFootPercent * input.validPasses) /
+    WALL_PASS_V1_SCORE_RULE.scoring.maximumScore;
+  if (!Number.isInteger(leftPasses)) {
+    return invalidScoreInput();
+  }
+
+  const expectedLeftFootPercent =
+    (WALL_PASS_V1_SCORE_RULE.scoring.maximumScore * leftPasses) /
+    input.validPasses;
+  const expectedRightFootPercent =
+    WALL_PASS_V1_SCORE_RULE.scoring.maximumScore - expectedLeftFootPercent;
+  if (
+    input.leftFootPercent !== expectedLeftFootPercent ||
+    input.rightFootPercent !== expectedRightFootPercent
+  ) {
+    return invalidScoreInput();
+  }
+}
+
+function invalidScoreInput(): never {
+  throw new DomainError(
+    "invalid_wall_pass_score_input",
+    "Wall-pass scoring requires coherent metrics within their rule bounds.",
+  );
 }
 
 function isWithin(value: number, minimum: number, maximum: number): boolean {

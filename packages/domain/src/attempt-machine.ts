@@ -68,11 +68,12 @@ export function createVerifiedAttempt(id: string): AttemptLifecycleState {
 
 export function advanceAttempt(
   state: AttemptLifecycleState,
-  event: AttemptEvent,
+  event: unknown,
 ): AttemptLifecycleState {
+  const validatedEvent = validateAttemptEvent(event);
   assertActive(state);
 
-  switch (event.type) {
+  switch (validatedEvent.type) {
     case "media-accepted":
       assertTransition(state.status === "awaiting-upload");
       return withStatus(state, "uploaded");
@@ -81,7 +82,7 @@ export function advanceAttempt(
       return withStatus(state, "processing");
     case "finalized":
       assertTransition(state.status === "processing");
-      return withStatus(state, event.outcome);
+      return withStatus(state, validatedEvent.outcome);
     default:
       return invalidAttemptTransition();
   }
@@ -90,9 +91,7 @@ export function advanceAttempt(
 export function tombstoneAttempt(
   state: AttemptLifecycleState,
 ): AttemptLifecycleState {
-  assertTransition(
-    state.deletionState === "active" && !isTerminalAttemptStatus(state.status),
-  );
+  assertTransition(state.deletionState === "active");
 
   return freezeAttempt({ ...state, deletionState: "tombstoned" });
 }
@@ -136,6 +135,30 @@ function assertActive(state: AttemptLifecycleState): void {
   assertTransition(state.deletionState === "active");
 }
 
+function validateAttemptEvent(event: unknown): AttemptEvent {
+  if (!isRecord(event) || typeof event.type !== "string") {
+    return invalidAttemptTransition();
+  }
+
+  switch (event.type) {
+    case "media-accepted":
+      return Object.freeze({ type: "media-accepted" });
+    case "queue-claimed":
+      return Object.freeze({ type: "queue-claimed" });
+    case "finalized":
+      if (
+        event.outcome === "valid" ||
+        event.outcome === "invalid" ||
+        event.outcome === "failed"
+      ) {
+        return Object.freeze({ type: "finalized", outcome: event.outcome });
+      }
+      return invalidAttemptTransition();
+    default:
+      return invalidAttemptTransition();
+  }
+}
+
 function assertTransition(condition: boolean): asserts condition {
   if (!condition) {
     invalidAttemptTransition();
@@ -147,6 +170,10 @@ function invalidAttemptTransition(): never {
     "invalid_attempt_transition",
     "Attempt event is not allowed from the current lifecycle state.",
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function assertNonEmptyId(id: string): string {
