@@ -30,8 +30,8 @@ describe("InMemoryAnalysisQueue", () => {
     const queue = new InMemoryAnalysisQueue({ scheduler });
     const received: string[] = [];
 
-    await queue.enqueue({ attemptId: "attempt-1" });
-    await queue.enqueue({ attemptId: "attempt-2" });
+    await queue.enqueue({ attemptId: "attempt-1", generation: 1 });
+    await queue.enqueue({ attemptId: "attempt-2", generation: 1 });
     const unsubscribe = queue.subscribe(async (job) => {
       received.push(job.attemptId);
     });
@@ -51,7 +51,7 @@ describe("InMemoryAnalysisQueue", () => {
       if (deliveries === 1) throw new Error("temporary worker failure");
     });
 
-    await queue.enqueue({ attemptId: "attempt-1" });
+    await queue.enqueue({ attemptId: "attempt-1", generation: 1 });
     await scheduler.runNext();
     await scheduler.runNext();
 
@@ -61,9 +61,9 @@ describe("InMemoryAnalysisQueue", () => {
   it("does not attach new jobs when availability is false", async () => {
     const queue = new InMemoryAnalysisQueue({ available: () => false });
 
-    expect(queue.isAvailable()).toBe(false);
+    await expect(queue.isAvailable()).resolves.toBe(false);
     await expect(
-      queue.enqueue({ attemptId: "attempt-1" }),
+      queue.enqueue({ attemptId: "attempt-1", generation: 1 }),
     ).rejects.toBeInstanceOf(QueueUnavailableError);
   });
 
@@ -76,7 +76,7 @@ describe("InMemoryAnalysisQueue", () => {
     });
     unsubscribe();
 
-    await queue.enqueue({ attemptId: "attempt-1" });
+    await queue.enqueue({ attemptId: "attempt-1", generation: 1 });
     await scheduler.runAll();
 
     expect(received).toEqual([]);

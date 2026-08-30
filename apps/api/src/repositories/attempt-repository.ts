@@ -2,6 +2,8 @@ import type {
   AttemptMode,
   AttemptOutcome,
   CreateAttemptInput,
+  FreeInsight,
+  VerifiedResult,
 } from "@revelai/contracts";
 import type { AnalysisJob } from "../queue/analysis-queue.js";
 
@@ -50,11 +52,32 @@ export type FinalizedAttempt = Readonly<{
   outcome: AttemptOutcome;
 }>;
 
+type RankedVerifiedTerminalCandidate = Omit<
+  Extract<VerifiedResult, { competitiveStatus: "ranked" }>,
+  "rankingSnapshot"
+>;
+
+type VerifiedTerminalCandidate =
+  | RankedVerifiedTerminalCandidate
+  | Exclude<VerifiedResult, { competitiveStatus: "ranked" }>;
+
+/**
+ * Processor-owned terminal facts. The repository is the only component that
+ * turns a ranked candidate into a public result by calculating its frozen
+ * leaderboard snapshot inside the finalization transaction.
+ */
+export type TerminalCandidate =
+  | Readonly<{
+      state: "valid";
+      result: FreeInsight | VerifiedTerminalCandidate;
+    }>
+  | Exclude<AttemptOutcome, { state: "pending" | "valid" }>;
+
 export type FinalizeTerminalResultInput = Readonly<{
   attemptId: string;
   leaseId: string;
   generation: number;
-  outcome: AttemptOutcome;
+  candidate: TerminalCandidate;
 }>;
 
 export interface AttemptRepository {
@@ -106,9 +129,21 @@ export interface AttemptRepository {
     }>,
   ): Promise<AnalysisJob>;
   rollbackMediaAttachment(
-    input: Readonly<{ attemptId: string; athleteId: string; mediaId: string }>,
+    input: Readonly<{
+      attemptId: string;
+      athleteId: string;
+      mediaId: string;
+      generation: number;
+    }>,
   ): Promise<void>;
   claimProcessing(job: AnalysisJob): Promise<ProcessingClaim | null>;
+  releaseProcessingClaim(
+    input: Readonly<{
+      attemptId: string;
+      leaseId: string;
+      generation: number;
+    }>,
+  ): Promise<boolean>;
   finalizeTerminalResult(
     input: FinalizeTerminalResultInput,
   ): Promise<FinalizedAttempt | null>;

@@ -11,7 +11,12 @@ export type AttachmentRepository = Readonly<{
     }>,
   ): Promise<AnalysisJob>;
   rollbackMediaAttachment(
-    input: Readonly<{ attemptId: string; athleteId: string; mediaId: string }>,
+    input: Readonly<{
+      attemptId: string;
+      athleteId: string;
+      mediaId: string;
+      generation: number;
+    }>,
   ): Promise<void>;
 }>;
 
@@ -34,7 +39,7 @@ export class AttemptService {
       media: StoredMedia;
     }>,
   ): Promise<AnalysisJob> {
-    if (!this.queue.isAvailable()) throw new QueueUnavailableError();
+    if (!(await this.queue.isAvailable())) throw new QueueUnavailableError();
     const job = await this.repository.attachValidatedMedia(input);
     try {
       await this.queue.enqueue(job);
@@ -44,6 +49,7 @@ export class AttemptService {
         attemptId: input.attemptId,
         athleteId: input.athleteId,
         mediaId: input.media.id,
+        generation: job.generation,
       });
       if (error instanceof QueueUnavailableError) throw error;
       throw new QueueUnavailableError();

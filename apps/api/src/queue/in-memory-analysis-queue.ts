@@ -10,7 +10,7 @@ export type QueueScheduler = Readonly<{
 }>;
 
 type QueueOptions = Readonly<{
-  available?: () => boolean;
+  available?: () => boolean | Promise<boolean>;
   scheduler?: QueueScheduler;
 }>;
 
@@ -27,7 +27,7 @@ const microtaskScheduler: QueueScheduler = {
  * deduplicates jobs or owns attempt lifecycle state.
  */
 export class InMemoryAnalysisQueue implements AnalysisQueue {
-  private readonly available: () => boolean;
+  private readonly available: () => boolean | Promise<boolean>;
   private readonly scheduler: QueueScheduler;
   private readonly pending: AnalysisJob[] = [];
   private readonly subscribers = new Set<AnalysisJobDelivery>();
@@ -39,12 +39,12 @@ export class InMemoryAnalysisQueue implements AnalysisQueue {
     this.scheduler = options.scheduler ?? microtaskScheduler;
   }
 
-  public isAvailable(): boolean {
-    return !this.closed && this.available();
+  public async isAvailable(): Promise<boolean> {
+    return !this.closed && (await this.available());
   }
 
   public async enqueue(job: AnalysisJob): Promise<void> {
-    if (!this.isAvailable()) {
+    if (!(await this.isAvailable())) {
       throw new QueueUnavailableError();
     }
 
@@ -82,11 +82,8 @@ export class InMemoryAnalysisQueue implements AnalysisQueue {
   }
 
   private async drain(): Promise<void> {
-    while (
-      this.isAvailable() &&
-      this.pending.length > 0 &&
-      this.subscribers.size > 0
-    ) {
+    while (await this.isAvailable()) {
+      if (this.pending.length === 0 || this.subscribers.size === 0) return;
       const job = this.pending.shift()!;
       const deliver = this.subscribers.values().next().value as
         | AnalysisJobDelivery

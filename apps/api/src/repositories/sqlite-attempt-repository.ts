@@ -2,6 +2,8 @@ import {
   AttemptOutcomeSchema,
   type AttemptOutcome,
   type CreateAttemptInput,
+  UtcIsoTimestampSchema,
+  VerifiedResultSchema,
 } from "@revelai/contracts";
 import {
   calculateFrozenWallPassSnapshot as calculateSnapshot,
@@ -18,6 +20,7 @@ import type {
   FinalizeTerminalResultInput,
   ProcessingClaim,
   StoredMedia,
+  TerminalCandidate,
 } from "./attempt-repository.js";
 
 type AttemptRow = Readonly<{
@@ -41,7 +44,7 @@ type TerminalResultRow = Readonly<{
   lease_id: string;
   generation: number;
   outcome_json: string;
-  request_outcome_json: string;
+  candidate_json: string;
 }>;
 
 export interface Clock {
@@ -64,7 +67,9 @@ export class RepositoryError extends Error {
       | "calibration_session_consumed"
       | "calibration_session_challenge_mismatch"
       | "invalid_terminal_outcome"
-      | "terminal_result_conflict",
+      | "terminal_result_conflict"
+      | "invalid_input"
+      | "persisted_data_corrupt",
   ) {
     super(code);
     this.name = "RepositoryError";
@@ -296,9 +301,15 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       const now = this.clock.now();
       this.raw
         .prepare(
-          "UPDATE attempts SET media_json = ?, status = 'uploaded', updated_at = ? WHERE id = ? AND athlete_id = ? AND status = 'awaiting-upload' AND deletion_state = 'active'",
+          "UPDATE attempts SET media_json = ?, status = 'uploaded', processing_generation = ?, updated_at = ? WHERE id = ? AND athlete_id = ? AND status = 'awaiting-upload' AND deletion_state = 'active'",
         )
-        .run(stableJson(input.media), now, input.attemptId, input.athleteId);
+        .run(
+          stableJson(input.media),
+          row.processing_generation + 1,
+          now,
+          input.attemptId,
+          input.athleteId,
+        );
       this.raw
         .prepare(
           "INSERT INTO media_retention_records (media_id, attempt_id, metadata_json, delete_at, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -312,16 +323,24 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         );
       this.event(
         input.attemptId,
-        row.processing_generation,
+        row.processing_generation + 1,
         "media-attached",
         now,
       );
-      return Object.freeze({ attemptId: input.attemptId });
+      return Object.freeze({
+        attemptId: input.attemptId,
+        generation: row.processing_generation + 1,
+      });
     });
   }
 
   public async rollbackMediaAttachment(
-    input: Readonly<{ attemptId: string; athleteId: string; mediaId: string }>,
+    input: Readonly<{
+      attemptId: string;
+      athleteId: string;
+      mediaId: string;
+      generation: number;
+    }>,
   ): Promise<void> {
     await this.transaction(() => {
       const row = this.selectScopedAttempt(input.attemptId, input.athleteId);
@@ -331,26 +350,22 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         !attempt ||
         !attempt.media ||
         attempt.media.id !== input.mediaId ||
-        attempt.status !== "uploaded"
+        attempt.status !== "uploaded" ||
+        row.processing_generation !== input.generation
       )
         return;
       const now = this.clock.now();
       this.raw
         .prepare(
-          "UPDATE attempts SET media_json = NULL, status = 'awaiting-upload', updated_at = ? WHERE id = ? AND athlete_id = ? AND status = 'uploaded' AND deletion_state = 'active'",
+          "UPDATE attempts SET media_json = NULL, status = 'awaiting-upload', updated_at = ? WHERE id = ? AND athlete_id = ? AND status = 'uploaded' AND processing_generation = ? AND deletion_state = 'active'",
         )
-        .run(now, input.attemptId, input.athleteId);
+        .run(now, input.attemptId, input.athleteId, input.generation);
       this.raw
         .prepare(
           "DELETE FROM media_retention_records WHERE media_id = ? AND attempt_id = ?",
         )
         .run(input.mediaId, input.attemptId);
-      this.event(
-        input.attemptId,
-        row.processing_generation,
-        "media-rolled-back",
-        now,
-      );
+      this.event(input.attemptId, input.generation, "media-rolled-back", now);
     });
   }
 
@@ -374,22 +389,44 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         | undefined;
       if (!row || row.deletion_state !== "active") return null;
       const now = this.clock.now();
+      const generationMatches = row.processing_generation === job.generation;
       const canClaim =
-        row.status === "uploaded" ||
-        (row.status === "processing" &&
+        (generationMatches && row.status === "uploaded") ||
+        (generationMatches &&
+          row.status === "processing" &&
           row.processing_lease_expires_at !== null &&
           row.processing_lease_expires_at <= now);
       if (!canClaim) return null;
-      const generation = row.processing_generation + 1;
       const leaseId = this.ids.next();
       const expiresAt = addMilliseconds(now, 5 * 60_000);
-      this.raw
+      const update = this.raw
         .prepare(
-          "UPDATE attempts SET status = 'processing', processing_generation = ?, processing_lease_id = ?, processing_lease_expires_at = ?, updated_at = ? WHERE id = ? AND deletion_state = 'active'",
+          "UPDATE attempts SET status = 'processing', processing_lease_id = ?, processing_lease_expires_at = ?, updated_at = ? WHERE id = ? AND processing_generation = ? AND deletion_state = 'active' AND (status = 'uploaded' OR (status = 'processing' AND processing_lease_expires_at <= ?))",
         )
-        .run(generation, leaseId, expiresAt, now, job.attemptId);
-      this.event(job.attemptId, generation, "processing-claimed", now);
-      return Object.freeze({ leaseId, generation });
+        .run(leaseId, expiresAt, now, job.attemptId, job.generation, now);
+      if (update.changes !== 1) return null;
+      this.event(job.attemptId, job.generation, "processing-claimed", now);
+      return Object.freeze({ leaseId, generation: job.generation });
+    });
+  }
+
+  public async releaseProcessingClaim(
+    input: Readonly<{
+      attemptId: string;
+      leaseId: string;
+      generation: number;
+    }>,
+  ): Promise<boolean> {
+    return this.transaction(() => {
+      const now = this.clock.now();
+      const update = this.raw
+        .prepare(
+          "UPDATE attempts SET status = 'uploaded', processing_lease_id = NULL, processing_lease_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'processing' AND deletion_state = 'active' AND processing_generation = ? AND processing_lease_id = ?",
+        )
+        .run(now, input.attemptId, input.generation, input.leaseId);
+      if (update.changes !== 1) return false;
+      this.event(input.attemptId, input.generation, "processing-released", now);
+      return true;
     });
   }
 
@@ -405,14 +442,14 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       if (!row || row.deletion_state !== "active") return null;
       const existing = this.raw
         .prepare(
-          "SELECT id, lease_id, generation, outcome_json, request_outcome_json FROM terminal_results WHERE attempt_id = ?",
+          "SELECT id, lease_id, generation, outcome_json, candidate_json FROM terminal_results WHERE attempt_id = ?",
         )
         .get(input.attemptId) as TerminalResultRow | undefined;
       if (existing) {
         if (
           existing.lease_id === input.leaseId &&
           existing.generation === input.generation &&
-          existing.request_outcome_json === stableJson(input.outcome)
+          existing.candidate_json === stableJson(input.candidate)
         ) {
           return this.finalizedFromRows(row, existing.outcome_json);
         }
@@ -423,40 +460,41 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         row.processing_generation !== input.generation ||
         row.processing_lease_id !== input.leaseId ||
         row.processing_lease_expires_at === null ||
-        row.processing_lease_expires_at < this.clock.now()
+        row.processing_lease_expires_at <= this.clock.now()
       )
         return null;
 
-      let outcome = parseTerminalOutcome(input.outcome, row);
+      const candidate = parseTerminalCandidate(input.candidate, row);
+      let outcome: Exclude<AttemptOutcome, { state: "pending" }>;
       let leaderboard: Readonly<{
         entryId: string;
         score: number;
         completedAt: string;
         snapshot: object;
       }> | null = null;
-      if (isRankedOutcome(outcome)) {
+      if (isRankedCandidate(candidate)) {
         const entryId = this.ids.next();
         const cohort = this.currentCohort();
-        const candidate: DomainWallPassRankableResult = {
+        const rankable: DomainWallPassRankableResult = {
           attemptId: input.attemptId,
           entryId,
-          score: outcome.result.score,
-          completedAt: outcome.result.completedAt,
+          score: candidate.result.score,
+          completedAt: candidate.result.completedAt,
           state: "valid",
           active: true,
           competitiveEligible: true,
-          challengeId: outcome.result.challengeId,
-          challengeVersion: outcome.result.challengeVersion,
-          ruleVersion: outcome.result.ruleVersion,
+          challengeId: candidate.result.challengeId,
+          challengeVersion: candidate.result.challengeVersion,
+          ruleVersion: candidate.result.ruleVersion,
         };
         const snapshot = calculateSnapshot(
-          [...cohort, candidate],
+          [...cohort, rankable],
           input.attemptId,
           this.clock.now(),
         );
         const rankedOutcome = AttemptOutcomeSchema.parse({
           state: "valid",
-          result: { ...outcome.result, rankingSnapshot: snapshot },
+          result: { ...candidate.result, rankingSnapshot: snapshot },
         });
         if (!isRankedOutcome(rankedOutcome))
           throw new RepositoryError("invalid_terminal_outcome");
@@ -467,13 +505,15 @@ export class SQLiteAttemptRepository implements AttemptRepository {
           completedAt: rankedOutcome.result.completedAt,
           snapshot,
         });
+      } else {
+        outcome = parseTerminalOutcome(candidate, row);
       }
 
       const completedAt = terminalCompletedAt(outcome, this.clock.now());
       const terminalId = this.ids.next();
       this.raw
         .prepare(
-          "INSERT INTO terminal_results (id, attempt_id, lease_id, generation, terminal_state, outcome_json, request_outcome_json, completed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO terminal_results (id, attempt_id, lease_id, generation, terminal_state, outcome_json, candidate_json, completed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           terminalId,
@@ -482,7 +522,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
           input.generation,
           outcome.state,
           stableJson(outcome),
-          stableJson(input.outcome),
+          stableJson(input.candidate),
           completedAt,
           this.clock.now(),
         );
@@ -601,33 +641,14 @@ export class SQLiteAttemptRepository implements AttemptRepository {
          AND le.challenge_id = 'wall-pass' AND le.challenge_version = 1 AND le.rule_version = 'wall-pass-v1-score-1'`,
       )
       .all()
-      .map((row) => {
-        const value = row as {
-          attempt_id: string;
-          entry_id: string;
-          score: number;
-          completed_at: string;
-        };
-        return {
-          attemptId: value.attempt_id,
-          entryId: value.entry_id,
-          score: value.score,
-          completedAt: value.completed_at,
-          state: "valid" as const,
-          active: true as const,
-          competitiveEligible: true as const,
-          challengeId: "wall-pass",
-          challengeVersion: 1,
-          ruleVersion: "wall-pass-v1-score-1",
-        };
-      });
+      .map(parseCohortRow);
   }
 
   private finalizedFromRows(
     row: AttemptRow,
     outcomeJson: string,
   ): FinalizedAttempt {
-    const outcome = AttemptOutcomeSchema.parse(JSON.parse(outcomeJson));
+    const outcome = parsePersistedOutcome(outcomeJson);
     return Object.freeze({
       attempt: parseAttemptRow({ ...row, outcome_json: outcomeJson }),
       outcome,
@@ -733,52 +754,218 @@ export class SQLiteAttemptRepository implements AttemptRepository {
   }
 }
 
-function parseAttemptRow(row: AttemptRow): AttemptRecord {
+function parseAttemptRow(row: unknown): AttemptRecord {
+  const value = asRecord(row);
+  const requiredStrings = [
+    "id",
+    "athlete_id",
+    "mode",
+    "status",
+    "deletion_state",
+    "created_at",
+  ];
+  if (requiredStrings.some((key) => typeof value[key] !== "string"))
+    throw new RepositoryError("persisted_data_corrupt");
+  if (
+    (value.mode !== "free" && value.mode !== "verified") ||
+    !isAttemptStatus(value.status) ||
+    (value.deletion_state !== "active" &&
+      value.deletion_state !== "tombstoned") ||
+    !UtcIsoTimestampSchema.safeParse(value.created_at).success ||
+    !Number.isInteger(value.processing_generation) ||
+    (value.processing_generation as number) < 0 ||
+    !isNullableString(value.media_json) ||
+    !isNullableString(value.processing_lease_id) ||
+    !isNullableString(value.processing_lease_expires_at) ||
+    !isNullableString(value.outcome_json)
+  )
+    throw new RepositoryError("persisted_data_corrupt");
+  if (
+    value.processing_lease_expires_at !== null &&
+    !UtcIsoTimestampSchema.safeParse(value.processing_lease_expires_at).success
+  )
+    throw new RepositoryError("persisted_data_corrupt");
+  if (
+    (value.challenge_id !== null && value.challenge_id !== "wall-pass") ||
+    (value.challenge_version !== null && value.challenge_version !== 1) ||
+    (value.mode === "free" &&
+      (value.challenge_id !== null || value.challenge_version !== null)) ||
+    (value.mode === "verified" &&
+      (value.challenge_id !== "wall-pass" || value.challenge_version !== 1))
+  )
+    throw new RepositoryError("persisted_data_corrupt");
+  const outcome =
+    value.outcome_json === null
+      ? pendingOutcome(value.id as string, value.mode, value.status)
+      : parsePersistedOutcome(value.outcome_json);
+  if (
+    (value.outcome_json === null &&
+      (value.status === "valid" ||
+        value.status === "invalid" ||
+        value.status === "failed")) ||
+    (value.outcome_json !== null && outcome.state === "pending")
+  )
+    throw new RepositoryError("persisted_data_corrupt");
   return Object.freeze({
-    id: row.id,
-    athleteId: row.athlete_id,
-    mode: row.mode,
-    status: row.status,
-    createdAt: row.created_at,
-    outcome:
-      row.outcome_json === null || row.outcome_json === undefined
-        ? Object.freeze({
-            state: "pending" as const,
-            attemptId: row.id,
-            mode: row.mode,
-            status: row.status as "awaiting-upload" | "uploaded" | "processing",
-          })
-        : AttemptOutcomeSchema.parse(JSON.parse(row.outcome_json)),
+    id: value.id as string,
+    athleteId: value.athlete_id as string,
+    mode: value.mode,
+    status: value.status,
+    createdAt: value.created_at as string,
+    outcome,
     challenge:
-      row.challenge_id === null
+      value.challenge_id === null
         ? null
         : Object.freeze({
-            id: row.challenge_id,
-            version: row.challenge_version!,
+            id: "wall-pass" as const,
+            version: 1 as const,
           }),
-    media: row.media_json === null ? null : parseStoredMedia(row.media_json),
+    media:
+      value.media_json === null ? null : parseStoredMedia(value.media_json),
   });
 }
 
 function parseStoredMedia(value: string): StoredMedia {
-  const parsed = JSON.parse(value) as Partial<StoredMedia>;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new RepositoryError("persisted_data_corrupt");
+  }
+  const record = asRecord(parsed);
   if (
-    typeof parsed.id !== "string" ||
-    typeof parsed.contentType !== "string" ||
-    typeof parsed.bytes !== "number" ||
-    typeof parsed.deleteAt !== "string"
+    typeof record.id !== "string" ||
+    record.id.length === 0 ||
+    typeof record.contentType !== "string" ||
+    record.contentType.length === 0 ||
+    typeof record.bytes !== "number" ||
+    !Number.isFinite(record.bytes) ||
+    !Number.isInteger(record.bytes) ||
+    record.bytes < 0 ||
+    typeof record.deleteAt !== "string" ||
+    !UtcIsoTimestampSchema.safeParse(record.deleteAt).success
   )
-    throw new RepositoryError("invalid_terminal_outcome");
+    throw new RepositoryError("persisted_data_corrupt");
   return Object.freeze({
-    id: parsed.id,
-    contentType: parsed.contentType,
-    bytes: parsed.bytes,
-    deleteAt: parsed.deleteAt,
+    id: record.id,
+    contentType: record.contentType,
+    bytes: record.bytes,
+    deleteAt: record.deleteAt,
   });
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new RepositoryError("persisted_data_corrupt");
+  return value as Record<string, unknown>;
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isAttemptStatus(value: unknown): value is AttemptRecord["status"] {
+  return (
+    value === "awaiting-upload" ||
+    value === "uploaded" ||
+    value === "processing" ||
+    value === "valid" ||
+    value === "invalid" ||
+    value === "failed"
+  );
+}
+
+function pendingOutcome(
+  attemptId: string,
+  mode: "free" | "verified",
+  status: AttemptRecord["status"],
+): AttemptOutcome {
+  if (
+    status !== "awaiting-upload" &&
+    status !== "uploaded" &&
+    status !== "processing"
+  )
+    throw new RepositoryError("persisted_data_corrupt");
+  return Object.freeze({ state: "pending", attemptId, mode, status });
+}
+
+function parsePersistedOutcome(
+  outcomeJson: string,
+): Exclude<AttemptOutcome, { state: "pending" }> {
+  try {
+    const parsed = AttemptOutcomeSchema.safeParse(JSON.parse(outcomeJson));
+    if (!parsed.success || parsed.data.state === "pending")
+      throw new Error("invalid outcome");
+    return parsed.data;
+  } catch {
+    throw new RepositoryError("persisted_data_corrupt");
+  }
+}
+
+function parseCohortRow(row: unknown): DomainWallPassRankableResult {
+  const value = asRecord(row);
+  if (
+    typeof value.attempt_id !== "string" ||
+    value.attempt_id.length === 0 ||
+    typeof value.entry_id !== "string" ||
+    value.entry_id.length === 0 ||
+    typeof value.score !== "number" ||
+    !Number.isInteger(value.score) ||
+    value.score < 0 ||
+    value.score > 100 ||
+    typeof value.completed_at !== "string" ||
+    !UtcIsoTimestampSchema.safeParse(value.completed_at).success
+  )
+    throw new RepositoryError("persisted_data_corrupt");
+  return Object.freeze({
+    attemptId: value.attempt_id,
+    entryId: value.entry_id,
+    score: value.score,
+    completedAt: value.completed_at,
+    state: "valid",
+    active: true,
+    competitiveEligible: true,
+    challengeId: "wall-pass",
+    challengeVersion: 1,
+    ruleVersion: "wall-pass-v1-score-1",
+  });
+}
+
+function parseTerminalCandidate(
+  candidate: TerminalCandidate,
+  attempt: AttemptRow,
+): TerminalCandidate {
+  if (isRankedCandidate(candidate)) {
+    if ("rankingSnapshot" in candidate.result)
+      throw new RepositoryError("invalid_terminal_outcome");
+    const parsed = VerifiedResultSchema.safeParse({
+      ...candidate.result,
+      rankingSnapshot: {
+        kind: "frozen",
+        challengeId: "wall-pass",
+        challengeVersion: 1,
+        ruleVersion: "wall-pass-v1-score-1",
+        rank: 1,
+        cohortSize: 1,
+        percentile: 100,
+        topPercent: 0,
+        scoreCountAtFinalization: 1,
+        asOfAttemptId: candidate.result.attemptId,
+        calculatedAt: candidate.result.completedAt,
+      },
+    });
+    if (!parsed.success || candidate.result.attemptId !== attempt.id)
+      throw new RepositoryError("invalid_terminal_outcome");
+    if (attempt.mode !== "verified")
+      throw new RepositoryError("invalid_terminal_outcome");
+    return candidate;
+  }
+  parseTerminalOutcome(candidate, attempt);
+  return candidate;
+}
+
 function parseTerminalOutcome(
-  outcome: AttemptOutcome,
+  outcome: unknown,
   attempt: AttemptRow,
 ): Exclude<AttemptOutcome, { state: "pending" }> {
   const parsed = AttemptOutcomeSchema.safeParse(outcome);
@@ -805,6 +992,26 @@ type RankedOutcome = Extract<AttemptOutcome, { state: "valid" }> & {
     { competitiveStatus: "ranked" }
   >;
 };
+
+type RankedTerminalCandidate = Extract<
+  Extract<TerminalCandidate, { state: "valid" }>["result"],
+  { competitiveStatus: "ranked" }
+>;
+
+type RankedCandidate = Readonly<{
+  state: "valid";
+  result: RankedTerminalCandidate;
+}>;
+
+function isRankedCandidate(
+  candidate: TerminalCandidate,
+): candidate is RankedCandidate {
+  return (
+    candidate.state === "valid" &&
+    candidate.result.kind === "verified-result" &&
+    candidate.result.competitiveStatus === "ranked"
+  );
+}
 
 function isRankedOutcome(outcome: AttemptOutcome): outcome is RankedOutcome {
   return (
@@ -883,10 +1090,15 @@ function decodeCursor(
     const value = JSON.parse(
       Buffer.from(cursor, "base64url").toString("utf8"),
     ) as { createdAt?: unknown; id?: unknown };
-    if (typeof value.createdAt !== "string" || typeof value.id !== "string")
+    if (
+      typeof value.createdAt !== "string" ||
+      typeof value.id !== "string" ||
+      value.id.length === 0 ||
+      !UtcIsoTimestampSchema.safeParse(value.createdAt).success
+    )
       throw new Error();
     return Object.freeze({ createdAt: value.createdAt, id: value.id });
   } catch {
-    throw new RepositoryError("invalid_attempt_transition");
+    throw new RepositoryError("invalid_input");
   }
 }

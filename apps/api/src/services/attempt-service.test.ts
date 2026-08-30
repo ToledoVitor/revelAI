@@ -25,7 +25,7 @@ class AttachmentStore {
     }>,
   ): Promise<AnalysisJob> {
     this.attached = input.media;
-    return { attemptId: input.attemptId };
+    return { attemptId: input.attemptId, generation: 1 };
   }
 
   public async rollbackMediaAttachment(): Promise<void> {
@@ -37,7 +37,7 @@ describe("AttemptService", () => {
   it("does not attach media while the separate queue is unavailable", async () => {
     const store = new AttachmentStore();
     const queue: AnalysisQueue = {
-      isAvailable: () => false,
+      isAvailable: async () => false,
       enqueue: async () => undefined,
       subscribe: () => () => undefined,
     };
@@ -56,7 +56,7 @@ describe("AttemptService", () => {
   it("rolls an attachment back when the separate queue rejects enqueue", async () => {
     const store = new AttachmentStore();
     const queue: AnalysisQueue = {
-      isAvailable: () => true,
+      isAvailable: async () => true,
       enqueue: async () => {
         throw new QueueUnavailableError();
       },
@@ -83,7 +83,7 @@ describe("AttemptService", () => {
       rollbackMediaAttachment: async () => undefined,
     };
     const queue: AnalysisQueue = {
-      isAvailable: () => true,
+      isAvailable: async () => true,
       enqueue: async () => undefined,
       subscribe: () => () => undefined,
     };

@@ -1,11 +1,12 @@
 export type AnalysisJob = Readonly<{
   attemptId: string;
+  generation: number;
 }>;
 
 export type AnalysisJobDelivery = (job: AnalysisJob) => Promise<void>;
 
 export type AnalysisQueue = Readonly<{
-  isAvailable(): boolean;
+  isAvailable(): Promise<boolean>;
   enqueue(job: AnalysisJob): Promise<void>;
   subscribe(deliver: AnalysisJobDelivery): () => void;
 }>;

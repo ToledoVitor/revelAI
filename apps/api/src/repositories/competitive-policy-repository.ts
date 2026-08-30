@@ -22,6 +22,14 @@ export type CompetitivePolicyActivation = CompetitivePolicyTuple &
 export interface CompetitivePolicyRepository {
   storeBenchmarkReceipt(receipt: unknown): Promise<WorkflowBenchmarkReceipt>;
   activateCompetitivePolicy(input: CompetitivePolicyActivation): Promise<void>;
+  deactivateCompetitivePolicy(input: Readonly<{ id: string }>): Promise<void>;
+  invalidateBenchmarkReceipt(
+    input: Readonly<{
+      receiptId: string;
+      invalidatedAt: string;
+      reason: string;
+    }>,
+  ): Promise<void>;
   getActiveCompetitivePolicy(
     tuple: CompetitivePolicyTuple,
   ): Promise<CompetitivePolicyActivation | null>;
