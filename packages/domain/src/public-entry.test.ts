@@ -1,6 +1,8 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
+import * as publicDomain from "./index.js";
 import {
   DomainError,
   advanceAttempt,
@@ -11,7 +13,6 @@ import {
   evaluateWallPassV1,
   roundHalfUp,
   retryAttempt,
-  scoreWallPassV1,
   tombstoneAttempt,
   WALL_PASS_CHALLENGE_ID,
   WALL_PASS_CHALLENGE_VERSION,
@@ -30,6 +31,17 @@ import {
 } from "./index.js";
 
 const activeStartMs = 4_000;
+
+type IsExactly<Left, Right> =
+  (<Value>() => Value extends Left ? 1 : 2) extends <
+    Value,
+  >() => Value extends Right ? 1 : 2
+    ? true
+    : false;
+const advanceAttemptEventParameterIsExact: IsExactly<
+  Parameters<typeof advanceAttempt>[1],
+  AttemptEvent
+> = true;
 
 function noOutbound(): CanonicalOutboundMovement {
   return { kind: "not-outbound" };
@@ -78,6 +90,55 @@ function continuousEvidence(
   });
   const wallImpacts = Array.from({ length: passCount }, (_, index) =>
     impact(activeStartMs + index * intervalMs + 200),
+  );
+
+  return { contacts, wallImpacts };
+}
+
+function canonicalEvidenceForCounts(
+  opportunities: number,
+  validPasses: number,
+  leftPasses: number,
+): WallPassCanonicalEvidence {
+  if (
+    !Number.isInteger(opportunities) ||
+    !Number.isInteger(validPasses) ||
+    !Number.isInteger(leftPasses) ||
+    opportunities < validPasses ||
+    validPasses < leftPasses ||
+    leftPasses < 0
+  ) {
+    throw new Error("Fixture count inputs must be coherent.");
+  }
+
+  if (opportunities === 0) {
+    return { contacts: [contact(activeStartMs, "left")], wallImpacts: [] };
+  }
+
+  const completedContacts = Array.from(
+    { length: validPasses + 1 },
+    (_, index) =>
+      contact(
+        activeStartMs + index * 1_000,
+        index < leftPasses ? "left" : "right",
+        index < validPasses ? outbound() : noOutbound(),
+      ),
+  );
+  const missedContacts = Array.from(
+    { length: opportunities - validPasses },
+    (_, index) =>
+      contact(
+        activeStartMs + (validPasses + 1 + index) * 1_000,
+        "right",
+        outbound(),
+      ),
+  );
+  const contacts =
+    validPasses === 0
+      ? missedContacts
+      : [...completedContacts, ...missedContacts];
+  const wallImpacts = Array.from({ length: validPasses }, (_, index) =>
+    impact(activeStartMs + index * 1_000 + 300),
   );
 
   return { contacts, wallImpacts };
@@ -164,6 +225,7 @@ function advanceAtRuntime(
 
 describe("attempt reducer public behavior", () => {
   it("creates free and verified attempts in the only initial public state", () => {
+    expect(advanceAttemptEventParameterIsExact).toBe(true);
     expect(createFreeAttempt("free-1")).toEqual({
       id: "free-1",
       mode: "free",
@@ -571,80 +633,54 @@ describe("wall-pass metrics and score", () => {
     );
   });
 
-  it("rounds final score half up and caps every score component", () => {
+  it("rounds final score half up and caps every component from canonical evidence", () => {
     expect(roundHalfUp(1.005, 2)).toBe(1.01);
-    expect(
-      scoreWallPassV1({
-        validPasses: 1,
-        accuracyPercent: 25,
-        meanCadenceSeconds: 0,
-        leftFootPercent: 100,
-        rightFootPercent: 0,
-      }).score,
-    ).toBe(9);
-    expect(
-      scoreWallPassV1({
-        validPasses: 100,
-        accuracyPercent: 100,
-        meanCadenceSeconds: 0.5,
-        leftFootPercent: 50,
-        rightFootPercent: 50,
-      }).score,
-    ).toBe(100);
+    expect(evaluateWallPassV1(canonicalEvidenceForCounts(4, 1, 1)).score).toBe(
+      9,
+    );
+    expect(evaluateWallPassV1(continuousEvidence(100, 500)).score).toBe(100);
   });
 
-  it("rejects score tuples that cannot arise from the normative metrics", () => {
-    const impossibleInputs = [
-      {
-        validPasses: 0,
-        accuracyPercent: 0,
-        meanCadenceSeconds: 0,
-        leftFootPercent: 50,
-        rightFootPercent: 50,
-      },
-      {
-        validPasses: 0,
-        accuracyPercent: 0,
-        meanCadenceSeconds: 1,
-        leftFootPercent: 0,
-        rightFootPercent: 0,
-      },
-      {
-        validPasses: 1,
-        accuracyPercent: 35,
-        meanCadenceSeconds: 0,
-        leftFootPercent: 100,
-        rightFootPercent: 0,
-      },
-      {
-        validPasses: 1,
-        accuracyPercent: 100,
-        meanCadenceSeconds: 0.75,
-        leftFootPercent: 100,
-        rightFootPercent: 0,
-      },
-      {
-        validPasses: 3,
-        accuracyPercent: 100,
-        meanCadenceSeconds: 1,
-        leftFootPercent: 50,
-        rightFootPercent: 50,
-      },
-      {
-        validPasses: 3,
-        accuracyPercent: 100,
-        meanCadenceSeconds: 1,
-        leftFootPercent: 66.67,
-        rightFootPercent: 33.33,
-      },
-    ];
+  it("scores every coherent small count matrix without inferring counts from floats", () => {
+    for (let opportunities = 0; opportunities <= 7; opportunities += 1) {
+      for (
+        let validPasses = 0;
+        validPasses <= opportunities;
+        validPasses += 1
+      ) {
+        for (let leftPasses = 0; leftPasses <= validPasses; leftPasses += 1) {
+          const result = evaluateWallPassV1(
+            canonicalEvidenceForCounts(opportunities, validPasses, leftPasses),
+          );
 
-    for (const input of impossibleInputs) {
-      expectDomainError(
-        () => scoreWallPassV1(input),
-        "invalid_wall_pass_score_input",
-      );
+          expect(result.opportunities).toBe(opportunities);
+          expect(result.missedPasses).toBe(opportunities - validPasses);
+          expect(result.metrics.validPasses).toBe(validPasses);
+          expect(result.score).toBeGreaterThanOrEqual(0);
+          expect(result.score).toBeLessThanOrEqual(100);
+          expect(
+            result.metrics.leftFootPercent + result.metrics.rightFootPercent,
+          ).toBe(validPasses === 0 ? 0 : 100);
+        }
+      }
     }
+  });
+
+  it("scores canonical three-of-seven evidence with asymmetric rounded metrics", () => {
+    const result = evaluateWallPassV1(canonicalEvidenceForCounts(7, 3, 2));
+
+    expect(result.metrics).toEqual({
+      validPasses: 3,
+      accuracyPercent: 42.86,
+      meanCadenceSeconds: 1,
+      leftFootPercent: 66.67,
+      rightFootPercent: 33.33,
+    });
+    expect(result.score).toBe(41);
+  });
+
+  it("keeps canonical scoring internal instead of accepting rounded public metrics", () => {
+    expect(publicDomain).not.toHaveProperty("scoreWallPassV1");
   });
 
   it("is deterministic and leaves canonical evidence unchanged", () => {
@@ -896,6 +932,51 @@ describe("wall-pass ranking", () => {
     );
   });
 
+  it("accepts non-empty opaque entry identifiers while enforcing their uniqueness", () => {
+    const result = rankable(
+      "00000000-0000-4000-8000-000000000070",
+      50,
+      "2026-08-30T12:00:00.000Z",
+      { entryId: "entry-1" },
+    );
+
+    expect(
+      calculateLiveWallPassLeaderboard([result], "2026-08-30T13:00:00.000Z")
+        .entries[0]?.entryId,
+    ).toBe("entry-1");
+    expectDomainError(
+      () =>
+        calculateLiveWallPassLeaderboard(
+          [
+            rankable(
+              "00000000-0000-4000-8000-000000000071",
+              50,
+              "2026-08-30T12:00:00.000Z",
+              { entryId: "   " },
+            ),
+          ],
+          "2026-08-30T13:00:00.000Z",
+        ),
+      "invalid_wall_pass_ranking_input",
+    );
+    expectDomainError(
+      () =>
+        calculateLiveWallPassLeaderboard(
+          [
+            result,
+            rankable(
+              "00000000-0000-4000-8000-000000000072",
+              50,
+              "2026-08-30T12:01:00.000Z",
+              { entryId: "entry-1" },
+            ),
+          ],
+          "2026-08-30T13:00:00.000Z",
+        ),
+      "invalid_wall_pass_ranking_input",
+    );
+  });
+
   it("does not mutate ranking input arrays or result records", () => {
     const input = [
       rankable(
@@ -918,16 +999,33 @@ describe("wall-pass ranking", () => {
 });
 
 describe("domain dependency boundary", () => {
-  it("recognizes static, side-effect, and dynamic runtime-import fixture forms", () => {
+  it("recognizes every runtime module form through the TypeScript AST", () => {
     const fixtures = [
       { source: 'import fs from "node:fs";', violations: ["node:fs"] },
       { source: 'import "node:fs";', violations: ["node:fs"] },
+      {
+        source: 'import {\n  readFileSync,\n} from "node:fs";',
+        violations: ["node:fs"],
+      },
+      {
+        source: 'import fs = require("node:fs");',
+        violations: ["node:fs"],
+      },
+      {
+        source: 'export { readFileSync } from "node:fs";',
+        violations: ["node:fs"],
+      },
+      { source: 'export * from "undici";', violations: ["undici"] },
       {
         source: 'const client = await import("undici");',
         violations: ["undici"],
       },
       {
         source: 'import type { RuntimeOnly } from "not-emitted";',
+        violations: [],
+      },
+      {
+        source: 'export type { RuntimeOnly } from "not-emitted";',
         violations: [],
       },
       {
@@ -941,6 +1039,24 @@ describe("domain dependency boundary", () => {
         fixture.violations,
       );
     }
+  });
+
+  it("rejects every runtime dependency manifest section", () => {
+    expect(
+      runtimeDependencyNames({
+        dependencies: { undici: "1.0.0" },
+        optionalDependencies: { "node-fetch": "1.0.0" },
+        peerDependencies: { react: "1.0.0" },
+        bundledDependencies: ["buffer"],
+        bundleDependencies: ["stream"],
+      }),
+    ).toEqual([
+      "dependencies:undici",
+      "optionalDependencies:node-fetch",
+      "peerDependencies:react",
+      "bundledDependencies:buffer",
+      "bundleDependencies:stream",
+    ]);
   });
 
   it("recursively rejects every non-relative production runtime import and runtime dependency", () => {
@@ -957,10 +1073,13 @@ describe("domain dependency boundary", () => {
     );
     expect(
       productionFiles.flatMap((file) =>
-        forbiddenRuntimeImports(readFileSync(file, "utf8")),
+        forbiddenRuntimeImports(
+          readFileSync(file, "utf8"),
+          fileURLToPath(file),
+        ),
       ),
     ).toEqual([]);
-    expect(runtimeDependencyNames()).toEqual([]);
+    expect(runtimeDependencyNames(readPackageManifest())).toEqual([]);
   });
 });
 
@@ -976,42 +1095,141 @@ function productionTypeScriptFiles(directory: URL): readonly URL[] {
     }
 
     return entry.isFile() &&
-      entry.name.endsWith(".ts") &&
-      !entry.name.endsWith(".test.ts")
+      /\.(?:[cm]?ts|tsx)$/.test(entry.name) &&
+      !/\.(?:test|spec)(?:\.d)?\.(?:[cm]?ts|tsx)$/.test(entry.name)
       ? [child]
       : [];
   });
 }
 
-function forbiddenRuntimeImports(source: string): readonly string[] {
-  const staticImport =
-    /^\s*import\s+(?!type\b)(?:[^"'\n;]*\s+from\s+)?["']([^"']+)["']/gm;
-  const dynamicImport = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
-  const specifiers = [
-    ...Array.from(source.matchAll(staticImport), (match) => match[1]),
-    ...Array.from(source.matchAll(dynamicImport), (match) => match[1]),
-  ].filter((specifier): specifier is string => typeof specifier === "string");
+function forbiddenRuntimeImports(
+  source: string,
+  fileName = "fixture.ts",
+): readonly string[] {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const specifiers: string[] = [];
+  const addSpecifier = (expression: ts.Expression | undefined): void => {
+    if (expression && ts.isStringLiteralLike(expression)) {
+      specifiers.push(expression.text);
+    }
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && hasRuntimeImport(node)) {
+      addSpecifier(node.moduleSpecifier);
+    } else if (
+      ts.isImportEqualsDeclaration(node) &&
+      hasRuntimeImportEquals(node)
+    ) {
+      addSpecifier(importEqualsModuleSpecifier(node));
+    } else if (ts.isExportDeclaration(node) && hasRuntimeExport(node)) {
+      addSpecifier(node.moduleSpecifier);
+    } else if (isLiteralDynamicImport(node)) {
+      addSpecifier(node.arguments[0]);
+    }
 
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
   return specifiers.filter((specifier) => !specifier.startsWith("."));
 }
 
-function runtimeDependencyNames(): readonly string[] {
-  const packageJson: unknown = JSON.parse(
+function hasRuntimeImport(node: ts.ImportDeclaration): boolean {
+  const importClause = node.importClause;
+  if (!importClause) {
+    return true;
+  }
+  if (importClause.isTypeOnly || importClause.name) {
+    return !importClause.isTypeOnly;
+  }
+  if (!importClause.namedBindings) {
+    return false;
+  }
+  if (ts.isNamespaceImport(importClause.namedBindings)) {
+    return true;
+  }
+  return (
+    importClause.namedBindings.elements.length === 0 ||
+    importClause.namedBindings.elements.some((element) => !element.isTypeOnly)
+  );
+}
+
+function hasRuntimeImportEquals(node: ts.ImportEqualsDeclaration): boolean {
+  return !node.isTypeOnly && ts.isExternalModuleReference(node.moduleReference);
+}
+
+function importEqualsModuleSpecifier(
+  node: ts.ImportEqualsDeclaration,
+): ts.Expression | undefined {
+  return ts.isExternalModuleReference(node.moduleReference)
+    ? node.moduleReference.expression
+    : undefined;
+}
+
+function hasRuntimeExport(node: ts.ExportDeclaration): boolean {
+  if (!node.moduleSpecifier || node.isTypeOnly) {
+    return false;
+  }
+  if (!node.exportClause || ts.isNamespaceExport(node.exportClause)) {
+    return true;
+  }
+  return (
+    node.exportClause.elements.length === 0 ||
+    node.exportClause.elements.some((element) => !element.isTypeOnly)
+  );
+}
+
+function isLiteralDynamicImport(node: ts.Node): node is ts.CallExpression {
+  return (
+    ts.isCallExpression(node) &&
+    node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+    ts.isStringLiteralLike(node.arguments[0])
+  );
+}
+
+function readPackageManifest(): unknown {
+  return JSON.parse(
     readFileSync(
       fileURLToPath(new URL("../package.json", import.meta.url)),
       "utf8",
     ),
   );
+}
 
-  if (
-    typeof packageJson !== "object" ||
-    packageJson === null ||
-    !("dependencies" in packageJson) ||
-    typeof packageJson.dependencies !== "object" ||
-    packageJson.dependencies === null
-  ) {
+function runtimeDependencyNames(packageJson: unknown): readonly string[] {
+  if (typeof packageJson !== "object" || packageJson === null) {
     return [];
   }
 
-  return Object.keys(packageJson.dependencies);
+  const manifest = packageJson as Record<string, unknown>;
+  return [
+    "dependencies",
+    "optionalDependencies",
+    "peerDependencies",
+    "bundledDependencies",
+    "bundleDependencies",
+  ].flatMap((section) => dependencyNamesInSection(section, manifest[section]));
+}
+
+function dependencyNamesInSection(
+  section: string,
+  value: unknown,
+): readonly string[] {
+  if (value === undefined || value === false) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value
+      .filter((name): name is string => typeof name === "string")
+      .map((name) => `${section}:${name}`);
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.keys(value).map((name) => `${section}:${name}`);
+  }
+  return [`${section}:<invalid>`];
 }

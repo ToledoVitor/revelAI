@@ -185,7 +185,7 @@ function assertRankableResult(result: WallPassRankableResult): void {
     result.score < WALL_PASS_V1_SCORE_RULE.scoring.minimumScore ||
     result.score > WALL_PASS_V1_SCORE_RULE.scoring.maximumScore ||
     !isUuid(result.attemptId) ||
-    !isUuid(result.entryId)
+    !isNonEmptyOpaqueIdentifier(result.entryId)
   ) {
     throw new DomainError(
       "invalid_wall_pass_ranking_input",
@@ -222,8 +222,15 @@ function assertTimestamp(timestamp: string): void {
   }
 }
 
-function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
-    value,
+function isUuid(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      value,
+    )
   );
+}
+
+function isNonEmptyOpaqueIdentifier(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
 }

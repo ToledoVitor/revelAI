@@ -68,7 +68,7 @@ export function createVerifiedAttempt(id: string): AttemptLifecycleState {
 
 export function advanceAttempt(
   state: AttemptLifecycleState,
-  event: unknown,
+  event: AttemptEvent,
 ): AttemptLifecycleState {
   const validatedEvent = validateAttemptEvent(event);
   assertActive(state);

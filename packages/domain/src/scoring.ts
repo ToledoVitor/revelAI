@@ -18,21 +18,6 @@ export type WallPassMetrics = Readonly<{
   rightFootPercent: number;
 }>;
 
-export type WallPassScoreInput = Readonly<{
-  validPasses: number;
-  accuracyPercent: number;
-  meanCadenceSeconds: number;
-  leftFootPercent: number;
-  rightFootPercent: number;
-}>;
-
-export type WallPassScoreResult = Readonly<{
-  challengeId: typeof WALL_PASS_CHALLENGE_ID;
-  challengeVersion: typeof WALL_PASS_CHALLENGE_VERSION;
-  ruleVersion: typeof WALL_PASS_RULE_VERSION;
-  score: number;
-}>;
-
 export type WallPassEvaluation = Readonly<{
   challengeId: typeof WALL_PASS_CHALLENGE_ID;
   challengeVersion: typeof WALL_PASS_CHALLENGE_VERSION;
@@ -48,6 +33,14 @@ type CompletedPass = Readonly<{
   completedAtMs: number;
 }>;
 
+type CanonicalWallPassScoreInput = Readonly<{
+  opportunities: number;
+  validPasses: number;
+  leftPasses: number;
+  rightPasses: number;
+  meanCadenceSeconds: number;
+}>;
+
 export function evaluateWallPassV1(
   evidence: WallPassCanonicalEvidence,
 ): WallPassEvaluation {
@@ -56,9 +49,12 @@ export function evaluateWallPassV1(
   const completedPasses = findCompletedPasses(evidence);
   const opportunities = countOutboundContacts(evidence.contacts);
   const missedPasses = opportunities - completedPasses.length;
-  const rawMetrics = calculateRawMetrics(completedPasses, opportunities);
-  const metrics = freezeMetrics(rawMetrics);
-  const score = scoreWallPassV1(rawMetrics).score;
+  const scoreInput = calculateCanonicalScoreInput(
+    completedPasses,
+    opportunities,
+  );
+  const metrics = freezeMetrics(scoreInput);
+  const score = scoreCanonicalWallPassV1(scoreInput);
 
   return Object.freeze({
     challengeId: WALL_PASS_CHALLENGE_ID,
@@ -71,10 +67,9 @@ export function evaluateWallPassV1(
   });
 }
 
-export function scoreWallPassV1(
-  input: WallPassScoreInput,
-): WallPassScoreResult {
-  assertScoreInput(input);
+function scoreCanonicalWallPassV1(input: CanonicalWallPassScoreInput): number {
+  assertCanonicalScoreInput(input);
+  const rawMetrics = calculateRawMetrics(input);
 
   const { scoring } = WALL_PASS_V1_SCORE_RULE;
   const volume = clamp(
@@ -91,21 +86,15 @@ export function scoreWallPassV1(
         );
   const balance = clamp(
     scoring.maximumScore -
-      2 * Math.abs(input.leftFootPercent - scoring.maximumScore / 2),
+      2 * Math.abs(rawMetrics.leftFootPercent - scoring.maximumScore / 2),
   );
   const weightedScore =
     scoring.weights.volume * volume +
-    scoring.weights.accuracy * input.accuracyPercent +
+    scoring.weights.accuracy * rawMetrics.accuracyPercent +
     scoring.weights.cadence * cadence +
     scoring.weights.balance * balance;
-  const score = clamp(roundHalfUp(weightedScore, scoring.finalDecimalPlaces));
 
-  return Object.freeze({
-    challengeId: WALL_PASS_CHALLENGE_ID,
-    challengeVersion: WALL_PASS_CHALLENGE_VERSION,
-    ruleVersion: WALL_PASS_RULE_VERSION,
-    score,
-  });
+  return clamp(roundHalfUp(weightedScore, scoring.finalDecimalPlaces));
 }
 
 export function roundHalfUp(value: number, decimalPlaces: number): number {
@@ -194,27 +183,21 @@ function countOutboundContacts(
     .length;
 }
 
-function calculateRawMetrics(
+function calculateCanonicalScoreInput(
   completedPasses: readonly CompletedPass[],
   opportunities: number,
-): WallPassScoreInput {
+): CanonicalWallPassScoreInput {
   const validPasses = completedPasses.length;
   const leftPasses = completedPasses.filter(
     (completedPass) => completedPass.startingContact.side === "left",
   ).length;
-  const rawAccuracyPercent =
-    opportunities === 0 ? 0 : (100 * validPasses) / opportunities;
-  const rawCadenceSeconds = calculateRawCadenceSeconds(completedPasses);
-  const rawLeftFootPercent =
-    validPasses === 0 ? 0 : (100 * leftPasses) / validPasses;
-  const rawRightFootPercent = validPasses === 0 ? 0 : 100 - rawLeftFootPercent;
 
   return Object.freeze({
+    opportunities,
     validPasses,
-    accuracyPercent: rawAccuracyPercent,
-    meanCadenceSeconds: rawCadenceSeconds,
-    leftFootPercent: rawLeftFootPercent,
-    rightFootPercent: rawRightFootPercent,
+    leftPasses,
+    rightPasses: validPasses - leftPasses,
+    meanCadenceSeconds: calculateRawCadenceSeconds(completedPasses),
   });
 }
 
@@ -239,7 +222,29 @@ function calculateRawCadenceSeconds(
   return totalMs / deltasMs.length / 1_000;
 }
 
-function freezeMetrics(rawMetrics: WallPassScoreInput): WallPassMetrics {
+function calculateRawMetrics(
+  input: CanonicalWallPassScoreInput,
+): WallPassMetrics {
+  return {
+    validPasses: input.validPasses,
+    accuracyPercent:
+      input.opportunities === 0
+        ? 0
+        : (100 * input.validPasses) / input.opportunities,
+    meanCadenceSeconds: input.meanCadenceSeconds,
+    leftFootPercent:
+      input.validPasses === 0
+        ? 0
+        : (100 * input.leftPasses) / input.validPasses,
+    rightFootPercent:
+      input.validPasses === 0
+        ? 0
+        : (100 * input.rightPasses) / input.validPasses,
+  };
+}
+
+function freezeMetrics(input: CanonicalWallPassScoreInput): WallPassMetrics {
+  const rawMetrics = calculateRawMetrics(input);
   const decimalPlaces = WALL_PASS_V1_SCORE_RULE.metrics.decimalPlaces;
   const accuracyPercent = roundHalfUp(
     rawMetrics.accuracyPercent,
@@ -289,69 +294,27 @@ function reconcileFootBalance(
   return Object.freeze({ leftFootPercent, rightFootPercent });
 }
 
-function assertScoreInput(input: WallPassScoreInput): void {
-  const { maximumScore } = WALL_PASS_V1_SCORE_RULE.scoring;
+function assertCanonicalScoreInput(input: CanonicalWallPassScoreInput): void {
   if (
+    !Number.isInteger(input.opportunities) ||
     !Number.isInteger(input.validPasses) ||
+    !Number.isInteger(input.leftPasses) ||
+    !Number.isInteger(input.rightPasses) ||
+    input.opportunities < 0 ||
     input.validPasses < 0 ||
-    !isWithin(input.accuracyPercent, 0, maximumScore) ||
-    !isWithin(input.meanCadenceSeconds, 0, Number.POSITIVE_INFINITY) ||
-    !isWithin(input.leftFootPercent, 0, maximumScore) ||
-    !isWithin(input.rightFootPercent, 0, maximumScore)
+    input.validPasses > input.opportunities ||
+    input.leftPasses < 0 ||
+    input.rightPasses < 0 ||
+    input.leftPasses + input.rightPasses !== input.validPasses ||
+    !isWithin(input.meanCadenceSeconds, 0, Number.POSITIVE_INFINITY)
   ) {
     return invalidScoreInput();
   }
 
-  if (input.validPasses === 0) {
-    if (
-      input.accuracyPercent !== 0 ||
-      input.meanCadenceSeconds !== 0 ||
-      input.leftFootPercent !== 0 ||
-      input.rightFootPercent !== 0
-    ) {
-      return invalidScoreInput();
-    }
-    return;
-  }
-
   if (
-    (input.validPasses <
+    input.validPasses <
       WALL_PASS_V1_SCORE_RULE.metrics.zeroCadenceBelowPassCount &&
-      input.meanCadenceSeconds !== 0) ||
-    input.leftFootPercent + input.rightFootPercent !==
-      WALL_PASS_V1_SCORE_RULE.scoring.maximumScore
-  ) {
-    return invalidScoreInput();
-  }
-
-  const opportunities =
-    (WALL_PASS_V1_SCORE_RULE.scoring.maximumScore * input.validPasses) /
-    input.accuracyPercent;
-  if (
-    !Number.isInteger(opportunities) ||
-    opportunities < input.validPasses ||
-    (WALL_PASS_V1_SCORE_RULE.scoring.maximumScore * input.validPasses) /
-      opportunities !==
-      input.accuracyPercent
-  ) {
-    return invalidScoreInput();
-  }
-
-  const leftPasses =
-    (input.leftFootPercent * input.validPasses) /
-    WALL_PASS_V1_SCORE_RULE.scoring.maximumScore;
-  if (!Number.isInteger(leftPasses)) {
-    return invalidScoreInput();
-  }
-
-  const expectedLeftFootPercent =
-    (WALL_PASS_V1_SCORE_RULE.scoring.maximumScore * leftPasses) /
-    input.validPasses;
-  const expectedRightFootPercent =
-    WALL_PASS_V1_SCORE_RULE.scoring.maximumScore - expectedLeftFootPercent;
-  if (
-    input.leftFootPercent !== expectedLeftFootPercent ||
-    input.rightFootPercent !== expectedRightFootPercent
+    input.meanCadenceSeconds !== 0
   ) {
     return invalidScoreInput();
   }

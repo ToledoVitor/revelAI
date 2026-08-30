@@ -32,11 +32,8 @@ export {
 export {
   evaluateWallPassV1,
   roundHalfUp,
-  scoreWallPassV1,
   type WallPassEvaluation,
   type WallPassMetrics,
-  type WallPassScoreInput,
-  type WallPassScoreResult,
 } from "./scoring.js";
 export {
   calculateFrozenWallPassSnapshot,
