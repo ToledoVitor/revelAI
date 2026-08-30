@@ -164,11 +164,34 @@ export class AnalysisWorker {
     claim: ProcessingClaim,
     error: unknown,
   ): Promise<void> {
-    const recovery = await this.repository.recordProcessingFailure({
-      attemptId: job.attemptId,
-      leaseId: claim.leaseId,
-      generation: claim.generation,
-    });
+    let recovery: ProcessingFailureRecordOutcome;
+    try {
+      recovery = await this.repository.recordProcessingFailure({
+        attemptId: job.attemptId,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+      });
+    } catch {
+      // Recovery accounting is diagnostic state, never authority to strand an
+      // active lease. Prefer safe release; if that write is also rejected,
+      // make one bounded terminal attempt rather than acknowledge an orphan.
+      try {
+        await this.repository.releaseProcessingClaim({
+          attemptId: job.attemptId,
+          leaseId: claim.leaseId,
+          generation: claim.generation,
+        });
+        return;
+      } catch {
+        const deadLetter = await this.repository.deadLetterProcessingClaim({
+          attemptId: job.attemptId,
+          leaseId: claim.leaseId,
+          generation: claim.generation,
+        });
+        if (deadLetter.kind === "lost-claim") throw error;
+        return;
+      }
+    }
     if (recovery.kind === "tombstoned") return;
     if (recovery.kind === "lost-claim") {
       await this.retryWaiter.wait(this.unexpectedRetryPolicy.delayMilliseconds);

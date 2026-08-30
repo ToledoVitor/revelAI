@@ -8,7 +8,7 @@ import { MediaPipelineError } from "./probe.js";
 
 const mediaId = "11111111-1111-4111-8111-111111111111";
 const bytes = Buffer.from([
-  0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d,
+  0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 1, 2, 3, 4,
 ]);
 
 describe("MediaPipeline", () => {
@@ -34,6 +34,7 @@ describe("MediaPipeline", () => {
             displayHeight: 853,
             nominalFps: 12,
             codec: "h264",
+            sourceRotationDegrees: 0,
           }),
         },
       }),
@@ -62,6 +63,7 @@ describe("MediaPipeline", () => {
             displayHeight: 853,
             nominalFps: 12,
             codec: "h264",
+            sourceRotationDegrees: 0,
           }),
         },
       }),

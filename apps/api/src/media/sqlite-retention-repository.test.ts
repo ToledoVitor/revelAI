@@ -7,6 +7,7 @@ import {
   type SqliteDatabase,
 } from "../database/sqlite-database.js";
 import { SQLiteAttemptRepository } from "../repositories/sqlite-attempt-repository.js";
+import { RetentionScavenger } from "./retention-scavenger.js";
 import { SQLiteRetentionRepository } from "./sqlite-retention-repository.js";
 
 const ATHLETE = "11111111-1111-4111-8111-111111111111";
@@ -100,6 +101,57 @@ describe("SQLiteRetentionRepository", () => {
         deleteAt: "2030-01-16T11:00:00.000Z",
         cleanupRequestedAt: "2030-01-15T12:00:00.000Z",
       },
+    ]);
+  });
+
+  it("deletes the canonical observation in the same transaction before acknowledging its fact", async () => {
+    const observation = "88888888-8888-4888-8888-888888888888";
+    database.raw
+      .prepare(
+        "INSERT INTO canonical_observations (id, attempt_id, payload_json, delete_at, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(
+        observation,
+        ATTEMPT,
+        "{}",
+        "2030-01-16T10:00:00.000Z",
+        "2030-01-15T12:00:00.000Z",
+      );
+    const repository = new SQLiteRetentionRepository({ database });
+    await repository.schedule({
+      id: observation,
+      attemptId: ATTEMPT,
+      kind: "observation",
+      deleteAt: "2030-01-16T10:00:00.000Z",
+    });
+    const scavenger = new RetentionScavenger({
+      repository,
+      objects: {
+        delete: async () => {
+          expect(
+            database.raw
+              .prepare(
+                "SELECT COUNT(*) AS count FROM canonical_observations WHERE id = ?",
+              )
+              .get(observation),
+          ).toEqual({ count: 1 });
+        },
+      },
+      maxBatchSize: 1,
+      log: { event: () => undefined },
+    });
+    await scavenger.run("2030-01-16T11:00:00.000Z");
+    expect(
+      database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM canonical_observations WHERE id = ?",
+        )
+        .get(observation),
+    ).toEqual({ count: 0 });
+    await expect(
+      repository.listDue({ now: "2030-01-16T11:00:00.000Z", limit: 10 }),
+    ).resolves.toEqual([
+      expect.objectContaining({ kind: "original", id: MEDIA }),
     ]);
   });
 });

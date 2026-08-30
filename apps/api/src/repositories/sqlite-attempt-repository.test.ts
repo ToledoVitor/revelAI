@@ -2246,6 +2246,68 @@ describe("SQLiteAttemptRepository", () => {
     expect(await resumed.claimProcessing(job)).toBeNull();
   });
 
+  it("releases a claim when SQLite rejects recovery accounting instead of acknowledging an orphan", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    fixture.database.raw.exec(`
+      CREATE TRIGGER reject_processing_recovery
+      BEFORE INSERT ON processing_recovery_records
+      BEGIN
+        SELECT RAISE(ABORT, 'forced recovery rejection');
+      END;
+    `);
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    const worker = new AnalysisWorker({
+      queue,
+      repository: fixture.repository,
+      process: async () => {
+        throw new Error("processor failure");
+      },
+      retryWaiter: { wait: async () => undefined },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue(job);
+    await scheduler.tasks.shift()!();
+    stop();
+
+    expect(scheduler.tasks).toEqual([]);
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({ status: "uploaded", outcome: { state: "pending" } });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({ count: 0 });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT processing_lease_id AS leaseId FROM attempts WHERE id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toEqual({ leaseId: null });
+  });
+
   it("persists recovery attempts by attachment generation across repository instances", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,

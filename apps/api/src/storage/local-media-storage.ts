@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, link, lstat, mkdir, open, rm, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { temporaryDeleteAt } from "../media/retention-deadlines.js";
+import type { RetentionRecord } from "../media/retention-scavenger.js";
 import {
   MediaPipelineError,
   sniffMediaContainer,
@@ -20,6 +22,38 @@ export interface LocalMediaProber {
   ): Promise<MediaProbe>;
 }
 
+/** A durable cleanup fact is created before an exclusive temporary is usable. */
+export interface UploadRetentionRepository {
+  schedule(
+    input: Readonly<{
+      id: string;
+      attemptId: string;
+      kind: "temporary";
+      deleteAt: string;
+    }>,
+  ): Promise<void>;
+  acknowledge(record: RetentionRecord): Promise<void>;
+}
+
+export interface UploadCleanupLog {
+  event(
+    event: Readonly<{
+      category: "retention_cleanup_failed";
+      attempt: string;
+      resource: string;
+    }>,
+  ): void;
+}
+
+/**
+ * The publisher is the only visibility boundary. Production reserves one
+ * target with O_EXCL directory creation, then atomically renames; tests can
+ * inject failures without turning local paths into an application interface.
+ */
+export interface NoReplacePublisher {
+  publish(temporaryPath: string, finalPath: string): Promise<void>;
+}
+
 export type StoredLocalMedia = Readonly<{
   id: string;
   bytes: number;
@@ -28,10 +62,27 @@ export type StoredLocalMedia = Readonly<{
   probe: MediaProbe;
 }>;
 
+export interface LocalMediaUploadSession {
+  write(chunk: Uint8Array): Promise<void>;
+  commit(): Promise<StoredLocalMedia>;
+  abort(): Promise<void>;
+}
+
+type UploadOptions = Readonly<{
+  maxBytes: number;
+  validate?: (
+    input: Readonly<{ bytes: number; probe: MediaProbe }>,
+  ) => void | Promise<void>;
+  retention?: Readonly<{
+    repository: UploadRetentionRepository;
+    attemptId: string;
+    createdAt: string;
+  }>;
+}>;
+
 /**
  * Local-only media capability. Paths never leave this module's storage API.
- * Publication uses a hard-link + unlink sequence, so an existing target can
- * never be replaced between validation and visibility.
+ * A session owns exactly one O_EXCL temporary, validation, and publication.
  */
 export class LocalMediaStorage {
   private readonly root: string;
@@ -40,12 +91,16 @@ export class LocalMediaStorage {
   private readonly temporary: string;
   private readonly ids: OpaqueMediaIdGenerator;
   private readonly prober: LocalMediaProber;
+  private readonly publisher: NoReplacePublisher;
+  private readonly cleanupLog: UploadCleanupLog | undefined;
 
   public constructor(
     input: Readonly<{
       root: string;
       ids: OpaqueMediaIdGenerator;
       prober: LocalMediaProber;
+      publisher?: NoReplacePublisher;
+      cleanupLog?: UploadCleanupLog;
     }>,
   ) {
     this.root = resolve(input.root);
@@ -54,6 +109,8 @@ export class LocalMediaStorage {
     this.temporary = join(this.root, "temporary");
     this.ids = input.ids;
     this.prober = input.prober;
+    this.publisher = input.publisher ?? { publish: publishNoReplace };
+    this.cleanupLog = input.cleanupLog;
   }
 
   public async initialize(): Promise<void> {
@@ -67,6 +124,55 @@ export class LocalMediaStorage {
     }
   }
 
+  public async createUploadSession(
+    input: UploadOptions,
+  ): Promise<LocalMediaUploadSession> {
+    if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1)
+      throw new MediaPipelineError("media_too_large");
+    await this.initialize();
+    const id = this.ids.next();
+    if (!isOpaqueUuid(id)) throw new MediaPipelineError("media_probe_failed");
+    const finalPath = this.safePath(this.originals, id);
+    const temporaryPath = this.safePath(this.temporary, `${id}.uploading`);
+    if (await pathExists(finalPath))
+      throw new MediaPipelineError("media_probe_failed");
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(
+        temporaryPath,
+        constants.O_WRONLY |
+          constants.O_CREAT |
+          constants.O_EXCL |
+          (constants.O_NOFOLLOW ?? 0),
+        0o600,
+      );
+      await handle.chmod(0o600);
+      if (input.retention) {
+        await input.retention.repository.schedule({
+          id,
+          attemptId: input.retention.attemptId,
+          kind: "temporary",
+          deleteAt: temporaryDeleteAt(input.retention.createdAt),
+        });
+      }
+    } catch (error) {
+      await handle?.close().catch(() => undefined);
+      await removeQuietly(temporaryPath);
+      if (error instanceof MediaPipelineError) throw error;
+      throw new MediaPipelineError("media_probe_failed");
+    }
+    return new LocalUploadSession({
+      id,
+      finalPath,
+      temporaryPath,
+      handle,
+      options: input,
+      prober: this.prober,
+      publisher: this.publisher,
+      cleanupLog: this.cleanupLog,
+    });
+  }
+
   public async store(
     input: Readonly<{
       source: AsyncIterable<Uint8Array>;
@@ -76,95 +182,29 @@ export class LocalMediaStorage {
       ) => void | Promise<void>;
     }>,
   ): Promise<StoredLocalMedia> {
-    if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1)
-      throw new MediaPipelineError("media_too_large");
-    await this.initialize();
-    const id = this.ids.next();
-    if (!isOpaqueUuid(id)) throw new MediaPipelineError("media_probe_failed");
-    const target = this.safePath(this.originals, id);
-    const temporary = this.safePath(this.temporary, `${id}.uploading`);
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
-    let published = false;
+    const session = await this.createUploadSession(input);
     try {
-      if (await pathExists(target))
-        throw new MediaPipelineError("media_probe_failed");
-      handle = await open(
-        temporary,
-        constants.O_WRONLY |
-          constants.O_CREAT |
-          constants.O_EXCL |
-          (constants.O_NOFOLLOW ?? 0),
-        0o600,
-      );
-      await handle.chmod(0o600);
-      const digest = createHash("sha256");
-      const magic = new Uint8Array(4096);
-      let magicLength = 0;
-      let bytes = 0;
-      for await (const chunk of input.source) {
-        if (!(chunk instanceof Uint8Array))
-          throw new MediaPipelineError("media_probe_failed");
-        if (chunk.length > input.maxBytes - bytes)
-          throw new MediaPipelineError("media_too_large");
-        bytes += chunk.length;
-        digest.update(chunk);
-        if (magicLength < magic.length) {
-          const copied = Math.min(chunk.length, magic.length - magicLength);
-          magic.set(chunk.subarray(0, copied), magicLength);
-          magicLength += copied;
-        }
-        await handle.write(chunk);
-      }
-      if (bytes === 0) throw new MediaPipelineError("media_empty");
-      await handle.close();
-      handle = undefined;
-      const magicContainer = sniffMediaContainer(
-        magic.subarray(0, magicLength),
-      );
-      const probe = await this.prober.probe({
-        filePath: temporary,
-        magicContainer,
-      });
-      if (probe.container !== magicContainer)
-        throw new MediaPipelineError("media_container_not_allowed");
-      await input.validate?.(
-        Object.freeze({ bytes, probe: Object.freeze({ ...probe }) }),
-      );
-      if (await pathExists(target))
-        throw new MediaPipelineError("media_probe_failed");
-      await link(temporary, target);
-      await chmod(target, 0o600);
-      await unlink(temporary);
-      published = true;
-      return Object.freeze({
-        id,
-        bytes,
-        contentType: contentTypeFor(magicContainer),
-        sha256: digest.digest("hex"),
-        probe: Object.freeze({ ...probe }),
-      });
+      for await (const chunk of input.source) await session.write(chunk);
+      return await session.commit();
     } catch (error) {
-      if (error instanceof MediaPipelineError) throw error;
-      throw new MediaPipelineError("media_probe_failed");
-    } finally {
-      await handle?.close().catch(() => undefined);
-      if (!published) await removeQuietly(temporary);
+      await session.abort();
+      throw error;
     }
   }
 
   public async delete(id: string): Promise<void> {
     if (!isOpaqueUuid(id)) return;
-    await removeQuietly(this.safePath(this.originals, id));
+    await removeStrict(this.safePath(this.originals, id));
   }
 
   public async deleteFrame(id: string): Promise<void> {
     if (!isOpaqueUuid(id)) return;
-    await removeQuietly(this.safePath(this.frames, id));
+    await removeStrict(this.safePath(this.frames, id));
   }
 
   public async deleteTemporary(id: string): Promise<void> {
     if (!isOpaqueUuid(id)) return;
-    await removeQuietly(this.safePath(this.temporary, `${id}.uploading`));
+    await removeStrict(this.safePath(this.temporary, `${id}.uploading`));
   }
 
   private safePath(directory: string, name: string): string {
@@ -174,6 +214,133 @@ export class LocalMediaStorage {
     if (!target.startsWith(`${directory}/`))
       throw new MediaPipelineError("media_probe_failed");
     return target;
+  }
+}
+
+class LocalUploadSession implements LocalMediaUploadSession {
+  private readonly digest = createHash("sha256");
+  private readonly magic = new Uint8Array(4096);
+  private magicLength = 0;
+  private bytes = 0;
+  private handle: Awaited<ReturnType<typeof open>> | undefined;
+  private settled = false;
+  private published = false;
+
+  public constructor(
+    private readonly state: Readonly<{
+      id: string;
+      finalPath: string;
+      temporaryPath: string;
+      handle: Awaited<ReturnType<typeof open>>;
+      options: UploadOptions;
+      prober: LocalMediaProber;
+      publisher: NoReplacePublisher;
+      cleanupLog: UploadCleanupLog | undefined;
+    }>,
+  ) {
+    this.handle = state.handle;
+  }
+
+  public async write(chunk: Uint8Array): Promise<void> {
+    if (this.settled || !this.handle || !(chunk instanceof Uint8Array))
+      throw new MediaPipelineError("media_probe_failed");
+    if (chunk.length > this.state.options.maxBytes - this.bytes)
+      throw new MediaPipelineError("media_too_large");
+    this.bytes += chunk.length;
+    this.digest.update(chunk);
+    if (this.magicLength < this.magic.length) {
+      const copied = Math.min(
+        chunk.length,
+        this.magic.length - this.magicLength,
+      );
+      this.magic.set(chunk.subarray(0, copied), this.magicLength);
+      this.magicLength += copied;
+    }
+    try {
+      await this.handle.write(chunk);
+    } catch {
+      throw new MediaPipelineError("media_probe_failed");
+    }
+  }
+
+  public async commit(): Promise<StoredLocalMedia> {
+    if (this.settled || !this.handle)
+      throw new MediaPipelineError("media_probe_failed");
+    try {
+      if (this.bytes === 0) throw new MediaPipelineError("media_empty");
+      await this.handle.close();
+      this.handle = undefined;
+      const magicContainer = sniffMediaContainer(
+        this.magic.subarray(0, this.magicLength),
+      );
+      const probe = await this.state.prober.probe({
+        filePath: this.state.temporaryPath,
+        magicContainer,
+      });
+      if (probe.container !== magicContainer)
+        throw new MediaPipelineError("media_container_not_allowed");
+      await this.state.options.validate?.(
+        Object.freeze({
+          bytes: this.bytes,
+          probe: Object.freeze({ ...probe }),
+        }),
+      );
+      await chmod(this.state.temporaryPath, 0o600);
+      await this.state.publisher.publish(
+        this.state.temporaryPath,
+        this.state.finalPath,
+      );
+      this.published = true;
+      this.settled = true;
+      await this.acknowledgeTemporary().catch(() => {
+        this.state.cleanupLog?.event({
+          category: "retention_cleanup_failed",
+          attempt: redact(this.state.options.retention?.attemptId),
+          resource: redact(this.state.id),
+        });
+      });
+      return Object.freeze({
+        id: this.state.id,
+        bytes: this.bytes,
+        contentType: contentTypeFor(magicContainer),
+        sha256: this.digest.digest("hex"),
+        probe: Object.freeze({ ...probe }),
+      });
+    } catch (error) {
+      await this.abort();
+      if (error instanceof MediaPipelineError) throw error;
+      throw new MediaPipelineError("media_probe_failed");
+    }
+  }
+
+  public async abort(): Promise<void> {
+    if (this.settled) return;
+    this.settled = true;
+    await this.handle?.close().catch(() => undefined);
+    this.handle = undefined;
+    try {
+      await removeStrict(this.state.temporaryPath);
+      if (this.published) await removeStrict(this.state.finalPath);
+      await this.acknowledgeTemporary();
+    } catch {
+      this.state.cleanupLog?.event({
+        category: "retention_cleanup_failed",
+        attempt: redact(this.state.options.retention?.attemptId),
+        resource: redact(this.state.id),
+      });
+    }
+  }
+
+  private async acknowledgeTemporary(): Promise<void> {
+    const retention = this.state.options.retention;
+    if (!retention) return;
+    await retention.repository.acknowledge({
+      id: this.state.id,
+      attemptId: retention.attemptId,
+      kind: "temporary",
+      deleteAt: temporaryDeleteAt(retention.createdAt),
+      cleanupRequestedAt: null,
+    });
   }
 }
 
@@ -189,6 +356,26 @@ function isOpaqueUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     value,
   );
+}
+
+async function publishNoReplace(
+  temporaryPath: string,
+  finalPath: string,
+): Promise<void> {
+  const reservation = `${finalPath}.publishing`;
+  await mkdir(reservation, { mode: 0o700 });
+  try {
+    if (await pathExists(finalPath))
+      throw new MediaPipelineError("media_probe_failed");
+    await rename(temporaryPath, finalPath);
+  } finally {
+    // A stale private reservation prevents replacement; the hourly temporary
+    // sweep can safely remove it on restart. Never turn a completed rename
+    // into a failed upload while leaving the final object unreported.
+    await rm(reservation, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
+  }
 }
 
 async function ensurePrivateDirectory(directory: string): Promise<void> {
@@ -212,8 +399,16 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+async function removeStrict(path: string): Promise<void> {
+  await rm(path, { recursive: true, force: true });
+}
+
 async function removeQuietly(path: string): Promise<void> {
-  await rm(path, { force: true }).catch(() => undefined);
+  await removeStrict(path).catch(() => undefined);
+}
+
+function redact(value: string | undefined): string {
+  return value?.slice(0, 8) ?? "unknown";
 }
 
 function isNotFound(error: unknown): boolean {

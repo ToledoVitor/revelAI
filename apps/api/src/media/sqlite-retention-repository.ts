@@ -100,6 +100,16 @@ export class SQLiteRetentionRepository implements RetentionRepository {
           .run(record.id, record.attemptId);
         return;
       }
+      if (record.kind === "observation") {
+        // The observation is canonical database data, so physical deletion and
+        // acknowledgement share one transaction: a cleanup fact can never be
+        // removed while its observation still exists.
+        this.raw
+          .prepare(
+            "DELETE FROM canonical_observations WHERE id = ? AND attempt_id = ?",
+          )
+          .run(record.id, record.attemptId);
+      }
       this.raw
         .prepare(
           "DELETE FROM retention_cleanup_records WHERE resource_id = ? AND attempt_id = ?",

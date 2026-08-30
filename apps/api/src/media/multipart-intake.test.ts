@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MediaPipelineError } from "./probe.js";
 import {
   acceptSingleMediaPart,
+  RawMultipartByteCounter,
   type MultipartPart,
 } from "./multipart-intake.js";
 
@@ -17,7 +18,7 @@ describe("framework-neutral multipart intake", () => {
         ),
         maxUploadBytes: 2,
         maxMultipartBytes: 9,
-        measuredMultipartBytes: 9,
+        rawBody: measured(9, 9),
         createStage: async () => staged,
       }),
     ).resolves.toEqual({ filenameExtension: "mp4", bytes: 2, stage: staged });
@@ -43,7 +44,7 @@ describe("framework-neutral multipart intake", () => {
           parts: parts(...supplied),
           maxUploadBytes: 2,
           maxMultipartBytes: 8,
-          measuredMultipartBytes: 8,
+          rawBody: measured(8, 8),
           createStage: async () => staged,
         }),
       ).rejects.toBeInstanceOf(MediaPipelineError);
@@ -65,17 +66,14 @@ describe("framework-neutral multipart intake", () => {
         ),
         maxUploadBytes: 2,
         maxMultipartBytes: 3,
-        measuredMultipartBytes: 3,
+        rawBody: measured(3, 3),
         declaredContentLength: 1,
         createStage: async () => exact,
       }),
     ).resolves.toMatchObject({ bytes: 2 });
     for (const input of [
-      { measuredMultipartBytes: 4, chunks: [Buffer.from([1])], aborts: false },
       {
-        measuredMultipartBytes: 3,
         chunks: [Buffer.from([1]), Buffer.from([2]), Buffer.from([3])],
-        aborts: true,
       },
     ]) {
       const staged = new MemoryStage();
@@ -84,11 +82,11 @@ describe("framework-neutral multipart intake", () => {
           parts: parts(file("media", "x.webm", "video/webm", input.chunks)),
           maxUploadBytes: 2,
           maxMultipartBytes: 3,
-          measuredMultipartBytes: input.measuredMultipartBytes,
+          rawBody: measured(3, 3),
           createStage: async () => staged,
         }),
       ).rejects.toBeInstanceOf(MediaPipelineError);
-      expect(staged.aborted).toBe(input.aborts);
+      expect(staged.aborted).toBe(true);
     }
   });
 
@@ -99,7 +97,7 @@ describe("framework-neutral multipart intake", () => {
         parts: parts(file("media", "x.mov", "video/mp4", [Buffer.from([1])])),
         maxUploadBytes: 1,
         maxMultipartBytes: 2,
-        measuredMultipartBytes: 2,
+        rawBody: measured(2, 2),
         createStage: async () => stage,
       }),
     ).rejects.toThrow(new MediaPipelineError("media_filename_mime_mismatch"));
@@ -109,10 +107,25 @@ describe("framework-neutral multipart intake", () => {
         parts: parts(file("media", "x.mov", "video/quicktime", [])),
         maxUploadBytes: 1,
         maxMultipartBytes: 2,
-        measuredMultipartBytes: 2,
+        rawBody: measured(2, 2),
         createStage: async () => stage,
       }),
     ).rejects.toThrow(new MediaPipelineError("media_empty"));
+  });
+
+  it("stops the raw envelope at the first byte over its limit without Content-Length", async () => {
+    const counter = new RawMultipartByteCounter(3);
+    const observed: number[] = [];
+    await expect(
+      (async () => {
+        for await (const chunk of counter.stream(
+          chunks(Buffer.from([1, 2]), Buffer.from([3, 4])),
+        ))
+          observed.push(...chunk);
+      })(),
+    ).rejects.toThrow(new MediaPipelineError("multipart_body_too_large"));
+    expect(observed).toEqual([1, 2]);
+    expect(counter.measuredBytes).toBe(2);
   });
 });
 
@@ -145,5 +158,17 @@ function field(name: string, chunks: readonly Uint8Array[]): MultipartPart {
 async function* parts(
   ...values: readonly MultipartPart[]
 ): AsyncIterable<MultipartPart> {
+  yield* values;
+}
+
+function measured(limit: number, bytes: number): RawMultipartByteCounter {
+  const counter = new RawMultipartByteCounter(limit);
+  if (bytes > 0) counter.observe(new Uint8Array(bytes));
+  return counter;
+}
+
+async function* chunks(
+  ...values: readonly Uint8Array[]
+): AsyncIterable<Uint8Array> {
   yield* values;
 }

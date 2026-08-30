@@ -17,6 +17,7 @@ const probe = {
   displayHeight: 720,
   nominalFps: 30,
   codec: "h264",
+  sourceRotationDegrees: 0 as const,
 };
 
 describe("extraction manifest", () => {

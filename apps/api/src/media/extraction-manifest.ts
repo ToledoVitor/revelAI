@@ -22,7 +22,11 @@ type ManifestBase = Readonly<{
   generation: number;
   mediaId: string;
   mediaSha256: string;
-  display: Readonly<{ width: number; height: number; rotationDegrees: 0 }>;
+  display: Readonly<{
+    width: number;
+    height: number;
+    rotationDegrees: MediaProbe["sourceRotationDegrees"];
+  }>;
   probe: MediaProbe;
   frames: Readonly<{ count: number; items: readonly ManifestFrame[] }>;
 }>;
@@ -71,7 +75,7 @@ export function createExtractionManifest(
       display: Object.freeze({
         width: input.probe.displayWidth,
         height: input.probe.displayHeight,
-        rotationDegrees: 0,
+        rotationDegrees: input.probe.sourceRotationDegrees,
       }),
       probe: Object.freeze({ ...input.probe }),
       frames: Object.freeze({
@@ -103,7 +107,7 @@ export function createExtractionManifest(
     display: Object.freeze({
       width: input.probe.displayWidth,
       height: input.probe.displayHeight,
-      rotationDegrees: 0,
+      rotationDegrees: input.probe.sourceRotationDegrees,
     }),
     probe: Object.freeze({ ...input.probe }),
     frames: Object.freeze({ count: items.length, items: Object.freeze(items) }),
@@ -260,7 +264,8 @@ function assertProbe(probe: MediaProbe): void {
     !Number.isFinite(probe.nominalFps) ||
     probe.nominalFps <= 0 ||
     typeof probe.codec !== "string" ||
-    probe.codec.length === 0
+    probe.codec.length === 0 ||
+    ![0, 90, 180, 270].includes(probe.sourceRotationDegrees)
   )
     throw new Error("Invalid extraction probe.");
 }
@@ -275,6 +280,7 @@ function readProbe(value: unknown): MediaProbe {
       "displayHeight",
       "nominalFps",
       "codec",
+      "sourceRotationDegrees",
     ])
   )
     throw new Error("Invalid extraction manifest.");
@@ -286,7 +292,11 @@ function readProbe(value: unknown): MediaProbe {
     typeof value.displayWidth !== "number" ||
     typeof value.displayHeight !== "number" ||
     typeof value.nominalFps !== "number" ||
-    typeof value.codec !== "string"
+    typeof value.codec !== "string" ||
+    (value.sourceRotationDegrees !== 0 &&
+      value.sourceRotationDegrees !== 90 &&
+      value.sourceRotationDegrees !== 180 &&
+      value.sourceRotationDegrees !== 270)
   )
     throw new Error("Invalid extraction manifest.");
   const probe: MediaProbe = {
@@ -296,6 +306,7 @@ function readProbe(value: unknown): MediaProbe {
     displayHeight: value.displayHeight,
     nominalFps: value.nominalFps,
     codec: value.codec,
+    sourceRotationDegrees: value.sourceRotationDegrees,
   };
   assertProbe(probe);
   return Object.freeze(probe);
@@ -304,19 +315,23 @@ function readProbe(value: unknown): MediaProbe {
 function readDisplay(
   value: unknown,
   probe: MediaProbe,
-): Readonly<{ width: number; height: number; rotationDegrees: 0 }> {
+): Readonly<{
+  width: number;
+  height: number;
+  rotationDegrees: MediaProbe["sourceRotationDegrees"];
+}> {
   if (
     !isRecord(value) ||
     !hasOnlyKeys(value, ["width", "height", "rotationDegrees"]) ||
     value.width !== probe.displayWidth ||
     value.height !== probe.displayHeight ||
-    value.rotationDegrees !== 0
+    value.rotationDegrees !== probe.sourceRotationDegrees
   )
     throw new Error("Invalid extraction manifest.");
   return Object.freeze({
     width: probe.displayWidth,
     height: probe.displayHeight,
-    rotationDegrees: 0,
+    rotationDegrees: probe.sourceRotationDegrees,
   });
 }
 

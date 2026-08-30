@@ -11,11 +11,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { MediaPipelineError, type MediaProbe } from "../media/probe.js";
+import {
+  RetentionScavenger,
+  type RetentionRecord,
+} from "../media/retention-scavenger.js";
+import { LocalRetentionObjectStore } from "./local-retention-object-store.js";
 import { LocalMediaStorage } from "./local-media-storage.js";
 
 const MEDIA_ID = "11111111-1111-4111-8111-111111111111";
 const validMp4 = Buffer.from([
-  0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 1, 2,
+  0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 1, 2, 3, 4,
 ]);
 const probe: MediaProbe = {
   container: "mp4",
@@ -24,6 +29,7 @@ const probe: MediaProbe = {
   displayHeight: 720,
   nominalFps: 30,
   codec: "h264",
+  sourceRotationDegrees: 0,
 };
 
 describe("LocalMediaStorage", () => {
@@ -116,6 +122,61 @@ describe("LocalMediaStorage", () => {
       storage.store({ source: chunks(validMp4), maxBytes: validMp4.length }),
     ).rejects.toThrow(new MediaPipelineError("media_probe_failed"));
     expect(await readdir(join(root, "temporary"))).toEqual([]);
+  });
+
+  it("writes a durable temporary fact immediately after O_EXCL creation and a restart scavenger removes its orphan", async () => {
+    const root = await temporaryRoot(directories);
+    const facts: RetentionRecord[] = [];
+    const acknowledged: string[] = [];
+    const retention = {
+      schedule: async (fact: Omit<RetentionRecord, "cleanupRequestedAt">) => {
+        facts.push({ ...fact, cleanupRequestedAt: null });
+      },
+      acknowledge: async (fact: RetentionRecord) => {
+        acknowledged.push(fact.id);
+      },
+    };
+    const storage = new LocalMediaStorage({
+      root,
+      ids: { next: () => MEDIA_ID },
+      prober: { probe: async () => probe },
+    });
+    await storage.createUploadSession({
+      maxBytes: validMp4.length,
+      retention: {
+        repository: retention,
+        attemptId: "22222222-2222-4222-8222-222222222222",
+        createdAt: "2030-01-15T12:00:00.000Z",
+      },
+    });
+    expect(facts).toEqual([
+      {
+        id: MEDIA_ID,
+        attemptId: "22222222-2222-4222-8222-222222222222",
+        kind: "temporary",
+        deleteAt: "2030-01-15T13:00:00.000Z",
+        cleanupRequestedAt: null,
+      },
+    ]);
+    expect(await readdir(join(root, "temporary"))).toEqual([
+      `${MEDIA_ID}.uploading`,
+    ]);
+
+    const scavenger = new RetentionScavenger({
+      repository: {
+        listDue: async () => facts,
+        acknowledge: async (record) => {
+          await retention.acknowledge(record);
+          facts.splice(0, facts.length);
+        },
+      },
+      objects: new LocalRetentionObjectStore({ storage }),
+      maxBatchSize: 1,
+      log: { event: () => undefined },
+    });
+    await scavenger.run("2030-01-15T13:00:00.000Z");
+    expect(await readdir(join(root, "temporary"))).toEqual([]);
+    expect(acknowledged).toEqual([MEDIA_ID]);
   });
 });
 

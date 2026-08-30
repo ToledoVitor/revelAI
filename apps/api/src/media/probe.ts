@@ -27,6 +27,7 @@ export type MediaProbe = Readonly<{
   displayHeight: number;
   nominalFps: number;
   codec: string;
+  sourceRotationDegrees: 0 | 90 | 180 | 270;
 }>;
 
 type UnknownRecord = Record<string, unknown>;
@@ -34,7 +35,7 @@ type UnknownRecord = Record<string, unknown>;
 const supportedCodecs = new Set(["h264", "hevc", "mpeg4", "vp8", "vp9", "av1"]);
 
 export function sniffMediaContainer(bytes: Uint8Array): MediaContainer {
-  if (bytes.length >= 12 && ascii(bytes, 4, 8) === "ftyp") {
+  if (isBmffFtypBox(bytes)) {
     const brand = ascii(bytes, 8, 12);
     return brand === "qt  " ? "mov" : "mp4";
   }
@@ -99,7 +100,14 @@ export function parseFfprobePayload(serialized: string): MediaProbe {
     displayHeight: quarterTurns ? width : height,
     nominalFps,
     codec,
+    sourceRotationDegrees: rotation,
   });
+}
+
+function isBmffFtypBox(bytes: Uint8Array): boolean {
+  if (bytes.length < 16 || ascii(bytes, 4, 8) !== "ftyp") return false;
+  const size = Buffer.from(bytes.subarray(0, 4)).readUInt32BE();
+  return size >= 16 && size !== 1 && size <= bytes.length;
 }
 
 function ascii(bytes: Uint8Array, start: number, end: number): string {
@@ -107,7 +115,8 @@ function ascii(bytes: Uint8Array, start: number, end: number): string {
 }
 
 function containsWebmDocType(bytes: Uint8Array): boolean {
-  for (let index = 0; index + 7 <= bytes.length; index += 1) {
+  const bound = Math.min(bytes.length, 1024);
+  for (let index = 0; index + 7 <= bound; index += 1) {
     if (
       bytes[index] === 0x42 &&
       bytes[index + 1] === 0x82 &&
@@ -127,16 +136,30 @@ function containerFromFormat(formatName: string): MediaContainer {
   throw new MediaPipelineError("media_probe_failed");
 }
 
-function parseRotation(video: UnknownRecord): number {
+function parseRotation(video: UnknownRecord): 0 | 90 | 180 | 270 {
   const tagRotation = isRecord(video.tags) ? video.tags.rotate : undefined;
   const sideRotation = Array.isArray(video.side_data_list)
-    ? video.side_data_list.find(isRecord)?.rotation
+    ? video.side_data_list
+        .filter(isRecord)
+        .find(
+          (entry) =>
+            entry.side_data_type === "Display Matrix" &&
+            entry.rotation !== undefined,
+        )?.rotation
     : undefined;
   const candidate = sideRotation ?? tagRotation ?? 0;
   const value = typeof candidate === "string" ? Number(candidate) : candidate;
   if (typeof value !== "number" || !Number.isFinite(value))
     throw new MediaPipelineError("media_probe_failed");
-  return value;
+  const normalized = ((value % 360) + 360) % 360;
+  if (
+    normalized !== 0 &&
+    normalized !== 90 &&
+    normalized !== 180 &&
+    normalized !== 270
+  )
+    throw new MediaPipelineError("media_probe_failed");
+  return normalized;
 }
 
 function parseRational(value: string): number {

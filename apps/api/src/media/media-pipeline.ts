@@ -2,7 +2,9 @@ import { evaluateMediaEligibility, type MediaMode } from "./eligibility.js";
 import { MediaPipelineError } from "./probe.js";
 import {
   LocalMediaStorage,
+  type LocalMediaUploadSession,
   type StoredLocalMedia,
+  type UploadRetentionRepository,
 } from "../storage/local-media-storage.js";
 
 /** C5 orchestration: byte/probe eligibility only; no integrity or score facts. */
@@ -22,9 +24,33 @@ export class MediaPipeline {
       activeSceneChangeScores?: readonly number[];
     }>,
   ): Promise<StoredLocalMedia> {
-    return this.storage.store({
-      source: input.source,
+    const session = await this.openUpload(input);
+    try {
+      for await (const chunk of input.source) await session.write(chunk);
+      return await session.commit();
+    } catch (error) {
+      await session.abort();
+      throw error;
+    }
+  }
+
+  /** One storage-backed upload session; callers cannot publish pre-validation. */
+  public async openUpload(
+    input: Readonly<{
+      mode: MediaMode;
+      maxBytes: number;
+      timestamps?: readonly number[];
+      activeSceneChangeScores?: readonly number[];
+      retention?: Readonly<{
+        repository: UploadRetentionRepository;
+        attemptId: string;
+        createdAt: string;
+      }>;
+    }>,
+  ): Promise<LocalMediaUploadSession> {
+    return this.storage.createUploadSession({
       maxBytes: input.maxBytes,
+      retention: input.retention,
       validate: ({ probe }) => {
         const eligibility = evaluateMediaEligibility({
           mode: input.mode,

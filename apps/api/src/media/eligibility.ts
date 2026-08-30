@@ -47,12 +47,19 @@ function evaluateVerified(input: EligibilityInput): MediaEligibility {
     aspect > 2 ||
     probe.nominalFps < 24 ||
     !isVerifiedTimeline(input.timestamps) ||
-    (input.activeSceneChangeScores ?? []).some(
-      (score) => !Number.isFinite(score) || score >= 0.42,
-    )
+    !hasVerifiedSceneEvidence(input.activeSceneChangeScores)
   )
     return Object.freeze({ kind: "ineligible" });
   return Object.freeze({ kind: "eligible", sampleCount: 640 });
+}
+
+function hasVerifiedSceneEvidence(
+  scores: readonly number[] | undefined,
+): boolean {
+  return (
+    scores?.length === 600 &&
+    scores.every((score) => Number.isFinite(score) && score < 0.42)
+  );
 }
 
 function evaluateFree(probe: MediaProbe): MediaEligibility {

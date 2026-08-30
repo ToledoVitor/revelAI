@@ -16,6 +16,7 @@ const verifiedProbe = {
   displayHeight: 720,
   nominalFps: 30,
   codec: "h264",
+  sourceRotationDegrees: 0 as const,
 };
 
 describe("media sniffing and probe boundary", () => {
@@ -23,14 +24,16 @@ describe("media sniffing and probe boundary", () => {
     expect(
       sniffMediaContainer(
         Buffer.from([
-          0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d,
+          0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0, 0, 0,
+          0,
         ]),
       ),
     ).toBe("mp4");
     expect(
       sniffMediaContainer(
         Buffer.from([
-          0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20,
+          0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20, 0, 0, 0,
+          0,
         ]),
       ),
     ).toBe("mov");
@@ -50,6 +53,13 @@ describe("media sniffing and probe boundary", () => {
     expect(() => sniffMediaContainer(Buffer.from("not video"))).toThrow(
       new MediaPipelineError("media_container_not_allowed"),
     );
+    expect(() =>
+      sniffMediaContainer(
+        Buffer.from([
+          0, 0, 0, 1, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d,
+        ]),
+      ),
+    ).toThrow(new MediaPipelineError("media_container_not_allowed"));
   });
 
   it("parses one rotated decodable video stream and applies display rotation", () => {
@@ -70,7 +80,51 @@ describe("media sniffing and probe boundary", () => {
           ],
         }),
       ),
-    ).toEqual({ ...verifiedProbe, nominalFps: 30000 / 1001 });
+    ).toEqual({
+      ...verifiedProbe,
+      displayWidth: 1280,
+      displayHeight: 720,
+      nominalFps: 30000 / 1001,
+      sourceRotationDegrees: 90,
+    });
+  });
+
+  it("selects a display-matrix record and preserves only quarter-turn rotations", () => {
+    for (const [rotation, width, height] of [
+      [0, 1280, 720],
+      [90, 720, 1280],
+      [180, 1280, 720],
+      [270, 720, 1280],
+    ] as const) {
+      expect(
+        parseFfprobePayload(
+          JSON.stringify({
+            format: { format_name: "mov,mp4,m4a,3gp,3g2,mj2", duration: "64" },
+            streams: [
+              {
+                ...baseVideoStream(),
+                side_data_list: [
+                  { side_data_type: "H.264 user data", rotation: 180 },
+                  { side_data_type: "Display Matrix", rotation },
+                ],
+              },
+            ],
+          }),
+        ),
+      ).toMatchObject({
+        displayWidth: width,
+        displayHeight: height,
+        sourceRotationDegrees: rotation,
+      });
+    }
+    expect(() =>
+      parseFfprobePayload(
+        JSON.stringify({
+          format: { format_name: "mov,mp4,m4a,3gp,3g2,mj2", duration: "64" },
+          streams: [{ ...baseVideoStream(), tags: { rotate: "45" } }],
+        }),
+      ),
+    ).toThrow(new MediaPipelineError("media_probe_failed"));
   });
 
   it("rejects malformed, multi-video, attached-picture, encrypted, and mismatched containers", () => {
@@ -102,7 +156,7 @@ describe("mode-owned media eligibility", () => {
         mode: "verified",
         probe: verifiedProbe,
         timestamps: verifiedTimeline(),
-        activeSceneChangeScores: [0.419],
+        activeSceneChangeScores: Array(600).fill(0.419),
       }),
     ).toEqual({ kind: "eligible", sampleCount: 640 });
   });
@@ -139,6 +193,7 @@ describe("mode-owned media eligibility", () => {
       displayHeight: 853,
       nominalFps: 12,
       codec: "vp9",
+      sourceRotationDegrees: 0 as const,
     };
     expect(evaluateMediaEligibility({ mode: "free", probe })).toEqual({
       kind: "eligible",

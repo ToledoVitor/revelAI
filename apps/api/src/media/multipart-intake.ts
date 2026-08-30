@@ -19,12 +19,51 @@ export interface MediaUploadStage {
   abort(): Promise<void>;
 }
 
+/**
+ * The HTTP adapter must pass its raw body through this stream before multipart
+ * parsing. This makes the first byte beyond the envelope limit terminal even
+ * when Content-Length is absent or lies.
+ */
+export class RawMultipartByteCounter {
+  private bytes = 0;
+
+  public constructor(private readonly maxBytes: number) {
+    assertLimit(maxBytes, "multipart_body_too_large");
+  }
+
+  public get measuredBytes(): number {
+    return this.bytes;
+  }
+
+  public get limit(): number {
+    return this.maxBytes;
+  }
+
+  public observe(chunk: Uint8Array): void {
+    if (
+      !(chunk instanceof Uint8Array) ||
+      chunk.length > this.maxBytes - this.bytes
+    )
+      throw new MediaPipelineError("multipart_body_too_large");
+    this.bytes += chunk.length;
+  }
+
+  public async *stream(
+    source: AsyncIterable<Uint8Array>,
+  ): AsyncIterable<Uint8Array> {
+    for await (const chunk of source) {
+      this.observe(chunk);
+      yield chunk;
+    }
+  }
+}
+
 export type MultipartIntake = Readonly<{
   parts: AsyncIterable<MultipartPart>;
   maxUploadBytes: number;
   maxMultipartBytes: number;
-  /** Measured by the transport adapter while its raw request stream is read. */
-  measuredMultipartBytes: number;
+  /** The parser receives only raw bytes emitted by this live counter. */
+  rawBody: RawMultipartByteCounter;
   /** Advisory only; actual measured bytes always decide acceptance. */
   declaredContentLength?: number;
   createStage(): Promise<MediaUploadStage>;
@@ -37,9 +76,9 @@ export type AcceptedMultipartMedia = Readonly<{
 }>;
 
 /**
- * Parser-agnostic one-file boundary. A transport adapter owns raw boundary
- * parsing and supplies its measured byte count; this boundary owns accepted
- * shape, MIME preflight, per-file streaming accounting, and staged cleanup.
+ * Parser-agnostic one-file boundary. A transport adapter owns boundary parsing
+ * but must consume raw bytes through rawBody; this owns shape, MIME preflight,
+ * per-file accounting, and staged cleanup.
  */
 export async function acceptSingleMediaPart(
   input: MultipartIntake,
@@ -47,9 +86,8 @@ export async function acceptSingleMediaPart(
   assertLimit(input.maxUploadBytes, "media_too_large");
   assertLimit(input.maxMultipartBytes, "multipart_body_too_large");
   if (
-    !Number.isSafeInteger(input.measuredMultipartBytes) ||
-    input.measuredMultipartBytes < 0 ||
-    input.measuredMultipartBytes > input.maxMultipartBytes ||
+    input.rawBody.limit !== input.maxMultipartBytes ||
+    input.rawBody.measuredBytes > input.maxMultipartBytes ||
     (input.declaredContentLength !== undefined &&
       input.declaredContentLength > input.maxMultipartBytes)
   )
