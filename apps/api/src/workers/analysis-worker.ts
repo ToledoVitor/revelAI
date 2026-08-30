@@ -1,7 +1,10 @@
 import { FailureMessageByCode } from "@revelai/contracts";
 import type { AnalysisJob, AnalysisQueue } from "../queue/analysis-queue.js";
 import type {
+  DeadLetterProcessingClaimOutcome,
+  FinalizeTerminalResultOutcome,
   FinalizeTerminalResultInput,
+  ProcessingFailureRecordOutcome,
   ProcessingClaim,
   TerminalCandidate,
 } from "../repositories/attempt-repository.js";
@@ -15,7 +18,23 @@ export type ProcessingRepository = Readonly<{
       generation: number;
     }>,
   ): Promise<boolean>;
-  finalizeTerminalResult(input: FinalizeTerminalResultInput): Promise<unknown>;
+  recordProcessingFailure(
+    input: Readonly<{
+      attemptId: string;
+      leaseId: string;
+      generation: number;
+    }>,
+  ): Promise<ProcessingFailureRecordOutcome>;
+  deadLetterProcessingClaim(
+    input: Readonly<{
+      attemptId: string;
+      leaseId: string;
+      generation: number;
+    }>,
+  ): Promise<DeadLetterProcessingClaimOutcome>;
+  finalizeTerminalResult(
+    input: FinalizeTerminalResultInput,
+  ): Promise<FinalizeTerminalResultOutcome>;
 }>;
 
 export type AnalysisProcessor = (
@@ -78,7 +97,6 @@ export class AnalysisWorker {
   private readonly process: AnalysisProcessor;
   private readonly unexpectedRetryPolicy: UnexpectedRetryPolicy;
   private readonly retryWaiter: RetryWaiter;
-  private readonly retryAttempts = new Map<string, number>();
 
   public constructor(
     input: Readonly<{
@@ -124,13 +142,13 @@ export class AnalysisWorker {
             candidate = error.candidate;
           else throw error;
         }
-        await this.repository.finalizeTerminalResult({
+        const finalization = await this.repository.finalizeTerminalResult({
           attemptId: job.attemptId,
           leaseId: claim.leaseId,
           generation: claim.generation,
           candidate,
         });
-        this.retryAttempts.delete(retryKey(job));
+        if (!acknowledges(finalization)) throw new LostProcessingClaimError();
       } catch (error) {
         await this.recover(job, claim, error);
       }
@@ -142,27 +160,39 @@ export class AnalysisWorker {
     claim: ProcessingClaim,
     error: unknown,
   ): Promise<void> {
-    const key = retryKey(job);
-    const retryAttempt = (this.retryAttempts.get(key) ?? 0) + 1;
-    this.retryAttempts.set(key, retryAttempt);
-    if (retryAttempt >= this.unexpectedRetryPolicy.maxAttempts) {
+    const recovery = await this.repository.recordProcessingFailure({
+      attemptId: job.attemptId,
+      leaseId: claim.leaseId,
+      generation: claim.generation,
+    });
+    if (recovery.kind === "tombstoned") return;
+    if (recovery.kind === "lost-claim") {
+      await this.retryWaiter.wait(this.unexpectedRetryPolicy.delayMilliseconds);
+      throw error;
+    }
+    if (recovery.retryAttempt >= this.unexpectedRetryPolicy.maxAttempts) {
       try {
-        await this.repository.finalizeTerminalResult({
+        const candidate = this.unexpectedRetryPolicy.terminalCandidate({
+          job,
+          claim,
+          retryAttempt: recovery.retryAttempt,
+          error,
+        });
+        const finalization = await this.repository.finalizeTerminalResult({
           attemptId: job.attemptId,
           leaseId: claim.leaseId,
           generation: claim.generation,
-          candidate: this.unexpectedRetryPolicy.terminalCandidate({
-            job,
-            claim,
-            retryAttempt,
-            error,
-          }),
+          candidate,
         });
-        this.retryAttempts.delete(key);
+        if (!acknowledges(finalization)) throw new LostProcessingClaimError();
         return;
-      } catch (terminalizationError) {
-        await this.releaseForRetry(job, claim);
-        throw terminalizationError;
+      } catch {
+        await this.repository.deadLetterProcessingClaim({
+          attemptId: job.attemptId,
+          leaseId: claim.leaseId,
+          generation: claim.generation,
+        });
+        return;
       }
     }
     await this.releaseForRetry(job, claim);
@@ -182,6 +212,15 @@ export class AnalysisWorker {
   }
 }
 
-function retryKey(job: AnalysisJob): string {
-  return `${job.attemptId}:${job.generation}`;
+class LostProcessingClaimError extends Error {
+  public constructor() {
+    super("Processing claim was lost before terminalization.");
+    this.name = "LostProcessingClaimError";
+  }
+}
+
+function acknowledges(
+  outcome: FinalizeTerminalResultOutcome,
+): outcome is Exclude<FinalizeTerminalResultOutcome, { kind: "lost-claim" }> {
+  return outcome.kind !== "lost-claim";
 }

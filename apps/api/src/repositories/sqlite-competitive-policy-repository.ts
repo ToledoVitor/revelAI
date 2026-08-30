@@ -103,7 +103,7 @@ export class SQLiteCompetitivePolicyRepository
     await this.transaction(() => {
       const receipt = this.raw
         .prepare(
-          "SELECT r.receipt_sha256, r.schema_version, r.workflow_id, r.workflow_version, r.model_bundle_id, r.provider_version, r.status, r.valid_until, r.invalidated_at, r.receipt_json, i.receipt_id AS invalidation_receipt_id FROM workflow_benchmark_receipts r LEFT JOIN workflow_benchmark_receipt_invalidations i ON i.receipt_id = r.id WHERE r.id = ?",
+          "SELECT r.receipt_sha256, r.schema_version, r.workflow_id, r.workflow_version, r.model_bundle_id, r.provider_version, r.status, r.valid_until, r.invalidated_at, r.receipt_json, i.receipt_id AS invalidation_receipt_id, q.receipt_id AS quarantined_invalidation_receipt_id FROM workflow_benchmark_receipts r LEFT JOIN workflow_benchmark_receipt_invalidations i ON i.receipt_id = r.id LEFT JOIN workflow_benchmark_receipt_invalidation_quarantine q ON q.receipt_id = r.id WHERE r.id = ?",
         )
         .get(input.receiptId) as
         | {
@@ -118,6 +118,7 @@ export class SQLiteCompetitivePolicyRepository
             invalidated_at: string | null;
             receipt_json: string;
             invalidation_receipt_id: string | null;
+            quarantined_invalidation_receipt_id: string | null;
           }
         | undefined;
       if (!receipt)
@@ -128,7 +129,8 @@ export class SQLiteCompetitivePolicyRepository
         receipt.status !== "passed" ||
         receipt.valid_until <= this.clock.now() ||
         receipt.invalidated_at !== null ||
-        receipt.invalidation_receipt_id !== null
+        receipt.invalidation_receipt_id !== null ||
+        receipt.quarantined_invalidation_receipt_id !== null
       )
         throw new CompetitivePolicyRepositoryError(
           "competitive_policy_receipt_not_approved",
@@ -281,7 +283,8 @@ export class SQLiteCompetitivePolicyRepository
           AND r.workflow_version = p.workflow_version
           AND r.provider_version = p.provider_version
          LEFT JOIN workflow_benchmark_receipt_invalidations i ON i.receipt_id = r.id
-         WHERE p.active = 1 AND r.status = 'passed' AND r.invalidated_at IS NULL AND i.receipt_id IS NULL AND r.valid_until > ?
+         LEFT JOIN workflow_benchmark_receipt_invalidation_quarantine q ON q.receipt_id = r.id
+         WHERE p.active = 1 AND r.status = 'passed' AND r.invalidated_at IS NULL AND i.receipt_id IS NULL AND q.receipt_id IS NULL AND r.valid_until > ?
            AND p.model_bundle_id = ? AND p.workflow_id = ? AND p.workflow_version = ? AND p.provider_version = ? AND p.calibration_evidence_version = ? AND p.challenge_id = ? AND p.challenge_version = ? AND p.rule_version = ?`,
       )
       .get(

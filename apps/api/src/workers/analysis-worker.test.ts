@@ -28,6 +28,9 @@ const outcome: TerminalCandidate = {
   retryable: true,
 };
 
+const acknowledgedFinalization = Object.freeze({ kind: "tombstoned" as const });
+const deadLettered = Object.freeze({ kind: "dead-lettered" as const });
+
 describe("AnalysisWorker", () => {
   it("rejects non-finite, fractional, or non-positive retry configuration", () => {
     const makeWorker = (
@@ -41,7 +44,12 @@ describe("AnalysisWorker", () => {
         repository: {
           claimProcessing: async () => null,
           releaseProcessingClaim: async () => true,
-          finalizeTerminalResult: async () => null,
+          recordProcessingFailure: async () => ({
+            kind: "recorded" as const,
+            retryAttempt: 1,
+          }),
+          deadLetterProcessingClaim: async () => deadLettered,
+          finalizeTerminalResult: async () => acknowledgedFinalization,
         },
         process: async () => outcome,
         unexpectedRetryPolicy: {
@@ -72,11 +80,16 @@ describe("AnalysisWorker", () => {
         return { leaseId: "lease-a", generation: 1, mode: "free" as const };
       },
       releaseProcessingClaim: async () => true,
+      recordProcessingFailure: async () => ({
+        kind: "recorded" as const,
+        retryAttempt: 1,
+      }),
+      deadLetterProcessingClaim: async () => deadLettered,
       finalizeTerminalResult: async (
         input: Readonly<{ attemptId: string; generation: number }>,
       ) => {
         finalized.push(input);
-        return null;
+        return acknowledgedFinalization;
       },
     };
     const worker = new AnalysisWorker({
@@ -102,6 +115,7 @@ describe("AnalysisWorker", () => {
     let processCalls = 0;
     let released = 0;
     let finalized = 0;
+    let failureAttempts = 0;
     const worker = new AnalysisWorker({
       queue,
       repository: {
@@ -114,9 +128,14 @@ describe("AnalysisWorker", () => {
           released += 1;
           return true;
         },
+        recordProcessingFailure: async () => ({
+          kind: "recorded" as const,
+          retryAttempt: ++failureAttempts,
+        }),
+        deadLetterProcessingClaim: async () => deadLettered,
         finalizeTerminalResult: async () => {
           finalized += 1;
-          return null;
+          return acknowledgedFinalization;
         },
       },
       process: async () => {
@@ -155,9 +174,14 @@ describe("AnalysisWorker", () => {
           released += 1;
           return true;
         },
+        recordProcessingFailure: async () => ({
+          kind: "recorded" as const,
+          retryAttempt: 1,
+        }),
+        deadLetterProcessingClaim: async () => deadLettered,
         finalizeTerminalResult: async () => {
           finalized += 1;
-          return null;
+          return acknowledgedFinalization;
         },
       },
       process: async () => {
@@ -182,6 +206,7 @@ describe("AnalysisWorker", () => {
     const queue = new InMemoryAnalysisQueue({ scheduler });
     let processCalls = 0;
     let releases = 0;
+    let failureAttempts = 0;
     const finalized: TerminalCandidate[] = [];
     const backoffAttempts: number[] = [];
     const worker = new AnalysisWorker({
@@ -196,9 +221,14 @@ describe("AnalysisWorker", () => {
           releases += 1;
           return true;
         },
+        recordProcessingFailure: async () => ({
+          kind: "recorded" as const,
+          retryAttempt: ++failureAttempts,
+        }),
+        deadLetterProcessingClaim: async () => deadLettered,
         finalizeTerminalResult: async (input) => {
           finalized.push(input.candidate);
-          return null;
+          return acknowledgedFinalization;
         },
       },
       process: async () => {

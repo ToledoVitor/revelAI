@@ -16,8 +16,11 @@ import type {
   AttemptRecord,
   AttemptRepository,
   CalibrationSessionRecord,
+  DeadLetterProcessingClaimOutcome,
+  FinalizeTerminalResultOutcome,
   FinalizedAttempt,
   FinalizeTerminalResultInput,
+  ProcessingFailureRecordOutcome,
   ProcessingClaim,
   StoredMedia,
   TerminalCandidate,
@@ -383,6 +386,12 @@ export class SQLiteAttemptRepository implements AttemptRepository {
           >
         | undefined;
       if (!row || row.deletion_state !== "active") return null;
+      const recovery = this.raw
+        .prepare(
+          "SELECT state FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
+        )
+        .get(job.attemptId, job.generation) as { state: string } | undefined;
+      if (recovery?.state === "dead-lettered") return null;
       const now = this.clock.now();
       const generationMatches = row.processing_generation === job.generation;
       const canClaim =
@@ -429,16 +438,132 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     });
   }
 
+  public async recordProcessingFailure(
+    input: Readonly<{
+      attemptId: string;
+      leaseId: string;
+      generation: number;
+    }>,
+  ): Promise<ProcessingFailureRecordOutcome> {
+    return this.transaction(() => {
+      const row = this.raw
+        .prepare(
+          "SELECT deletion_state, status, processing_generation, processing_lease_id FROM attempts WHERE id = ?",
+        )
+        .get(input.attemptId) as
+        | {
+            deletion_state: "active" | "tombstoned";
+            status: AttemptRecord["status"];
+            processing_generation: number;
+            processing_lease_id: string | null;
+          }
+        | undefined;
+      if (!row) return Object.freeze({ kind: "lost-claim" });
+      if (row.deletion_state === "tombstoned")
+        return Object.freeze({ kind: "tombstoned" });
+      if (
+        row.status !== "processing" ||
+        row.processing_generation !== input.generation ||
+        row.processing_lease_id !== input.leaseId
+      )
+        return Object.freeze({ kind: "lost-claim" });
+      const now = this.clock.now();
+      this.raw
+        .prepare(
+          `INSERT INTO processing_recovery_records
+             (attempt_id, generation, retry_attempts, state, created_at, updated_at)
+           VALUES (?, ?, 1, 'retrying', ?, ?)
+           ON CONFLICT(attempt_id, generation) DO UPDATE SET
+             retry_attempts = processing_recovery_records.retry_attempts + 1,
+             state = 'retrying',
+             updated_at = excluded.updated_at`,
+        )
+        .run(input.attemptId, input.generation, now, now);
+      const recovery = this.raw
+        .prepare(
+          "SELECT retry_attempts FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
+        )
+        .get(input.attemptId, input.generation) as
+        | { retry_attempts: number }
+        | undefined;
+      if (!recovery || !Number.isSafeInteger(recovery.retry_attempts))
+        throw new RepositoryError("persisted_data_corrupt");
+      this.event(input.attemptId, input.generation, "processing-failed", now);
+      return Object.freeze({
+        kind: "recorded",
+        retryAttempt: recovery.retry_attempts,
+      });
+    });
+  }
+
+  public async deadLetterProcessingClaim(
+    input: Readonly<{
+      attemptId: string;
+      leaseId: string;
+      generation: number;
+    }>,
+  ): Promise<DeadLetterProcessingClaimOutcome> {
+    return this.transaction(() => {
+      const row = this.raw
+        .prepare(
+          "SELECT deletion_state, status, processing_generation, processing_lease_id FROM attempts WHERE id = ?",
+        )
+        .get(input.attemptId) as
+        | {
+            deletion_state: "active" | "tombstoned";
+            status: AttemptRecord["status"];
+            processing_generation: number;
+            processing_lease_id: string | null;
+          }
+        | undefined;
+      if (!row) return Object.freeze({ kind: "lost-claim" });
+      if (row.deletion_state === "tombstoned")
+        return Object.freeze({ kind: "tombstoned" });
+      if (
+        row.status !== "processing" ||
+        row.processing_generation !== input.generation ||
+        row.processing_lease_id !== input.leaseId
+      )
+        return Object.freeze({ kind: "lost-claim" });
+      const now = this.clock.now();
+      this.raw
+        .prepare(
+          `INSERT INTO processing_recovery_records
+             (attempt_id, generation, retry_attempts, state, created_at, updated_at)
+           VALUES (?, ?, 1, 'dead-lettered', ?, ?)
+           ON CONFLICT(attempt_id, generation) DO UPDATE SET
+             state = 'dead-lettered',
+             updated_at = excluded.updated_at`,
+        )
+        .run(input.attemptId, input.generation, now, now);
+      const release = this.raw
+        .prepare(
+          "UPDATE attempts SET status = 'uploaded', processing_lease_id = NULL, processing_lease_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'processing' AND deletion_state = 'active' AND processing_generation = ? AND processing_lease_id = ?",
+        )
+        .run(now, input.attemptId, input.generation, input.leaseId);
+      if (release.changes !== 1) return Object.freeze({ kind: "lost-claim" });
+      this.event(
+        input.attemptId,
+        input.generation,
+        "processing-dead-lettered",
+        now,
+      );
+      return Object.freeze({ kind: "dead-lettered" });
+    });
+  }
+
   public async finalizeTerminalResult(
     input: FinalizeTerminalResultInput,
-  ): Promise<FinalizedAttempt | null> {
+  ): Promise<FinalizeTerminalResultOutcome> {
     return this.transaction(() => {
       const row = this.raw
         .prepare(
           "SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version, a.status, a.deletion_state, a.media_json, a.processing_generation, a.processing_lease_id, a.processing_lease_expires_at, a.created_at, tr.outcome_json FROM attempts a LEFT JOIN terminal_results tr ON tr.attempt_id = a.id WHERE a.id = ?",
         )
         .get(input.attemptId) as AttemptRow | undefined;
-      if (!row || row.deletion_state !== "active") return null;
+      if (!row) return Object.freeze({ kind: "lost-claim" });
+      if (row.deletion_state !== "active")
+        return Object.freeze({ kind: "tombstoned" });
       const existing = this.raw
         .prepare(
           "SELECT id, lease_id, generation, outcome_json, candidate_json FROM terminal_results WHERE attempt_id = ?",
@@ -450,7 +575,10 @@ export class SQLiteAttemptRepository implements AttemptRepository {
           existing.generation === input.generation &&
           existing.candidate_json === stableJson(input.candidate)
         ) {
-          return this.finalizedFromRows(row, existing.outcome_json);
+          return Object.freeze({
+            kind: "idempotent",
+            finalized: this.finalizedFromRows(row, existing.outcome_json),
+          });
         }
         throw new RepositoryError("terminal_result_conflict");
       }
@@ -461,7 +589,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         row.processing_lease_expires_at === null ||
         row.processing_lease_expires_at <= this.clock.now()
       )
-        return null;
+        return Object.freeze({ kind: "lost-claim" });
 
       const candidate = parseTerminalCandidate(input.candidate, row);
       let outcome: Exclude<AttemptOutcome, { state: "pending" }>;
@@ -557,10 +685,18 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         "terminal-finalized",
         this.clock.now(),
       );
-      return this.finalizedFromRows(
-        { ...row, status: outcome.state },
-        stableJson(outcome),
-      );
+      this.raw
+        .prepare(
+          "DELETE FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
+        )
+        .run(input.attemptId, input.generation);
+      return Object.freeze({
+        kind: "finalized",
+        finalized: this.finalizedFromRows(
+          { ...row, status: outcome.state },
+          stableJson(outcome),
+        ),
+      });
     });
   }
 
@@ -585,6 +721,9 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         .run(input.attemptId);
       this.raw
         .prepare("DELETE FROM canonical_observations WHERE attempt_id = ?")
+        .run(input.attemptId);
+      this.raw
+        .prepare("DELETE FROM processing_recovery_records WHERE attempt_id = ?")
         .run(input.attemptId);
       this.raw
         .prepare(

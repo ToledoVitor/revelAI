@@ -374,13 +374,66 @@ const migrations: readonly Migration[] = [
         reason TEXT NOT NULL CHECK (reason IN ('tuple_changed', 'manifest_set_changed', 'operator_revoked')),
         created_at TEXT NOT NULL
       );
+      CREATE TABLE workflow_benchmark_receipt_invalidation_quarantine (
+        receipt_id TEXT PRIMARY KEY NOT NULL REFERENCES workflow_benchmark_receipts(id),
+        invalidated_at TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        quarantine_reason TEXT NOT NULL CHECK (quarantine_reason = 'invalid_v6_timestamp')
+      );
       INSERT INTO workflow_benchmark_receipt_invalidations_v7
         SELECT receipt_id, invalidated_at, reason, created_at
-        FROM workflow_benchmark_receipt_invalidations;
+        FROM workflow_benchmark_receipt_invalidations
+        WHERE CASE
+          WHEN invalidated_at GLOB '????-??-??T??:??:??.???Z'
+            AND substr(invalidated_at, 6, 2) BETWEEN '01' AND '12'
+            AND substr(invalidated_at, 9, 2) BETWEEN '01' AND '31'
+            AND substr(invalidated_at, 12, 2) BETWEEN '00' AND '23'
+            AND strftime('%Y-%m-%dT%H:%M:%fZ', invalidated_at) IS NOT NULL
+            AND strftime('%Y-%m-%dT%H:%M:%fZ', invalidated_at) = invalidated_at
+            AND date(
+              substr(invalidated_at, 1, 8) || '01',
+              '+' || (CAST(substr(invalidated_at, 9, 2) AS INTEGER) - 1) || ' days'
+            ) = substr(invalidated_at, 1, 10)
+            THEN 1
+          ELSE 0
+        END = 1;
+      INSERT INTO workflow_benchmark_receipt_invalidation_quarantine
+        (receipt_id, invalidated_at, reason, created_at, quarantine_reason)
+        SELECT receipt_id, invalidated_at, reason, created_at, 'invalid_v6_timestamp'
+        FROM workflow_benchmark_receipt_invalidations
+        WHERE CASE
+          WHEN invalidated_at GLOB '????-??-??T??:??:??.???Z'
+            AND substr(invalidated_at, 6, 2) BETWEEN '01' AND '12'
+            AND substr(invalidated_at, 9, 2) BETWEEN '01' AND '31'
+            AND substr(invalidated_at, 12, 2) BETWEEN '00' AND '23'
+            AND strftime('%Y-%m-%dT%H:%M:%fZ', invalidated_at) IS NOT NULL
+            AND strftime('%Y-%m-%dT%H:%M:%fZ', invalidated_at) = invalidated_at
+            AND date(
+              substr(invalidated_at, 1, 8) || '01',
+              '+' || (CAST(substr(invalidated_at, 9, 2) AS INTEGER) - 1) || ' days'
+            ) = substr(invalidated_at, 1, 10)
+            THEN 1
+          ELSE 0
+        END = 0;
       DROP TABLE workflow_benchmark_receipt_invalidations;
       ALTER TABLE workflow_benchmark_receipt_invalidations_v7 RENAME TO workflow_benchmark_receipt_invalidations;
     `,
     afterApply: canonicalizeLegacyTerminalCandidates,
+  },
+  {
+    version: 8,
+    sql: `
+      CREATE TABLE processing_recovery_records (
+        attempt_id TEXT NOT NULL REFERENCES attempts(id),
+        generation INTEGER NOT NULL CHECK (generation >= 0),
+        retry_attempts INTEGER NOT NULL CHECK (retry_attempts >= 0),
+        state TEXT NOT NULL CHECK (state IN ('retrying', 'dead-lettered')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (attempt_id, generation)
+      );
+    `,
   },
 ];
 

@@ -790,7 +790,7 @@ describe("SQLiteAttemptRepository", () => {
         generation: 0,
         candidate: freeOutcome(ATTEMPT_A, fixture.clock.now()),
       }),
-    ).toBeNull();
+    ).toEqual({ kind: "lost-claim" });
   });
 
   it("finalizes one terminal fact idempotently and does not leaderboard a Free result", async () => {
@@ -819,7 +819,12 @@ describe("SQLiteAttemptRepository", () => {
 
     const first = await fixture.repository.finalizeTerminalResult(input);
     const duplicate = await fixture.repository.finalizeTerminalResult(input);
-    expect(duplicate).toEqual(first);
+    expect(first.kind).toBe("finalized");
+    expect(duplicate).toMatchObject({
+      kind: "idempotent",
+      finalized:
+        first.kind === "finalized" ? first.finalized : expect.anything(),
+    });
     fixture.clock.advance(1);
     await expect(
       fixture.repository.finalizeTerminalResult({
@@ -1113,7 +1118,7 @@ describe("SQLiteAttemptRepository", () => {
         generation: claim.generation,
         candidate: freeOutcome(ATTEMPT_A, fixture.clock.now()),
       }),
-    ).toBeNull();
+    ).toEqual({ kind: "tombstoned" });
     expect(
       await fixture.repository.getAttempt({
         attemptId: ATTEMPT_A,
@@ -1258,7 +1263,10 @@ describe("SQLiteAttemptRepository", () => {
     ]);
 
     expect(tombstoneResult.error).toBeUndefined();
-    expect(finalizerResult).toEqual({ value: null, error: undefined });
+    expect(finalizerResult).toEqual({
+      value: { kind: "tombstoned" },
+      error: undefined,
+    });
     expect(
       await fixture.repository.getAttempt({
         attemptId: ATTEMPT_A,
@@ -1336,7 +1344,7 @@ describe("SQLiteAttemptRepository", () => {
         generation: claim.generation,
         candidate: freeOutcome(ATTEMPT_A, fixture.clock.now()),
       }),
-    ).toBeNull();
+    ).toEqual({ kind: "tombstoned" });
   });
 
   it("guards rollback and claims by attachment generation, then reclaims only after the exclusive lease boundary", async () => {
@@ -1385,7 +1393,7 @@ describe("SQLiteAttemptRepository", () => {
         generation: firstClaim.generation,
         candidate: freeOutcome(ATTEMPT_A, fixture.clock.now()),
       }),
-    ).toBeNull();
+    ).toEqual({ kind: "lost-claim" });
     const secondClaim = (await fixture.repository.claimProcessing(secondJob))!;
     expect(secondClaim.generation).toBe(secondJob.generation);
     expect(secondClaim.leaseId).not.toBe(firstClaim.leaseId);
@@ -1605,6 +1613,10 @@ describe("SQLiteAttemptRepository", () => {
           fixture.repository.claimProcessing(queuedJob),
         releaseProcessingClaim: (input) =>
           fixture.repository.releaseProcessingClaim(input),
+        recordProcessingFailure: (input) =>
+          fixture.repository.recordProcessingFailure(input),
+        deadLetterProcessingClaim: (input) =>
+          fixture.repository.deadLetterProcessingClaim(input),
         finalizeTerminalResult: async (input) => {
           finalizerCalls += 1;
           if (finalizerCalls === 1)
@@ -1667,6 +1679,10 @@ describe("SQLiteAttemptRepository", () => {
           fixture.repository.claimProcessing(queuedJob),
         releaseProcessingClaim: (input) =>
           fixture.repository.releaseProcessingClaim(input),
+        recordProcessingFailure: (input) =>
+          fixture.repository.recordProcessingFailure(input),
+        deadLetterProcessingClaim: (input) =>
+          fixture.repository.deadLetterProcessingClaim(input),
         finalizeTerminalResult: async (input) => {
           finalizerCalls += 1;
           if (input.candidate.state === "valid")
@@ -1715,6 +1731,322 @@ describe("SQLiteAttemptRepository", () => {
         )
         .get(ATTEMPT_A),
     ).toMatchObject({ count: 1 });
+  });
+
+  it("dead-letters a permanently broken fallback builder without leaving a live claim", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    let fallbackCalls = 0;
+    const worker = new AnalysisWorker({
+      queue,
+      repository: fixture.repository,
+      process: async () => {
+        throw new Error("permanent processor failure");
+      },
+      unexpectedRetryPolicy: {
+        maxAttempts: 1,
+        delayMilliseconds: 0,
+        terminalCandidate: () => {
+          fallbackCalls += 1;
+          throw new Error("broken terminal fallback");
+        },
+      },
+      retryWaiter: { wait: async () => undefined },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue(job);
+    await scheduler.runAll();
+    stop();
+
+    expect({ fallbackCalls, scheduled: scheduler.tasks.length }).toEqual({
+      fallbackCalls: 1,
+      scheduled: 0,
+    });
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({ status: "uploaded", outcome: { state: "pending" } });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT state FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
+        )
+        .get(ATTEMPT_A, job.generation),
+    ).toEqual({ state: "dead-lettered" });
+    expect(await fixture.repository.claimProcessing(job)).toBeNull();
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({ count: 0 });
+  });
+
+  it("dead-letters an invalid fallback candidate without leaving a live claim", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    const worker = new AnalysisWorker({
+      queue,
+      repository: fixture.repository,
+      process: async () => {
+        throw new Error("permanent processor failure");
+      },
+      unexpectedRetryPolicy: {
+        maxAttempts: 1,
+        delayMilliseconds: 0,
+        terminalCandidate: () => freeOutcome(ATTEMPT_B, fixture.clock.now()),
+      },
+      retryWaiter: { wait: async () => undefined },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue(job);
+    await scheduler.runAll();
+    stop();
+
+    expect(scheduler.tasks).toEqual([]);
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({ status: "uploaded", outcome: { state: "pending" } });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT state FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
+        )
+        .get(ATTEMPT_A, job.generation),
+    ).toEqual({ state: "dead-lettered" });
+  });
+
+  it("dead-letters a permanently rejecting fallback finalizer without automatic redelivery", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    let finalizerCalls = 0;
+    const worker = new AnalysisWorker({
+      queue,
+      repository: {
+        claimProcessing: (queuedJob) =>
+          fixture.repository.claimProcessing(queuedJob),
+        releaseProcessingClaim: (input) =>
+          fixture.repository.releaseProcessingClaim(input),
+        recordProcessingFailure: (input) =>
+          fixture.repository.recordProcessingFailure(input),
+        deadLetterProcessingClaim: (input) =>
+          fixture.repository.deadLetterProcessingClaim(input),
+        finalizeTerminalResult: async () => {
+          finalizerCalls += 1;
+          throw new Error("finalizer is permanently unavailable");
+        },
+      },
+      process: async () => freeOutcome(ATTEMPT_A, fixture.clock.now()),
+      unexpectedRetryPolicy: {
+        maxAttempts: 1,
+        delayMilliseconds: 0,
+        terminalCandidate: ({ job: failedJob, claim }) => ({
+          state: "failed",
+          attemptId: failedJob.attemptId,
+          mode: claim.mode,
+          code: "analysis_internal_error",
+          message: FailureMessageByCode.analysis_internal_error,
+          retryable: false,
+        }),
+      },
+      retryWaiter: { wait: async () => undefined },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue(job);
+    await scheduler.runAll();
+    stop();
+
+    expect({ finalizerCalls, scheduled: scheduler.tasks.length }).toEqual({
+      finalizerCalls: 2,
+      scheduled: 0,
+    });
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({ status: "uploaded", outcome: { state: "pending" } });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT state FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
+        )
+        .get(ATTEMPT_A, job.generation),
+    ).toEqual({ state: "dead-lettered" });
+  });
+
+  it("reclaims an exact-boundary lease instead of acknowledging its unfinished result", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    let calls = 0;
+    const worker = new AnalysisWorker({
+      queue,
+      repository: fixture.repository,
+      process: async () => {
+        calls += 1;
+        if (calls === 1) fixture.clock.advance(5 * 60_000);
+        return freeOutcome(ATTEMPT_A, fixture.clock.now());
+      },
+      unexpectedRetryPolicy: {
+        maxAttempts: 2,
+        delayMilliseconds: 0,
+        terminalCandidate: ({ job: failedJob, claim }) => ({
+          state: "failed",
+          attemptId: failedJob.attemptId,
+          mode: claim.mode,
+          code: "analysis_internal_error",
+          message: FailureMessageByCode.analysis_internal_error,
+          retryable: false,
+        }),
+      },
+      retryWaiter: { wait: async () => undefined },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue(job);
+    await scheduler.runAll();
+    stop();
+
+    expect({ calls, scheduled: scheduler.tasks.length }).toEqual({
+      calls: 2,
+      scheduled: 0,
+    });
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({ status: "valid", outcome: { state: "valid" } });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({ count: 1 });
+  });
+
+  it("persists recovery attempts by attachment generation across repository instances", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const firstClaim = (await fixture.repository.claimProcessing(job))!;
+    await expect(
+      fixture.repository.recordProcessingFailure({
+        attemptId: ATTEMPT_A,
+        leaseId: firstClaim.leaseId,
+        generation: firstClaim.generation,
+      }),
+    ).resolves.toEqual({ kind: "recorded", retryAttempt: 1 });
+    await fixture.repository.releaseProcessingClaim({
+      attemptId: ATTEMPT_A,
+      leaseId: firstClaim.leaseId,
+      generation: firstClaim.generation,
+    });
+
+    const reopened = fixture.openSecondaryDatabase();
+    const resumed = new SQLiteAttemptRepository({
+      database: reopened,
+      clock: fixture.clock,
+      ids: new TestIds(LEASE_B),
+    });
+    const secondClaim = (await resumed.claimProcessing(job))!;
+    await expect(
+      resumed.recordProcessingFailure({
+        attemptId: ATTEMPT_A,
+        leaseId: secondClaim.leaseId,
+        generation: secondClaim.generation,
+      }),
+    ).resolves.toEqual({ kind: "recorded", retryAttempt: 2 });
+    await expect(
+      resumed.deadLetterProcessingClaim({
+        attemptId: ATTEMPT_A,
+        leaseId: secondClaim.leaseId,
+        generation: secondClaim.generation,
+      }),
+    ).resolves.toEqual({ kind: "dead-lettered" });
+    expect(await fixture.repository.claimProcessing(job)).toBeNull();
   });
 
   it("retracts a ranked terminal fact, observations, and retained media without resurrection", async () => {
@@ -1801,7 +2133,7 @@ describe("SQLiteAttemptRepository", () => {
         generation: claim.generation,
         candidate: rankedOutcome(ATTEMPT_A, fixture.clock.now(), 80),
       }),
-    ).toBeNull();
+    ).toEqual({ kind: "tombstoned" });
     expect(
       fixture.database.raw
         .prepare(
@@ -1935,7 +2267,10 @@ describe("SQLiteAttemptRepository", () => {
       candidate,
     });
 
-    expect(duplicate?.outcome).toEqual(legacyOutcome);
+    expect(duplicate).toMatchObject({
+      kind: "idempotent",
+      finalized: { outcome: legacyOutcome },
+    });
     expect(
       upgraded.raw
         .prepare(
@@ -2033,7 +2368,10 @@ describe("SQLiteAttemptRepository", () => {
         generation: 1,
         candidate,
       }),
-    ).resolves.toMatchObject({ outcome: legacyOutcome });
+    ).resolves.toMatchObject({
+      kind: "idempotent",
+      finalized: { outcome: legacyOutcome },
+    });
     await expect(
       repository.finalizeTerminalResult({
         attemptId: ATTEMPT_A,
@@ -2047,9 +2385,96 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 7 });
+    ).toMatchObject({ count: 8 });
     reopened.close();
     upgraded.close();
+  });
+
+  it("quarantines v6-only invalidation timestamps so upgrade remains total and policies stay inactive", async () => {
+    const filename = join(fixture.directory, "legacy-v6-invalidations.sqlite");
+    const legacy = openSqliteDatabaseAtVersionForTest(filename, 6);
+    const legacyPolicy = new SQLiteCompetitivePolicyRepository({
+      database: legacy,
+      clock: fixture.clock,
+    });
+    await legacyPolicy.storeBenchmarkReceipt(
+      passingWorkflowBenchmarkReceiptFixture,
+    );
+    legacy.raw
+      .prepare(
+        "INSERT INTO approved_competitive_model_policies (id, receipt_id, receipt_sha256, receipt_schema_version, model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, challenge_id, challenge_version, rule_version, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'wall-pass', 1, 'wall-pass-v1-score-1', 1, ?)",
+      )
+      .run(
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        passingWorkflowBenchmarkReceiptFixture.id,
+        passingWorkflowBenchmarkReceiptFixture.receiptSha256,
+        passingWorkflowBenchmarkReceiptFixture.schemaVersion,
+        passingWorkflowBenchmarkReceiptFixture.workflow.modelBundleId,
+        passingWorkflowBenchmarkReceiptFixture.workflow.workflowId,
+        passingWorkflowBenchmarkReceiptFixture.workflow.workflowVersion,
+        passingWorkflowBenchmarkReceiptFixture.workflow.providerVersion,
+        "wall-pass-calibration-evidence-v1",
+        fixture.clock.now(),
+      );
+    legacy.raw
+      .prepare(
+        "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, 'operator_revoked', ?)",
+      )
+      .run(
+        passingWorkflowBenchmarkReceiptFixture.id,
+        "2030-01-15T24:00:00.000Z",
+        fixture.clock.now(),
+      );
+    legacy.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    const upgradedPolicy = new SQLiteCompetitivePolicyRepository({
+      database: upgraded,
+      clock: fixture.clock,
+    });
+    const tuple = {
+      modelBundleId:
+        passingWorkflowBenchmarkReceiptFixture.workflow.modelBundleId,
+      workflowId: passingWorkflowBenchmarkReceiptFixture.workflow.workflowId,
+      workflowVersion:
+        passingWorkflowBenchmarkReceiptFixture.workflow.workflowVersion,
+      providerVersion:
+        passingWorkflowBenchmarkReceiptFixture.workflow.providerVersion,
+      calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+      challengeId: "wall-pass" as const,
+      challengeVersion: 1 as const,
+      ruleVersion: "wall-pass-v1-score-1" as const,
+    };
+
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT invalidated_at, quarantine_reason FROM workflow_benchmark_receipt_invalidation_quarantine WHERE receipt_id = ?",
+        )
+        .get(passingWorkflowBenchmarkReceiptFixture.id),
+    ).toEqual({
+      invalidated_at: "2030-01-15T24:00:00.000Z",
+      quarantine_reason: "invalid_v6_timestamp",
+    });
+    await expect(
+      upgradedPolicy.getActiveCompetitivePolicy(tuple),
+    ).resolves.toBeNull();
+    expect(
+      upgraded.raw
+        .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+        .get(),
+    ).toMatchObject({ count: 8 });
+    upgraded.close();
+
+    const reopened = openSqliteDatabase(filename);
+    expect(
+      reopened.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM workflow_benchmark_receipt_invalidation_quarantine",
+        )
+        .get(),
+    ).toMatchObject({ count: 1 });
+    reopened.close();
   });
 
   it("stores parsed receipts but activates only a current passed exact tuple", async () => {

@@ -53,6 +53,29 @@ export type FinalizedAttempt = Readonly<{
   outcome: AttemptOutcome;
 }>;
 
+/**
+ * Finalization is intentionally not nullable: queue consumers must know
+ * whether a delivery stored a fact, found an idempotent fact, or lost its
+ * right to complete the claim.
+ */
+export type FinalizeTerminalResultOutcome =
+  | Readonly<{ kind: "finalized"; finalized: FinalizedAttempt }>
+  | Readonly<{ kind: "idempotent"; finalized: FinalizedAttempt }>
+  | Readonly<{ kind: "tombstoned" }>
+  | Readonly<{ kind: "lost-claim" }>;
+
+/** Persisted retry counter for a single attachment generation. */
+export type ProcessingFailureRecordOutcome =
+  | Readonly<{ kind: "recorded"; retryAttempt: number }>
+  | Readonly<{ kind: "tombstoned" }>
+  | Readonly<{ kind: "lost-claim" }>;
+
+/** A durable non-terminal recovery state after bounded terminalization fails. */
+export type DeadLetterProcessingClaimOutcome =
+  | Readonly<{ kind: "dead-lettered" }>
+  | Readonly<{ kind: "tombstoned" }>
+  | Readonly<{ kind: "lost-claim" }>;
+
 type RankedVerifiedTerminalCandidate = Omit<
   Extract<VerifiedResult, { competitiveStatus: "ranked" }>,
   "rankingSnapshot"
@@ -143,9 +166,23 @@ export interface AttemptRepository {
       generation: number;
     }>,
   ): Promise<boolean>;
+  recordProcessingFailure(
+    input: Readonly<{
+      attemptId: string;
+      leaseId: string;
+      generation: number;
+    }>,
+  ): Promise<ProcessingFailureRecordOutcome>;
+  deadLetterProcessingClaim(
+    input: Readonly<{
+      attemptId: string;
+      leaseId: string;
+      generation: number;
+    }>,
+  ): Promise<DeadLetterProcessingClaimOutcome>;
   finalizeTerminalResult(
     input: FinalizeTerminalResultInput,
-  ): Promise<FinalizedAttempt | null>;
+  ): Promise<FinalizeTerminalResultOutcome>;
   tombstoneAttempt(
     input: Readonly<{ attemptId: string; athleteId: string }>,
   ): Promise<void>;
