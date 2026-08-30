@@ -321,7 +321,6 @@ const migrations: readonly Migration[] = [
         ON approved_competitive_model_policies(model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, challenge_id, challenge_version, rule_version)
         WHERE active = 1;
     `,
-    afterApply: canonicalizeLegacyTerminalCandidates,
   },
   {
     version: 6,
@@ -354,6 +353,34 @@ const migrations: readonly Migration[] = [
       DROP TABLE workflow_benchmark_receipt_invalidations;
       ALTER TABLE workflow_benchmark_receipt_invalidations_v6 RENAME TO workflow_benchmark_receipt_invalidations;
     `,
+  },
+  {
+    version: 7,
+    sql: `
+      CREATE TABLE workflow_benchmark_receipt_invalidations_v7 (
+        receipt_id TEXT PRIMARY KEY NOT NULL REFERENCES workflow_benchmark_receipts(id),
+        invalidated_at TEXT NOT NULL CHECK (
+          invalidated_at GLOB '????-??-??T??:??:??.???Z'
+          AND substr(invalidated_at, 6, 2) BETWEEN '01' AND '12'
+          AND substr(invalidated_at, 9, 2) BETWEEN '01' AND '31'
+          AND substr(invalidated_at, 12, 2) BETWEEN '00' AND '23'
+          AND strftime('%Y-%m-%dT%H:%M:%fZ', invalidated_at) IS NOT NULL
+          AND strftime('%Y-%m-%dT%H:%M:%fZ', invalidated_at) = invalidated_at
+          AND date(
+            substr(invalidated_at, 1, 8) || '01',
+            '+' || (CAST(substr(invalidated_at, 9, 2) AS INTEGER) - 1) || ' days'
+          ) = substr(invalidated_at, 1, 10)
+        ),
+        reason TEXT NOT NULL CHECK (reason IN ('tuple_changed', 'manifest_set_changed', 'operator_revoked')),
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO workflow_benchmark_receipt_invalidations_v7
+        SELECT receipt_id, invalidated_at, reason, created_at
+        FROM workflow_benchmark_receipt_invalidations;
+      DROP TABLE workflow_benchmark_receipt_invalidations;
+      ALTER TABLE workflow_benchmark_receipt_invalidations_v7 RENAME TO workflow_benchmark_receipt_invalidations;
+    `,
+    afterApply: canonicalizeLegacyTerminalCandidates,
   },
 ];
 

@@ -35,7 +35,7 @@ export class ExpectedProcessingFailure extends Error {
 
 export type UnexpectedRetryPolicy = Readonly<{
   maxAttempts: number;
-  wait(retryAttempt: number): Promise<void>;
+  delayMilliseconds: number;
   terminalCandidate(
     input: Readonly<{
       job: AnalysisJob;
@@ -46,11 +46,13 @@ export type UnexpectedRetryPolicy = Readonly<{
   ): TerminalCandidate;
 }>;
 
+export type RetryWaiter = Readonly<{
+  wait(delayMilliseconds: number): Promise<void>;
+}>;
+
 const defaultUnexpectedRetryPolicy: UnexpectedRetryPolicy = Object.freeze({
   maxAttempts: 3,
-  wait: async () => {
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  },
+  delayMilliseconds: 0,
   terminalCandidate: ({ job, claim }) => ({
     state: "failed",
     attemptId: job.attemptId,
@@ -61,12 +63,21 @@ const defaultUnexpectedRetryPolicy: UnexpectedRetryPolicy = Object.freeze({
   }),
 });
 
+const timerRetryWaiter: RetryWaiter = Object.freeze({
+  wait: async (delayMilliseconds) => {
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, delayMilliseconds),
+    );
+  },
+});
+
 /** Queue consumer that delegates all reservation and terminal idempotence to the repository. */
 export class AnalysisWorker {
   private readonly queue: AnalysisQueue;
   private readonly repository: ProcessingRepository;
   private readonly process: AnalysisProcessor;
   private readonly unexpectedRetryPolicy: UnexpectedRetryPolicy;
+  private readonly retryWaiter: RetryWaiter;
   private readonly retryAttempts = new Map<string, number>();
 
   public constructor(
@@ -75,6 +86,7 @@ export class AnalysisWorker {
       repository: ProcessingRepository;
       process: AnalysisProcessor;
       unexpectedRetryPolicy?: UnexpectedRetryPolicy;
+      retryWaiter?: RetryWaiter;
     }>,
   ) {
     this.queue = input.queue;
@@ -82,9 +94,20 @@ export class AnalysisWorker {
     this.process = input.process;
     this.unexpectedRetryPolicy =
       input.unexpectedRetryPolicy ?? defaultUnexpectedRetryPolicy;
-    if (this.unexpectedRetryPolicy.maxAttempts < 1)
+    this.retryWaiter = input.retryWaiter ?? timerRetryWaiter;
+    if (
+      !Number.isSafeInteger(this.unexpectedRetryPolicy.maxAttempts) ||
+      this.unexpectedRetryPolicy.maxAttempts < 1
+    )
       throw new Error(
-        "Unexpected retry policy must allow at least one attempt.",
+        "Unexpected retry policy maxAttempts must be a positive safe integer.",
+      );
+    if (
+      !Number.isFinite(this.unexpectedRetryPolicy.delayMilliseconds) ||
+      this.unexpectedRetryPolicy.delayMilliseconds < 0
+    )
+      throw new Error(
+        "Unexpected retry policy delayMilliseconds must be finite and nonnegative.",
       );
   }
 
@@ -92,8 +115,15 @@ export class AnalysisWorker {
     return this.queue.subscribe(async (job) => {
       const claim = await this.repository.claimProcessing(job);
       if (!claim) return;
+      let candidate: TerminalCandidate;
       try {
-        const candidate = await this.process({ job, claim });
+        try {
+          candidate = await this.process({ job, claim });
+        } catch (error) {
+          if (error instanceof ExpectedProcessingFailure)
+            candidate = error.candidate;
+          else throw error;
+        }
         await this.repository.finalizeTerminalResult({
           attemptId: job.attemptId,
           leaseId: claim.leaseId,
@@ -102,42 +132,53 @@ export class AnalysisWorker {
         });
         this.retryAttempts.delete(retryKey(job));
       } catch (error) {
-        if (error instanceof ExpectedProcessingFailure) {
-          await this.repository.finalizeTerminalResult({
-            attemptId: job.attemptId,
-            leaseId: claim.leaseId,
-            generation: claim.generation,
-            candidate: error.candidate,
-          });
-          this.retryAttempts.delete(retryKey(job));
-          return;
-        }
-        const retryAttempt = (this.retryAttempts.get(retryKey(job)) ?? 0) + 1;
-        if (retryAttempt >= this.unexpectedRetryPolicy.maxAttempts) {
-          await this.repository.finalizeTerminalResult({
-            attemptId: job.attemptId,
-            leaseId: claim.leaseId,
-            generation: claim.generation,
-            candidate: this.unexpectedRetryPolicy.terminalCandidate({
-              job,
-              claim,
-              retryAttempt,
-              error,
-            }),
-          });
-          this.retryAttempts.delete(retryKey(job));
-          return;
-        }
-        this.retryAttempts.set(retryKey(job), retryAttempt);
-        await this.repository.releaseProcessingClaim({
+        await this.recover(job, claim, error);
+      }
+    });
+  }
+
+  private async recover(
+    job: AnalysisJob,
+    claim: ProcessingClaim,
+    error: unknown,
+  ): Promise<void> {
+    const key = retryKey(job);
+    const retryAttempt = (this.retryAttempts.get(key) ?? 0) + 1;
+    this.retryAttempts.set(key, retryAttempt);
+    if (retryAttempt >= this.unexpectedRetryPolicy.maxAttempts) {
+      try {
+        await this.repository.finalizeTerminalResult({
           attemptId: job.attemptId,
           leaseId: claim.leaseId,
           generation: claim.generation,
+          candidate: this.unexpectedRetryPolicy.terminalCandidate({
+            job,
+            claim,
+            retryAttempt,
+            error,
+          }),
         });
-        await this.unexpectedRetryPolicy.wait(retryAttempt);
-        throw error;
+        this.retryAttempts.delete(key);
+        return;
+      } catch (terminalizationError) {
+        await this.releaseForRetry(job, claim);
+        throw terminalizationError;
       }
+    }
+    await this.releaseForRetry(job, claim);
+    throw error;
+  }
+
+  private async releaseForRetry(
+    job: AnalysisJob,
+    claim: ProcessingClaim,
+  ): Promise<void> {
+    await this.repository.releaseProcessingClaim({
+      attemptId: job.attemptId,
+      leaseId: claim.leaseId,
+      generation: claim.generation,
     });
+    await this.retryWaiter.wait(this.unexpectedRetryPolicy.delayMilliseconds);
   }
 }
 

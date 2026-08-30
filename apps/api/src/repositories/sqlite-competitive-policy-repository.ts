@@ -222,6 +222,7 @@ export class SQLiteCompetitivePolicyRepository
       throw new CompetitivePolicyRepositoryError(
         "competitive_policy_invalid_invalidation",
       );
+    const invalidatedAt = new Date(input.invalidatedAt).toISOString();
     await this.transaction(() => {
       const receipt = this.raw
         .prepare("SELECT id FROM workflow_benchmark_receipts WHERE id = ?")
@@ -239,7 +240,7 @@ export class SQLiteCompetitivePolicyRepository
         | undefined;
       if (existing) {
         if (
-          existing.invalidated_at === input.invalidatedAt &&
+          existing.invalidated_at === invalidatedAt &&
           existing.reason === input.reason
         )
           return;
@@ -247,16 +248,19 @@ export class SQLiteCompetitivePolicyRepository
           "competitive_policy_conflict",
         );
       }
-      this.raw
-        .prepare(
-          "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, ?, ?)",
-        )
-        .run(
-          input.receiptId,
-          input.invalidatedAt,
-          input.reason,
-          this.clock.now(),
-        );
+      try {
+        this.raw
+          .prepare(
+            "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, ?, ?)",
+          )
+          .run(input.receiptId, invalidatedAt, input.reason, this.clock.now());
+      } catch (error) {
+        if (isSqliteConstraintError(error))
+          throw new CompetitivePolicyRepositoryError(
+            "competitive_policy_invalid_invalidation",
+          );
+        throw error;
+      }
     });
   }
 
@@ -306,6 +310,16 @@ export class SQLiteCompetitivePolicyRepository
       throw error;
     }
   }
+}
+
+function isSqliteConstraintError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    error.code.startsWith("SQLITE_CONSTRAINT")
+  );
 }
 
 function stableJson(value: unknown): string {

@@ -29,6 +29,35 @@ const outcome: TerminalCandidate = {
 };
 
 describe("AnalysisWorker", () => {
+  it("rejects non-finite, fractional, or non-positive retry configuration", () => {
+    const makeWorker = (
+      input: Readonly<{
+        maxAttempts: number;
+        delayMilliseconds: number;
+      }>,
+    ) =>
+      new AnalysisWorker({
+        queue: new InMemoryAnalysisQueue(),
+        repository: {
+          claimProcessing: async () => null,
+          releaseProcessingClaim: async () => true,
+          finalizeTerminalResult: async () => null,
+        },
+        process: async () => outcome,
+        unexpectedRetryPolicy: {
+          ...input,
+          terminalCandidate: () => outcome,
+        },
+      });
+
+    for (const maxAttempts of [0, -1, 1.5, Number.NaN, Infinity]) {
+      expect(() => makeWorker({ maxAttempts, delayMilliseconds: 0 })).toThrow();
+    }
+    for (const delayMilliseconds of [-1, Number.NaN, Infinity]) {
+      expect(() => makeWorker({ maxAttempts: 1, delayMilliseconds })).toThrow();
+    }
+  });
+
   it("claims before processing and finalizes once despite duplicate queue delivery", async () => {
     const scheduler = new ManualScheduler();
     const queue = new InMemoryAnalysisQueue({ scheduler });
@@ -178,9 +207,7 @@ describe("AnalysisWorker", () => {
       },
       unexpectedRetryPolicy: {
         maxAttempts: 3,
-        wait: async (attempt) => {
-          backoffAttempts.push(attempt);
-        },
+        delayMilliseconds: 0,
         terminalCandidate: ({ job, claim }) => ({
           state: "failed",
           attemptId: job.attemptId,
@@ -189,6 +216,11 @@ describe("AnalysisWorker", () => {
           message: "A análise não pôde ser concluída.",
           retryable: false,
         }),
+      },
+      retryWaiter: {
+        wait: async (delayMilliseconds) => {
+          backoffAttempts.push(delayMilliseconds);
+        },
       },
     });
     const stop = worker.start();
@@ -205,7 +237,7 @@ describe("AnalysisWorker", () => {
     }).toEqual({
       processCalls: 3,
       releases: 2,
-      backoffAttempts: [1, 2],
+      backoffAttempts: [0, 0],
       scheduled: 0,
     });
     expect(finalized).toEqual([

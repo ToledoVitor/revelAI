@@ -18,7 +18,10 @@ import {
   InMemoryAnalysisQueue,
   type QueueScheduler,
 } from "../queue/in-memory-analysis-queue.js";
-import { AnalysisWorker } from "../workers/analysis-worker.js";
+import {
+  AnalysisWorker,
+  ExpectedProcessingFailure,
+} from "../workers/analysis-worker.js";
 import {
   SQLiteAttemptRepository,
   type Clock,
@@ -1460,9 +1463,7 @@ describe("SQLiteAttemptRepository", () => {
       },
       unexpectedRetryPolicy: {
         maxAttempts: 2,
-        wait: async (attempt) => {
-          delays.push(attempt);
-        },
+        delayMilliseconds: 0,
         terminalCandidate: ({ job: failedJob, claim }) => ({
           state: "failed",
           attemptId: failedJob.attemptId,
@@ -1471,6 +1472,11 @@ describe("SQLiteAttemptRepository", () => {
           message: "A análise não pôde ser concluída.",
           retryable: false,
         }),
+      },
+      retryWaiter: {
+        wait: async (delayMilliseconds) => {
+          delays.push(delayMilliseconds);
+        },
       },
     });
     const stop = worker.start();
@@ -1481,7 +1487,7 @@ describe("SQLiteAttemptRepository", () => {
 
     expect({ calls, delays, scheduled: scheduler.tasks.length }).toEqual({
       calls: 2,
-      delays: [1],
+      delays: [0],
       scheduled: 0,
     });
     expect(
@@ -1492,6 +1498,215 @@ describe("SQLiteAttemptRepository", () => {
     ).toMatchObject({
       status: "failed",
       outcome: { code: "analysis_internal_error", retryable: false },
+    });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({ count: 1 });
+  });
+
+  it("settles an invalid classified candidate through fallback terminalization instead of acknowledging a live claim", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    let calls = 0;
+    const worker = new AnalysisWorker({
+      queue,
+      repository: fixture.repository,
+      process: async () => {
+        calls += 1;
+        throw new ExpectedProcessingFailure(
+          freeOutcome(ATTEMPT_B, fixture.clock.now()),
+        );
+      },
+      unexpectedRetryPolicy: {
+        maxAttempts: 2,
+        delayMilliseconds: 0,
+        terminalCandidate: ({ job: failedJob, claim }) => ({
+          state: "failed",
+          attemptId: failedJob.attemptId,
+          mode: claim.mode,
+          code: "analysis_internal_error",
+          message: FailureMessageByCode.analysis_internal_error,
+          retryable: false,
+        }),
+      },
+      retryWaiter: { wait: async () => undefined },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue(job);
+    await scheduler.runAll();
+    stop();
+
+    expect({ calls, scheduled: scheduler.tasks.length }).toEqual({
+      calls: 2,
+      scheduled: 0,
+    });
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({
+      status: "failed",
+      outcome: { code: "analysis_internal_error" },
+    });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({ count: 1 });
+  });
+
+  it("recovers a transient finalizer rejection through a new claim and terminalizes once", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    let processCalls = 0;
+    let finalizerCalls = 0;
+    const worker = new AnalysisWorker({
+      queue,
+      repository: {
+        claimProcessing: (queuedJob) =>
+          fixture.repository.claimProcessing(queuedJob),
+        releaseProcessingClaim: (input) =>
+          fixture.repository.releaseProcessingClaim(input),
+        finalizeTerminalResult: async (input) => {
+          finalizerCalls += 1;
+          if (finalizerCalls === 1)
+            throw new Error("temporary finalizer failure");
+          return fixture.repository.finalizeTerminalResult(input);
+        },
+      },
+      process: async () => {
+        processCalls += 1;
+        return freeOutcome(ATTEMPT_A, fixture.clock.now());
+      },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue(job);
+    await scheduler.runAll();
+    stop();
+
+    expect({
+      processCalls,
+      finalizerCalls,
+      scheduled: scheduler.tasks.length,
+    }).toEqual({
+      processCalls: 2,
+      finalizerCalls: 2,
+      scheduled: 0,
+    });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({ count: 1 });
+  });
+
+  it("settles permanent candidate finalizer rejections through its bounded fallback", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await fixture.repository.attachValidatedMedia({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    let finalizerCalls = 0;
+    const worker = new AnalysisWorker({
+      queue,
+      repository: {
+        claimProcessing: (queuedJob) =>
+          fixture.repository.claimProcessing(queuedJob),
+        releaseProcessingClaim: (input) =>
+          fixture.repository.releaseProcessingClaim(input),
+        finalizeTerminalResult: async (input) => {
+          finalizerCalls += 1;
+          if (input.candidate.state === "valid")
+            throw new Error("permanent candidate finalizer failure");
+          return fixture.repository.finalizeTerminalResult(input);
+        },
+      },
+      process: async () => freeOutcome(ATTEMPT_A, fixture.clock.now()),
+      unexpectedRetryPolicy: {
+        maxAttempts: 2,
+        delayMilliseconds: 0,
+        terminalCandidate: ({ job: failedJob, claim }) => ({
+          state: "failed",
+          attemptId: failedJob.attemptId,
+          mode: claim.mode,
+          code: "analysis_internal_error",
+          message: FailureMessageByCode.analysis_internal_error,
+          retryable: false,
+        }),
+      },
+      retryWaiter: { wait: async () => undefined },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue(job);
+    await scheduler.runAll();
+    stop();
+
+    expect({ finalizerCalls, scheduled: scheduler.tasks.length }).toEqual({
+      finalizerCalls: 3,
+      scheduled: 0,
+    });
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({
+      status: "failed",
+      outcome: { code: "analysis_internal_error" },
     });
     expect(
       fixture.database.raw
@@ -1741,6 +1956,102 @@ describe("SQLiteAttemptRepository", () => {
     upgraded.close();
   });
 
+  it("canonicalizes an already-applied v5 ranked candidate on a later idempotent migration", async () => {
+    const filename = join(fixture.directory, "legacy-v5.sqlite");
+    const legacy = openSqliteDatabaseAtVersionForTest(filename, 6);
+    const completedAt = fixture.clock.now();
+    const legacyOutcome = legacyRankedOutcome(ATTEMPT_A, completedAt, 80);
+    legacy.raw
+      .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+      .run(ATHLETE_A, completedAt);
+    legacy.raw
+      .prepare(
+        "INSERT INTO calibration_sessions (id, athlete_id, nonce, challenge_id, challenge_version, state, issued_at, expires_at, consumed_at) VALUES (?, ?, ?, 'wall-pass', 1, 'consumed', ?, ?, ?)",
+      )
+      .run(
+        SESSION_A,
+        ATHLETE_A,
+        "a".repeat(43),
+        completedAt,
+        "2030-01-15T12:15:00.000Z",
+        completedAt,
+      );
+    legacy.raw
+      .prepare(
+        "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, processing_lease_id, processing_lease_expires_at, created_at, updated_at) VALUES (?, ?, 'verified', 'wall-pass', 1, ?, 'processing', 'active', ?, 1, ?, ?, ?, ?)",
+      )
+      .run(
+        ATTEMPT_A,
+        ATHLETE_A,
+        SESSION_A,
+        JSON.stringify({
+          id: "media-a",
+          contentType: "video/mp4",
+          bytes: 10,
+          deleteAt: "2030-01-16T12:00:00.000Z",
+        }),
+        LEASE_A,
+        "2030-01-15T12:05:00.000Z",
+        completedAt,
+        completedAt,
+      );
+    legacy.raw
+      .prepare(
+        "INSERT INTO terminal_results (id, attempt_id, lease_id, generation, terminal_state, outcome_json, candidate_json, completed_at, created_at) VALUES (?, ?, ?, 1, 'valid', ?, ?, ?, ?)",
+      )
+      .run(
+        "legacy-result",
+        ATTEMPT_A,
+        LEASE_A,
+        JSON.stringify(legacyOutcome),
+        JSON.stringify(legacyOutcome),
+        completedAt,
+        completedAt,
+      );
+    legacy.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    const repository = new SQLiteAttemptRepository({
+      database: upgraded,
+      clock: fixture.clock,
+      ids: new TestIds(ENTRY_A),
+    });
+    const candidate = rankedOutcome(ATTEMPT_A, completedAt, 80);
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT candidate_json FROM terminal_results WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({
+      candidate_json: expect.not.stringContaining("rankingSnapshot"),
+    });
+    await expect(
+      repository.finalizeTerminalResult({
+        attemptId: ATTEMPT_A,
+        leaseId: LEASE_A,
+        generation: 1,
+        candidate,
+      }),
+    ).resolves.toMatchObject({ outcome: legacyOutcome });
+    await expect(
+      repository.finalizeTerminalResult({
+        attemptId: ATTEMPT_A,
+        leaseId: LEASE_A,
+        generation: 1,
+        candidate: rankedOutcome(ATTEMPT_A, completedAt, 81),
+      }),
+    ).rejects.toMatchObject({ code: "terminal_result_conflict" });
+    const reopened = upgraded.reopen();
+    expect(
+      reopened.raw
+        .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+        .get(),
+    ).toMatchObject({ count: 7 });
+    reopened.close();
+    upgraded.close();
+  });
+
   it("stores parsed receipts but activates only a current passed exact tuple", async () => {
     await fixture.policy.storeBenchmarkReceipt(
       passingWorkflowBenchmarkReceiptFixture,
@@ -1866,6 +2177,33 @@ describe("SQLiteAttemptRepository", () => {
     await fixture.policy.deactivateCompetitivePolicy({ id: renewedPolicy.id });
   });
 
+  it("normalizes optional-millisecond invalidation timestamps before persistence", async () => {
+    await fixture.policy.storeBenchmarkReceipt(
+      passingWorkflowBenchmarkReceiptFixture,
+    );
+    await expect(
+      fixture.policy.invalidateBenchmarkReceipt({
+        receiptId: passingWorkflowBenchmarkReceiptFixture.id,
+        invalidatedAt: "2030-01-15T12:00:00Z",
+        reason: "operator_revoked",
+      }),
+    ).resolves.toBeUndefined();
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT invalidated_at FROM workflow_benchmark_receipt_invalidations WHERE receipt_id = ?",
+        )
+        .get(passingWorkflowBenchmarkReceiptFixture.id),
+    ).toMatchObject({ invalidated_at: "2030-01-15T12:00:00.000Z" });
+    await expect(
+      fixture.policy.invalidateBenchmarkReceipt({
+        receiptId: passingWorkflowBenchmarkReceiptFixture.id,
+        invalidatedAt: "2030-01-15T12:00:00.000Z",
+        reason: "operator_revoked",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it("does not return a policy whose persisted receipt payload is corrupt", async () => {
     await fixture.policy.storeBenchmarkReceipt(
       passingWorkflowBenchmarkReceiptFixture,
@@ -1953,6 +2291,30 @@ describe("SQLiteAttemptRepository", () => {
           "INSERT INTO leaderboard_entries (id, result_id, attempt_id, challenge_id, challenge_version, rule_version, score, completed_at, ranking_snapshot_json, created_at) VALUES (?, ?, ?, 'wall-pass', 1, 'wall-pass-v1-score-1', 80, ?, '{}', ?)",
         )
         .run(ENTRY_A, "result-a", ATTEMPT_B, now, now),
+    ).toThrow();
+    expect(() =>
+      fixture.database.raw
+        .prepare(
+          "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .run(
+          passingWorkflowBenchmarkReceiptFixture.id,
+          "2030-01-15T24:00:00.000Z",
+          "operator_revoked",
+          now,
+        ),
+    ).toThrow();
+    expect(() =>
+      fixture.database.raw
+        .prepare(
+          "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .run(
+          passingWorkflowBenchmarkReceiptFixture.id,
+          "2030-02-30T12:00:00.000Z",
+          "operator_revoked",
+          now,
+        ),
     ).toThrow();
     expect(() =>
       fixture.database.raw
