@@ -46,6 +46,9 @@ importers:
       better-sqlite3:
         specifier: 13.0.3
         version: 13.0.3
+      jpeg-js:
+        specifier: 0.4.4
+        version: 0.4.4
     devDependencies:
       "@types/better-sqlite3":
         specifier: 9.6.0
@@ -106,6 +109,9 @@ importers:
       "@revelai/contracts":
         specifier: workspace:*
         version: link:../contracts
+      jpeg-js:
+        specifier: 0.4.4
+        version: 0.4.4
       zod:
         specifier: 4.1.12
         version: 4.1.12
@@ -1319,6 +1325,12 @@ packages:
     resolution:
       {
         integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==,
+      }
+
+  jpeg-js@0.4.4:
+    resolution:
+      {
+        integrity: sha512-WZzeDOEtTOBK4Mdsar0IqEU5sMr3vSV2RqkAIzUEV2BHnUfKGyswWFPFwK5EeDo93K3FohSHbLAjj0s1Wzd+dg==,
       }
 
   js-tokens@9.0.1:
@@ -2572,6 +2584,8 @@ snapshots:
   is-number@7.0.0: {}
 
   isexe@2.0.0: {}
+
+  jpeg-js@0.4.4: {}
 
   js-tokens@9.0.1: {}
 

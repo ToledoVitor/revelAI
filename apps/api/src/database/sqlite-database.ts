@@ -694,7 +694,11 @@ function canonicalizeLegacyTerminalCandidates(raw: Database.Database): void {
   }
 }
 
-/** Upgrade pre-C5 attached rows into the one canonical retention handoff. */
+/**
+ * v11 may only project the one pre-C5 four-field attachment it actually
+ * understands. It must not turn an unknown near-miss into a C5 transition
+ * before v12/v13 have the opportunity to reject it.
+ */
 function canonicalizeLegacyStoredMedia(raw: Database.Database): void {
   const rows = raw
     .prepare("SELECT id, media_json FROM attempts WHERE media_json IS NOT NULL")
@@ -790,17 +794,32 @@ function canonicalizeLegacyMedia(value: string): string {
   try {
     const parsed = JSON.parse(value);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      return value;
+      throw new Error("invalid legacy C5 media record");
     const media = parsed as Record<string, unknown>;
+    const keys = Object.keys(media).sort();
+    const exactLegacy =
+      keys.length === 4 &&
+      keys.every(
+        (key, index) =>
+          key === ["bytes", "contentType", "deleteAt", "id"][index],
+      );
+    if ("uploadedAt" in media) return value;
+    if (!exactLegacy) throw new Error("invalid legacy C5 media record");
     if (
-      "uploadedAt" in media ||
       typeof media.id !== "string" ||
+      media.id.length === 0 ||
+      typeof media.contentType !== "string" ||
+      media.contentType.length === 0 ||
+      typeof media.bytes !== "number" ||
+      !Number.isSafeInteger(media.bytes) ||
+      media.bytes < 0 ||
       typeof media.deleteAt !== "string" ||
-      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(media.deleteAt)
+      !isCanonicalIso(media.deleteAt)
     )
-      return value;
+      throw new Error("invalid legacy C5 media record");
     const deleteAt = Date.parse(media.deleteAt);
-    if (!Number.isFinite(deleteAt)) return value;
+    if (!Number.isFinite(deleteAt))
+      throw new Error("invalid legacy C5 media record");
     const uploadedAt = new Date(deleteAt - 23 * 60 * 60 * 1000).toISOString();
     return canonicalJson({
       ...media,
@@ -813,8 +832,9 @@ function canonicalizeLegacyMedia(value: string): string {
         ).toISOString(),
       },
     });
-  } catch {
-    return value;
+  } catch (error) {
+    if (error instanceof Error) throw error;
+    throw new Error("invalid legacy C5 media record");
   }
 }
 

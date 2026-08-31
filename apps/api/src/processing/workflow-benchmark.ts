@@ -8,8 +8,10 @@ import {
   type WorkflowBenchmarkReceiptPayload,
 } from "@revelai/contracts";
 import {
+  assertInferenceJpeg,
   VerifiedVisionFrameRequestSchema,
   VisionBatchScheduler,
+  WallPassFrameObservationSchema,
   type SchedulerClock,
   type VerifiedVisionFrameRequest,
   type VisionProvider,
@@ -45,7 +47,6 @@ export type CreateWorkflowBenchmarkReceiptInput = Readonly<{
 
 export type VerifiedBenchmarkManifest = Readonly<{
   id: string;
-  sha256: string;
   frames: readonly VerifiedVisionFrameRequest[];
 }>;
 
@@ -67,6 +68,8 @@ export function createWorkflowBenchmarkReceipt(
   input: CreateWorkflowBenchmarkReceiptInput,
 ): WorkflowBenchmarkReceipt {
   const manifests = exactFive(input.manifests, "benchmark manifests");
+  if (new Set(manifests.map((manifest) => manifest.id)).size !== 5)
+    throw new Error("benchmark manifest IDs must be distinct");
   const runs = exactFive(input.runs, "benchmark runs");
   const manifestIds = manifests.map((manifest) => manifest.id);
   if (new Set(manifestIds).size !== manifestIds.length)
@@ -146,8 +149,10 @@ export async function runWorkflowBenchmark(
     throw new Error("benchmark requires a configured Roboflow provider");
   const samples: number[] = [];
   const runs: CompletedBenchmarkRun[] = [];
+  const receiptManifests: BenchmarkManifestIdentity[] = [];
+  const validatedJpegDigests = new Set<string>();
   for (const manifest of manifests) {
-    assertBenchmarkManifest(manifest);
+    assertBenchmarkManifest(manifest, validatedJpegDigests);
     const batchStartedAt = input.clock.now();
     const observations = await input.scheduler.run(
       manifest.frames,
@@ -160,6 +165,7 @@ export async function runWorkflowBenchmark(
         const duration = input.clock.now() - dispatchedAt;
         if (!Number.isFinite(duration) || duration < 0)
           throw new Error("invalid benchmark dispatch duration");
+        assertBenchmarkObservation(request, observation);
         samples.push(duration);
         return observation;
       },
@@ -169,6 +175,10 @@ export async function runWorkflowBenchmark(
       throw new Error("invalid benchmark batch duration");
     if (observations.length !== 640)
       throw new Error("benchmark batch did not complete every frame request");
+    receiptManifests.push({
+      id: manifest.id,
+      sha256: encodedManifestDigest(observations),
+    });
     runs.push({
       manifestId: manifest.id,
       batchDurationMs: batchDuration,
@@ -188,7 +198,7 @@ export async function runWorkflowBenchmark(
       modelBundleId: provenance.modelBundleId,
       providerVersion: provenance.providerVersion,
     },
-    manifests,
+    manifests: receiptManifests,
     runs,
     pooledDispatchToObservationP95Ms: percentile95(samples),
   });
@@ -254,14 +264,81 @@ export function percentile95(samples: readonly number[]): number {
   return ordered[Math.ceil(ordered.length * 0.95) - 1]!;
 }
 
-function assertBenchmarkManifest(manifest: VerifiedBenchmarkManifest): void {
+function assertBenchmarkManifest(
+  manifest: VerifiedBenchmarkManifest,
+  validatedJpegDigests: Set<string>,
+): void {
   if (manifest.frames.length !== 640)
     throw new Error("benchmark manifest must contain 640 frames");
-  for (const request of manifest.frames) {
+  for (const [index, request] of manifest.frames.entries()) {
     const parsed = VerifiedVisionFrameRequestSchema.parse(request);
-    if (parsed.frame.sourceWidth !== 1280 || parsed.frame.sourceHeight !== 720)
+    if (
+      parsed.frame.index !== index ||
+      parsed.frame.sourceWidth !== 1280 ||
+      parsed.frame.sourceHeight !== 720
+    )
       throw new Error("benchmark frame must be 1280x720");
+    const digest = createHash("sha256").update(parsed.frame.jpeg).digest("hex");
+    if (!validatedJpegDigests.has(digest)) {
+      try {
+        assertInferenceJpeg(parsed.frame.jpeg);
+      } catch {
+        throw new Error(
+          "benchmark frame must be a decoder-valid 1280x720 JPEG",
+        );
+      }
+      validatedJpegDigests.add(digest);
+    }
   }
+}
+
+function assertBenchmarkObservation(
+  request: VerifiedVisionFrameRequest,
+  value: unknown,
+): void {
+  const observation = WallPassFrameObservationSchema.parse(value);
+  if (
+    observation.kind !== "verified-wall-pass" ||
+    observation.frameIndex !== request.frame.index ||
+    observation.timestampMs !== request.frame.timestampMs ||
+    observation.sourceWidth !== request.frame.sourceWidth ||
+    observation.sourceHeight !== request.frame.sourceHeight ||
+    !observation.inference
+  )
+    throw new Error("benchmark observation does not correlate to its frame");
+  const transform = observation.inference.transform;
+  if (
+    transform.sourceWidth !== request.frame.sourceWidth ||
+    transform.sourceHeight !== request.frame.sourceHeight ||
+    transform.inferenceWidth !== 1280 ||
+    transform.inferenceHeight !== 720
+  )
+    throw new Error("benchmark observation transform does not match its frame");
+}
+
+function encodedManifestDigest(
+  observations: readonly Readonly<{
+    frameIndex: number;
+    inference?: Readonly<{ sha256: string }>;
+  }>[],
+): string {
+  if (
+    observations.length !== 640 ||
+    observations.some(
+      (observation, index) =>
+        observation.frameIndex !== index ||
+        !observation.inference ||
+        !/^[a-f0-9]{64}$/.test(observation.inference.sha256),
+    )
+  )
+    throw new Error("benchmark output is not an ordered encoded-frame set");
+  return createHash("sha256")
+    .update(
+      JSON.stringify(
+        observations.map((observation) => observation.inference!.sha256),
+      ),
+    )
+    .digest("hex");
 }
 
 function exactFive<T>(

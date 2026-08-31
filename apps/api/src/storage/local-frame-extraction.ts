@@ -11,6 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { decode } from "jpeg-js";
 import {
   createExtractionManifest,
   type ExtractedFrame,
@@ -540,6 +541,8 @@ function isJpeg(bytes: Uint8Array): boolean {
   const quantizationTables = new Set<number>();
   const huffmanTables = new Set<string>();
   const components = new Map<number, number>();
+  let restartInterval: number | undefined;
+  let sawApp0 = false;
 
   while (cursor < bytes.length) {
     if (bytes[cursor] !== 0xff) return false;
@@ -553,7 +556,7 @@ function isJpeg(bytes: Uint8Array): boolean {
     )
       return false;
     cursor += 1;
-    if (marker === 0x01) continue;
+    if (marker === 0x01) return false;
     if (marker >= 0xd0 && marker <= 0xd7) return false;
     if (cursor + 2 > bytes.length) return false;
     const segmentLength = (bytes[cursor]! << 8) | bytes[cursor + 1]!;
@@ -562,7 +565,15 @@ function isJpeg(bytes: Uint8Array): boolean {
     const segmentStart = cursor + 2;
     const segmentEnd = cursor + segmentLength;
 
-    if (marker === 0xdb) {
+    if (marker === 0xe0) {
+      if (
+        sawApp0 ||
+        sawSof ||
+        !isSupportedApp0(bytes, segmentStart, segmentEnd)
+      )
+        return false;
+      sawApp0 = true;
+    } else if (marker === 0xdb) {
       if (
         sawSof ||
         !parseQuantizationTables(
@@ -603,14 +614,69 @@ function isJpeg(bytes: Uint8Array): boolean {
         )
       )
         return false;
-      return hasOneBoundedEntropyScan(bytes, segmentEnd);
+      return (
+        hasOneBoundedEntropyScan(bytes, segmentEnd, restartInterval) &&
+        isBoundedlyDecoderValidJpeg(bytes)
+      );
     } else if (marker === 0xdd) {
       // Restart interval is a two-byte unsigned integer.
-      if (segmentLength !== 4) return false;
-    }
+      if (
+        sawSof ||
+        restartInterval !== undefined ||
+        segmentLength !== 4 ||
+        ((bytes[segmentStart]! << 8) | bytes[segmentStart + 1]!) === 0
+      )
+        return false;
+      restartInterval = (bytes[segmentStart]! << 8) | bytes[segmentStart + 1]!;
+    } else return false;
     cursor = segmentEnd;
   }
   return false;
+}
+
+/**
+ * Structural checks keep the supported C5 SOF0 subset explicit; this bounded
+ * decoder pass closes the remaining Huffman/MCU entropy semantics before a
+ * frame can enter an immutable extraction manifest or opaque reader result.
+ */
+function isBoundedlyDecoderValidJpeg(bytes: Uint8Array): boolean {
+  try {
+    const decoded = decode(bytes, {
+      useTArray: true,
+      formatAsRGBA: true,
+      tolerantDecoding: false,
+      maxResolutionInMP: 8,
+      maxMemoryUsageInMB: 96,
+    });
+    return (
+      decoded.width > 0 &&
+      decoded.height > 0 &&
+      decoded.data.byteLength === decoded.width * decoded.height * 4
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isSupportedApp0(
+  bytes: Uint8Array,
+  start: number,
+  end: number,
+): boolean {
+  // Restrict the C5 decoder boundary to the JFIF APP0 form emitted by our
+  // frame extractor. Unsupported metadata markers are not image evidence.
+  return (
+    end - start >= 14 &&
+    bytes[start] === 0x4a &&
+    bytes[start + 1] === 0x46 &&
+    bytes[start + 2] === 0x49 &&
+    bytes[start + 3] === 0x46 &&
+    bytes[start + 4] === 0 &&
+    bytes[start + 5] === 1 &&
+    bytes[start + 6] <= 2 &&
+    bytes[start + 7] <= 2 &&
+    ((bytes[start + 12]! << 8) | bytes[start + 13]!) === end - start - 14
+  );
 }
 
 function parseQuantizationTables(
@@ -620,6 +686,7 @@ function parseQuantizationTables(
   tables: Set<number>,
 ): boolean {
   let cursor = start;
+  let added = 0;
   while (cursor < end) {
     const table = bytes[cursor++];
     if (table === undefined) return false;
@@ -634,8 +701,9 @@ function parseQuantizationTables(
       if (bytes[cursor + index] === 0) return false;
     cursor += values;
     tables.add(id);
+    added += 1;
   }
-  return cursor === end && tables.size > 0;
+  return cursor === end && added > 0;
 }
 
 function parseHuffmanTables(
@@ -645,6 +713,7 @@ function parseHuffmanTables(
   tables: Set<string>,
 ): boolean {
   let cursor = start;
+  let added = 0;
   while (cursor < end) {
     if (cursor + 17 > end) return false;
     const selector = bytes[cursor++];
@@ -662,7 +731,10 @@ function parseHuffmanTables(
       // Negative capacity is an oversubscribed canonical prefix tree.
       if (availableCodes < 0) return false;
     }
-    if (symbols < 1 || cursor + symbols > end) return false;
+    // JPEG reserves the all-ones code for marker resynchronisation; a table
+    // that fills the complete prefix space is therefore decoder-invalid.
+    if (symbols < 1 || availableCodes <= 0 || cursor + symbols > end)
+      return false;
     const seenSymbols = new Set<number>();
     for (let index = 0; index < symbols; index += 1) {
       const symbol = bytes[cursor + index];
@@ -676,8 +748,9 @@ function parseHuffmanTables(
     }
     cursor += symbols;
     tables.add(key);
+    added += 1;
   }
-  return cursor === end && tables.size > 0;
+  return cursor === end && added > 0;
 }
 
 function parseStartOfFrame(
@@ -703,6 +776,7 @@ function parseStartOfFrame(
     segmentLength !== 8 + 3 * count
   )
     return false;
+  let aggregateSampling = 0;
   for (let index = 0; index < count; index += 1) {
     const offset = start + 6 + index * 3;
     const id = bytes[offset];
@@ -723,8 +797,9 @@ function parseStartOfFrame(
     )
       return false;
     components.set(id, quantizationId);
+    aggregateSampling += (sampling >>> 4) * (sampling & 0x0f);
   }
-  return true;
+  return aggregateSampling <= 10;
 }
 
 function parseStartOfScan(
@@ -777,9 +852,14 @@ function parseStartOfScan(
   );
 }
 
-function hasOneBoundedEntropyScan(bytes: Uint8Array, start: number): boolean {
+function hasOneBoundedEntropyScan(
+  bytes: Uint8Array,
+  start: number,
+  restartInterval: number | undefined,
+): boolean {
   let cursor = start;
   let entropyBytes = 0;
+  let expectedRestart = 0xd0;
   while (cursor < bytes.length) {
     if (bytes[cursor] !== 0xff) {
       entropyBytes += 1;
@@ -787,7 +867,6 @@ function hasOneBoundedEntropyScan(bytes: Uint8Array, start: number): boolean {
       continue;
     }
     cursor += 1;
-    while (bytes[cursor] === 0xff) cursor += 1;
     const marker = bytes[cursor];
     if (marker === undefined) return false;
     cursor += 1;
@@ -795,7 +874,12 @@ function hasOneBoundedEntropyScan(bytes: Uint8Array, start: number): boolean {
       entropyBytes += 1;
       continue;
     }
-    if (marker >= 0xd0 && marker <= 0xd7) continue;
+    if (marker >= 0xd0 && marker <= 0xd7) {
+      if (restartInterval === undefined || marker !== expectedRestart)
+        return false;
+      expectedRestart = expectedRestart === 0xd7 ? 0xd0 : expectedRestart + 1;
+      continue;
+    }
     return marker === 0xd9 && entropyBytes > 0 && cursor === bytes.length;
   }
   return false;

@@ -178,6 +178,42 @@ const SourceBoxSchema = z
       context.addIssue({ code: "custom", message: "source box has no area" });
   });
 
+const SourcePointSchema = z
+  .object({ x: finite, y: finite, confidence })
+  .strict();
+
+/** Private binding between an observation and its owned inference pixels. */
+export const InferenceFrameBindingSchema = z
+  .object({
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    transform: z
+      .object({
+        sourceWidth: positiveInteger,
+        sourceHeight: positiveInteger,
+        inferenceWidth: z.literal(1280),
+        inferenceHeight: z.literal(720),
+        scale: finite.positive(),
+        scaledWidth: positiveInteger.max(1280),
+        scaledHeight: positiveInteger.max(720),
+        padLeft: nonNegativeInteger,
+        padTop: nonNegativeInteger,
+      })
+      .strict()
+      .superRefine((value, context) => {
+        if (value.padLeft * 2 + value.scaledWidth > 1280)
+          context.addIssue({
+            code: "custom",
+            message: "invalid inference horizontal padding",
+          });
+        if (value.padTop * 2 + value.scaledHeight > 720)
+          context.addIssue({
+            code: "custom",
+            message: "invalid inference vertical padding",
+          });
+      }),
+  })
+  .strict();
+
 export const FreeFrameObservationSchema = z
   .object({
     kind: z.literal("free-training"),
@@ -185,14 +221,14 @@ export const FreeFrameObservationSchema = z
     timestampMs: nonNegativeInteger,
     sourceWidth: positiveInteger,
     sourceHeight: positiveInteger,
+    inference: InferenceFrameBindingSchema.optional(),
     athlete: SourceBoxSchema.optional(),
     ball: SourceBoxSchema.optional(),
   })
-  .strict();
-
-const SourcePointSchema = z
-  .object({ x: finite, y: finite, confidence })
-  .strict();
+  .strict()
+  .superRefine((frame, context) => {
+    assertSourceGeometry(frame, context);
+  });
 
 export const WallPassFrameObservationSchema = z
   .object({
@@ -201,6 +237,7 @@ export const WallPassFrameObservationSchema = z
     timestampMs: nonNegativeInteger,
     sourceWidth: positiveInteger,
     sourceHeight: positiveInteger,
+    inference: InferenceFrameBindingSchema.optional(),
     athlete: SourceBoxSchema.optional(),
     ball: SourceBoxSchema.optional(),
     feet: z.array(
@@ -214,7 +251,32 @@ export const WallPassFrameObservationSchema = z
       .strict()
       .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((frame, context) => {
+    assertSourceGeometry(frame, context);
+    for (const [index, foot] of frame.feet.entries())
+      assertSourcePoint(foot, frame, context, ["feet", index]);
+    for (const [index, corner] of frame.fiducialCorners.entries())
+      assertSourcePoint(corner, frame, context, ["fiducialCorners", index]);
+    if (frame.wallFloorEdge) {
+      assertSourcePoint(
+        frame.wallFloorEdge,
+        frame,
+        context,
+        ["wallFloorEdge"],
+        "x1",
+        "y1",
+      );
+      assertSourcePoint(
+        frame.wallFloorEdge,
+        frame,
+        context,
+        ["wallFloorEdge"],
+        "x2",
+        "y2",
+      );
+    }
+  });
 
 export const FreeVisionObservationBatchSchema = z
   .object({
@@ -263,6 +325,7 @@ export type FreeFrameObservation = z.infer<typeof FreeFrameObservationSchema>;
 export type WallPassFrameObservation = z.infer<
   typeof WallPassFrameObservationSchema
 >;
+export type InferenceFrameBinding = z.infer<typeof InferenceFrameBindingSchema>;
 export type FreeVisionObservationBatch = z.infer<
   typeof FreeVisionObservationBatchSchema
 >;
@@ -272,3 +335,54 @@ export type VerifiedVisionObservationBatch = z.infer<
 export type VisionObservationBatch = z.infer<
   typeof VisionObservationBatchSchema
 >;
+
+function assertSourceGeometry(
+  frame: Readonly<{
+    sourceWidth: number;
+    sourceHeight: number;
+    athlete?: z.infer<typeof SourceBoxSchema>;
+    ball?: z.infer<typeof SourceBoxSchema>;
+  }>,
+  context: z.RefinementCtx,
+): void {
+  for (const key of ["athlete", "ball"] as const) {
+    const box = frame[key];
+    if (
+      box &&
+      (box.xMin < 0 ||
+        box.yMin < 0 ||
+        box.xMax > frame.sourceWidth ||
+        box.yMax > frame.sourceHeight)
+    )
+      context.addIssue({
+        code: "custom",
+        path: [key],
+        message: "source box outside frame dimensions",
+      });
+  }
+}
+
+function assertSourcePoint(
+  point: Record<string, unknown>,
+  frame: Readonly<{ sourceWidth: number; sourceHeight: number }>,
+  context: z.RefinementCtx,
+  path: readonly (string | number)[],
+  xKey = "x",
+  yKey = "y",
+): void {
+  const x = point[xKey];
+  const y = point[yKey];
+  if (
+    typeof x !== "number" ||
+    typeof y !== "number" ||
+    x < 0 ||
+    x > frame.sourceWidth ||
+    y < 0 ||
+    y > frame.sourceHeight
+  )
+    context.addIssue({
+      code: "custom",
+      path: [...path],
+      message: "source point outside frame dimensions",
+    });
+}

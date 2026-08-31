@@ -156,6 +156,12 @@ describe("LocalFrameExtraction", () => {
       "sof-progressive",
       "sos",
       "sos-baseline",
+      "unsupported-dac",
+      "unsupported-dnl",
+      "unsupported-sof2",
+      "restart-without-dri",
+      "bad-stuffing",
+      "sampling-aggregate",
       "truncated",
     ] as const) {
       const root = await setupRoot(roots);
@@ -258,6 +264,12 @@ describe("LocalFrameExtraction", () => {
       "sof-precision",
       "sof-progressive",
       "sos-baseline",
+      "unsupported-dac",
+      "unsupported-dnl",
+      "unsupported-sof2",
+      "restart-without-dri",
+      "bad-stuffing",
+      "sampling-aggregate",
     ] as const) {
       await writeFile(
         join(root, "frames", batchId, "frame-0000.jpg"),
@@ -635,10 +647,29 @@ function malformedJpeg(
     | "sof-progressive"
     | "sos"
     | "sos-baseline"
+    | "unsupported-dac"
+    | "unsupported-dnl"
+    | "unsupported-sof2"
+    | "restart-without-dri"
+    | "bad-stuffing"
+    | "sampling-aggregate"
     | "truncated",
 ): Uint8Array {
   const output = Uint8Array.from(jpeg(0));
   if (kind === "truncated") return output.slice(0, -3);
+  if (kind === "unsupported-dac")
+    return insertBeforeSos(output, Uint8Array.of(0xff, 0xcc, 0x00, 0x02));
+  if (kind === "unsupported-dnl")
+    return insertBeforeSos(output, Uint8Array.of(0xff, 0xdc, 0x00, 0x02));
+  if (kind === "unsupported-sof2")
+    return insertBeforeSos(
+      output,
+      Uint8Array.of(0xff, 0xc2, 0x00, 0x08, 8, 0, 1, 0, 1, 1),
+    );
+  if (kind === "restart-without-dri")
+    return insertBeforeEoi(output, Uint8Array.of(0xff, 0xd0));
+  if (kind === "bad-stuffing")
+    return insertBeforeEoi(output, Uint8Array.of(0xff, 0xff, 0x00));
   let cursor = 2;
   let huffmanTableIndex = 0;
   while (cursor + 4 <= output.length) {
@@ -686,6 +717,10 @@ function malformedJpeg(
       output[cursor - 1] = 0xc2;
       return output;
     }
+    if (kind === "sampling-aggregate" && marker === 0xc0) {
+      output[start + 7] = 0x44;
+      return output;
+    }
     if (kind === "sos" && marker === 0xda) {
       output[start + 2] = 0x22;
       return output;
@@ -697,6 +732,25 @@ function malformedJpeg(
     cursor += length;
   }
   throw new Error(`fixture ${kind} marker missing`);
+}
+
+function insertBeforeSos(bytes: Uint8Array, insert: Uint8Array): Uint8Array {
+  for (let index = 2; index + 1 < bytes.length; index += 1)
+    if (bytes[index] === 0xff && bytes[index + 1] === 0xda)
+      return Uint8Array.from([
+        ...bytes.slice(0, index),
+        ...insert,
+        ...bytes.slice(index),
+      ]);
+  throw new Error("fixture SOS marker missing");
+}
+
+function insertBeforeEoi(bytes: Uint8Array, insert: Uint8Array): Uint8Array {
+  return Uint8Array.from([
+    ...bytes.slice(0, -2),
+    ...insert,
+    ...bytes.slice(-2),
+  ]);
 }
 
 async function ffmpegAvailable(): Promise<boolean> {

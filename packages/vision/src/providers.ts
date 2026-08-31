@@ -2,9 +2,14 @@ import type {
   FreeAnalysisProvenance,
   VerifiedAnalysisProvenance,
 } from "@revelai/contracts";
+import { createHash } from "node:crypto";
 import {
+  assertInferenceJpeg,
   createLetterboxTransform,
+  encodeInferenceFrame,
   inverseInferencePoint,
+  sameLetterboxTransform,
+  type EncodedInferenceFrame,
   type LetterboxTransform,
 } from "./transform.js";
 import { VisionBatchScheduler } from "./scheduler.js";
@@ -31,7 +36,8 @@ export type FrameTransformer = Readonly<{
   transform(
     frame: SourceFrame,
     transform: LetterboxTransform,
-  ): Promise<Uint8Array>;
+    signal?: AbortSignal,
+  ): Promise<EncodedInferenceFrame>;
 }>;
 
 export type ProviderHttpResponse = Readonly<{
@@ -48,6 +54,15 @@ export type ProviderFetch = (
     signal: AbortSignal;
   }>,
 ) => Promise<ProviderHttpResponse>;
+
+const defaultFrameTransformer: FrameTransformer = Object.freeze({
+  async transform(frame, expected, signal) {
+    const encoded = encodeInferenceFrame(frame, signal);
+    if (!sameLetterboxTransform(encoded.transform, expected))
+      throw new VisionProviderError("provider_output_invalid");
+    return encoded;
+  },
+});
 
 export type VisionProvider = Readonly<{
   analyzeFree(
@@ -88,7 +103,15 @@ export function createDemoVisionProvider(
     verifiedProvenance,
     async analyzeFree(input) {
       const request = FreeVisionFrameRequestSchema.parse(input);
-      const athlete = boxFor(request.frame, 0.2, 0.18, 0.55, 0.9, 0.91);
+      const phase = request.frame.index % 10;
+      const athlete = boxFor(
+        request.frame,
+        0.08 + phase * 0.06,
+        0.18,
+        0.28 + phase * 0.06,
+        0.9,
+        0.91,
+      );
       const ball =
         selection.free === "free-limited-ball-v1" &&
         request.frame.index % 3 !== 0
@@ -107,27 +130,40 @@ export function createDemoVisionProvider(
     async analyzeVerified(input) {
       const request = VerifiedVisionFrameRequestSchema.parse(input);
       const frame = request.frame;
-      const corners = cornerPoints(frame);
-      const feet = [
-        pointFor(frame, "left" as const, 0.41, 0.76, 0.9),
-        pointFor(frame, "right" as const, 0.51, 0.76, 0.9),
-      ];
-      const ball = boxFor(frame, 0.47, 0.67, 0.53, 0.73, 0.88);
+      if (selection.verified === "wall-pass-insufficient-v1")
+        return WallPassFrameObservationSchema.parse({
+          kind: "verified-wall-pass" as const,
+          frameIndex: frame.index,
+          timestampMs: frame.timestampMs,
+          sourceWidth: frame.sourceWidth,
+          sourceHeight: frame.sourceHeight,
+          feet: [],
+          fiducialCorners: [],
+        });
+      const phase = frame.index % 7;
+      const ballY = [530, 530, 100, 10, 40, 530, 530][phase]!;
+      const contact = phase === 0 || phase === 1 || phase === 5 || phase === 6;
+      const feet = contact
+        ? [
+            pointAt(frame, "left", 515, ballY, 0.9),
+            pointAt(frame, "right", 550, ballY, 0.9),
+          ]
+        : [];
       return WallPassFrameObservationSchema.parse({
         kind: "verified-wall-pass" as const,
         frameIndex: frame.index,
         timestampMs: frame.timestampMs,
         sourceWidth: frame.sourceWidth,
         sourceHeight: frame.sourceHeight,
-        athlete: boxFor(frame, 0.25, 0.16, 0.7, 0.92, 0.93),
-        ball,
+        athlete: boxAt(frame, 400, 100, 800, 650, 0.93),
+        ball: boxAt(frame, 500, Math.max(0, ballY - 15), 530, ballY, 0.88),
         feet,
-        fiducialCorners: corners,
+        fiducialCorners: calibratedCornerPoints(),
         wallFloorEdge: {
           x1: 0,
-          y1: frame.sourceHeight * 0.27,
-          x2: frame.sourceWidth,
-          y2: frame.sourceHeight * 0.27,
+          y1: 0,
+          x2: 800,
+          y2: 0,
           confidence: 0.94,
         },
       });
@@ -149,7 +185,7 @@ export function createRoboflowVisionProvider(
   input: Readonly<{
     config: RoboflowVisionConfig;
     fetch: ProviderFetch;
-    transformer: FrameTransformer;
+    transformer?: FrameTransformer;
   }>,
 ): VisionProvider {
   const config = validateRoboflowConfig(input.config);
@@ -178,7 +214,7 @@ export function createRoboflowVisionProvider(
         request,
         config,
         fetch: input.fetch,
-        transformer: input.transformer,
+        transformer: input.transformer ?? defaultFrameTransformer,
         signal,
         workflowId: "revelai-free-training-v1",
         modelBundleId: config.freeModelBundleId,
@@ -194,7 +230,7 @@ export function createRoboflowVisionProvider(
         request,
         config,
         fetch: input.fetch,
-        transformer: input.transformer,
+        transformer: input.transformer ?? defaultFrameTransformer,
         signal,
         workflowId: "revelai-wall-pass-geometry-v1",
         modelBundleId: config.verifiedModelBundleId,
@@ -284,6 +320,31 @@ function assertFrameCorrelation(
   }
 }
 
+function assertNotAborted(signal: AbortSignal): void {
+  if (signal.aborted)
+    throw new VisionProviderError("provider_temporary_unavailable");
+}
+
+function assertEncodedInferenceFrame(
+  encoded: EncodedInferenceFrame,
+  expectedTransform: LetterboxTransform,
+): void {
+  if (
+    !encoded ||
+    !(encoded.jpeg instanceof Uint8Array) ||
+    !/^[a-f0-9]{64}$/.test(encoded.sha256) ||
+    encoded.sha256 !==
+      createHash("sha256").update(encoded.jpeg).digest("hex") ||
+    !sameLetterboxTransform(encoded.transform, expectedTransform)
+  )
+    throw new VisionProviderError("provider_output_invalid");
+  try {
+    assertInferenceJpeg(encoded.jpeg);
+  } catch {
+    throw new VisionProviderError("provider_output_invalid");
+  }
+}
+
 async function runWorkflow(
   input: Readonly<{
     request: VisionFrameRequest;
@@ -302,23 +363,30 @@ async function runWorkflow(
       observation: WallPassFrameObservation;
     }>
 > {
-  const transform = createLetterboxTransform(input.request.frame);
-  const jpeg = await input.transformer.transform(
-    input.request.frame,
-    transform,
-  );
-  if (!(jpeg instanceof Uint8Array) || jpeg.byteLength === 0)
-    throw new VisionProviderError("provider_output_invalid");
   const controller = new AbortController();
   const abort = () => controller.abort();
-  input.signal?.addEventListener("abort", abort, { once: true });
+  if (input.signal?.aborted) controller.abort();
+  else input.signal?.addEventListener("abort", abort, { once: true });
   try {
+    assertNotAborted(controller.signal);
+    const transform = createLetterboxTransform(input.request.frame);
+    const encoded = await input.transformer.transform(
+      input.request.frame,
+      transform,
+      controller.signal,
+    );
+    assertNotAborted(controller.signal);
+    assertEncodedInferenceFrame(encoded, transform);
     const body = {
       ...(input.config.apiKey ? { api_key: input.config.apiKey } : {}),
       inputs: {
-        image: { type: "base64", value: Buffer.from(jpeg).toString("base64") },
+        image: {
+          type: "base64",
+          value: Buffer.from(encoded.jpeg).toString("base64"),
+        },
       },
     };
+    assertNotAborted(controller.signal);
     const response = await input.fetch(
       `${input.config.apiUrl}/infer/workflows/${encodeURIComponent(input.config.workspaceId)}/${input.workflowId}`,
       {
@@ -355,7 +423,7 @@ async function runWorkflow(
       output.workflow.providerVersion !== input.providerVersion
     )
       throw new VisionProviderError("provider_output_invalid");
-    return normalizeWorkflowOutput(input.request.frame, transform, output);
+    return normalizeWorkflowOutput(input.request.frame, encoded, output);
   } catch (error) {
     if (error instanceof VisionProviderError) throw error;
     throw new VisionProviderError("provider_temporary_unavailable");
@@ -366,7 +434,7 @@ async function runWorkflow(
 
 function normalizeWorkflowOutput(
   frame: SourceFrame,
-  transform: LetterboxTransform,
+  encoded: EncodedInferenceFrame,
   output: ReturnType<typeof WorkflowEnvelopeSchema.parse>["outputs"][0],
 ):
   | Readonly<{ kind: "free-training-v1"; observation: FreeFrameObservation }>
@@ -382,8 +450,12 @@ function normalizeWorkflowOutput(
     timestampMs: frame.timestampMs,
     sourceWidth: frame.sourceWidth,
     sourceHeight: frame.sourceHeight,
-    ...(athlete ? { athlete: mapBox(athlete, transform) } : {}),
-    ...(ball ? { ball: mapBox(ball, transform) } : {}),
+    inference: Object.freeze({
+      sha256: encoded.sha256,
+      transform: encoded.transform,
+    }),
+    ...(athlete ? { athlete: mapBox(athlete, encoded.transform) } : {}),
+    ...(ball ? { ball: mapBox(ball, encoded.transform) } : {}),
   };
   if (output.kind === "free-training-v1")
     return Object.freeze({
@@ -406,14 +478,14 @@ function normalizeWorkflowOutput(
       x: output.geometry.wallFloorEdge.x1,
       y: output.geometry.wallFloorEdge.y1,
     },
-    transform,
+    encoded.transform,
   );
   const edgeEnd = inverseInferencePoint(
     {
       x: output.geometry.wallFloorEdge.x2,
       y: output.geometry.wallFloorEdge.y2,
     },
-    transform,
+    encoded.transform,
   );
   return Object.freeze({
     kind: output.kind,
@@ -421,11 +493,11 @@ function normalizeWorkflowOutput(
       kind: "verified-wall-pass",
       ...common,
       feet: [
-        mapPoint(feet.get("left_foot")!, transform, { side: "left" }),
-        mapPoint(feet.get("right_foot")!, transform, { side: "right" }),
+        mapPoint(feet.get("left_foot")!, encoded.transform, { side: "left" }),
+        mapPoint(feet.get("right_foot")!, encoded.transform, { side: "right" }),
       ],
       fiducialCorners: FIDUCIAL_CORNER_IDS.map((id) =>
-        mapPoint(corners.get(id)!, transform, { id }),
+        mapPoint(corners.get(id)!, encoded.transform, { id }),
       ),
       wallFloorEdge: {
         x1: edgeStart.x,
@@ -552,40 +624,56 @@ function boxFor(
   });
 }
 
-function pointFor(
+function pointAt(
   frame: SourceFrame,
   side: "left" | "right",
   x: number,
   y: number,
   confidence: number,
 ) {
-  return Object.freeze({
-    side,
-    x: frame.sourceWidth * x,
-    y: frame.sourceHeight * y,
-    confidence,
-  });
+  if (x < 0 || x > frame.sourceWidth || y < 0 || y > frame.sourceHeight)
+    throw new VisionProviderError("provider_output_invalid");
+  return Object.freeze({ side, x, y, confidence });
 }
 
-function cornerPoints(frame: SourceFrame) {
-  const locations = [
-    [0.2, 0.26],
-    [0.28, 0.26],
-    [0.28, 0.36],
-    [0.2, 0.36],
-    [0.72, 0.26],
-    [0.8, 0.26],
-    [0.8, 0.36],
-    [0.72, 0.36],
-  ] as const;
+function boxAt(
+  frame: SourceFrame,
+  xMin: number,
+  yMin: number,
+  xMax: number,
+  yMax: number,
+  confidence: number,
+) {
+  if (
+    xMin < 0 ||
+    yMin < 0 ||
+    xMax > frame.sourceWidth ||
+    yMax > frame.sourceHeight
+  )
+    throw new VisionProviderError("provider_output_invalid");
+  return Object.freeze({ xMin, yMin, xMax, yMax, confidence });
+}
+
+function calibratedCornerPoints() {
   return Object.freeze(
-    FIDUCIAL_CORNER_IDS.map((id, index) =>
+    FIDUCIAL_CORNER_IDS.map((id) =>
       Object.freeze({
         id,
-        x: frame.sourceWidth * locations[index]![0],
-        y: frame.sourceHeight * locations[index]![1],
+        x: (DEMO_WORLD_CORNERS[id]!.x + 3) * 100,
+        y: DEMO_WORLD_CORNERS[id]!.y * 100,
         confidence: 0.92,
       }),
     ),
   );
 }
+
+const DEMO_WORLD_CORNERS = Object.freeze({
+  "a-top-left": Object.freeze({ x: -1.6, y: 2.9 }),
+  "a-top-right": Object.freeze({ x: -1.4, y: 2.9 }),
+  "a-bottom-right": Object.freeze({ x: -1.4, y: 3.1 }),
+  "a-bottom-left": Object.freeze({ x: -1.6, y: 3.1 }),
+  "b-top-left": Object.freeze({ x: 1.4, y: 2.9 }),
+  "b-top-right": Object.freeze({ x: 1.6, y: 2.9 }),
+  "b-bottom-right": Object.freeze({ x: 1.6, y: 3.1 }),
+  "b-bottom-left": Object.freeze({ x: 1.4, y: 3.1 }),
+});

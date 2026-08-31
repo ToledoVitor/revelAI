@@ -83,14 +83,30 @@ describe("assembleFreeInsight", () => {
   it("counts an exactly 0.015 unrounded movement rate as active", () => {
     const exactRateFrames = [
       {
-        ...frame(0, 0, 0),
+        ...frame(0, 0, 0, true),
         sourceWidth: 3,
         sourceHeight: 4,
+        athlete: {
+          xMin: 0,
+          yMin: 0,
+          xMax: 0.1,
+          yMax: 1,
+          confidence: 0.55,
+        },
+        ball: { xMin: 1, yMin: 1, xMax: 1.1, yMax: 1.1, confidence: 0.55 },
       },
       {
-        ...frame(1, 1000, 0.075),
+        ...frame(1, 1000, 0.075, true),
         sourceWidth: 3,
         sourceHeight: 4,
+        athlete: {
+          xMin: 0.075,
+          yMin: 0,
+          xMax: 0.175,
+          yMax: 1,
+          confidence: 0.55,
+        },
+        ball: { xMin: 1, yMin: 1, xMax: 1.1, yMax: 1.1, confidence: 0.55 },
       },
     ];
     const insight = assembleFreeInsight({

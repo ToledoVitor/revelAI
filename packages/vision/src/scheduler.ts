@@ -3,22 +3,32 @@ import { VisionProviderError } from "./providers.js";
 export type SchedulerClock = Readonly<{
   now(): number;
   sleep(milliseconds: number, signal?: AbortSignal): Promise<void>;
+  schedule(milliseconds: number, callback: () => void): () => void;
 }>;
 
 export const systemSchedulerClock: SchedulerClock = Object.freeze({
   now: () => Date.now(),
   sleep: (milliseconds, signal) =>
     new Promise((resolve, reject) => {
-      const timeout = setTimeout(resolve, milliseconds);
-      signal?.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timeout);
-          reject(new Error("aborted"));
-        },
-        { once: true },
-      );
+      if (signal?.aborted) {
+        reject(new Error("aborted"));
+        return;
+      }
+      const settle = (callback: () => void) => {
+        signal?.removeEventListener("abort", abort);
+        callback();
+      };
+      const timeout = setTimeout(() => settle(resolve), milliseconds);
+      const abort = () => {
+        clearTimeout(timeout);
+        settle(() => reject(new Error("aborted")));
+      };
+      signal?.addEventListener("abort", abort, { once: true });
     }),
+  schedule: (milliseconds, callback) => {
+    const timeout = setTimeout(callback, milliseconds);
+    return () => clearTimeout(timeout);
+  },
 });
 
 export type BatchSchedulerOptions = Readonly<{
@@ -58,35 +68,60 @@ export class VisionBatchScheduler {
   public async run<Item, Result>(
     items: readonly Item[],
     dispatch: (item: Item, signal: AbortSignal) => Promise<Result>,
+    externalSignal?: AbortSignal,
   ): Promise<readonly Result[]> {
     const startedAt = this.clock.now();
     const controller = new AbortController();
     const results: Result[] = new Array(items.length);
     let cursor = 0;
+    let firstFailure: unknown;
+    let hasFailure = false;
+    const abortExternal = () => controller.abort();
+    if (externalSignal?.aborted) controller.abort();
+    else
+      externalSignal?.addEventListener("abort", abortExternal, { once: true });
+    const cancelDeadline = this.clock.schedule(this.batchDeadlineMs, () =>
+      controller.abort(),
+    );
     const worker = async (): Promise<void> => {
       while (!controller.signal.aborted) {
         const index = cursor;
         cursor += 1;
         if (index >= items.length) return;
-        results[index] = await this.dispatchWithRetry(
-          items[index]!,
-          dispatch,
-          startedAt,
-          controller,
-        );
+        try {
+          results[index] = await this.dispatchWithRetry(
+            items[index]!,
+            dispatch,
+            startedAt,
+            controller,
+          );
+        } catch (error) {
+          if (!hasFailure) {
+            firstFailure = error;
+            hasFailure = true;
+          }
+          controller.abort();
+          return;
+        }
       }
     };
     try {
-      await Promise.all(
+      await Promise.allSettled(
         Array.from({ length: Math.min(this.maxInFlight, items.length) }, () =>
           worker(),
         ),
       );
+      if (hasFailure) throw firstFailure;
+      if (controller.signal.aborted)
+        throw new VisionProviderError("provider_temporary_unavailable");
       return Object.freeze(results);
     } catch (error) {
       controller.abort();
       if (error instanceof VisionProviderError) throw error;
       throw new VisionProviderError("provider_temporary_unavailable");
+    } finally {
+      cancelDeadline();
+      externalSignal?.removeEventListener("abort", abortExternal);
     }
   }
 
@@ -98,12 +133,16 @@ export class VisionBatchScheduler {
   ): Promise<Result> {
     for (let attempt = 0; attempt <= this.retryDelaysMs.length; attempt += 1) {
       this.assertBatchTime(startedAt, batchController);
+      if (batchController.signal.aborted)
+        throw new VisionProviderError("provider_temporary_unavailable");
       const requestController = new AbortController();
       const relayAbort = () => requestController.abort();
       batchController.signal.addEventListener("abort", relayAbort, {
         once: true,
       });
       try {
+        if (batchController.signal.aborted)
+          throw new VisionProviderError("provider_temporary_unavailable");
         const result = await this.withTimeout(
           dispatch(item, requestController.signal),
           requestController,
@@ -111,12 +150,18 @@ export class VisionBatchScheduler {
         );
         return result;
       } catch (error) {
+        if (batchController.signal.aborted)
+          throw new VisionProviderError("provider_temporary_unavailable");
         if (!isRetryable(error) || attempt === this.retryDelaysMs.length)
           throw normalizeFailure(error);
+        const remaining = this.batchDeadlineMs - (this.clock.now() - startedAt);
+        if (remaining <= 0)
+          throw new VisionProviderError("provider_temporary_unavailable");
         await this.clock.sleep(
-          this.retryDelaysMs[attempt]!,
+          Math.min(this.retryDelaysMs[attempt]!, remaining),
           batchController.signal,
         );
+        this.assertBatchTime(startedAt, batchController);
       } finally {
         batchController.signal.removeEventListener("abort", relayAbort);
         requestController.abort();

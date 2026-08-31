@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+import { encode } from "jpeg-js";
 import { describe, expect, it } from "vitest";
 import {
   analyzeBatch,
@@ -5,12 +7,30 @@ import {
   createRoboflowVisionProvider,
   VisionProviderError,
 } from "./providers.js";
+import { assembleFreeInsight } from "./free-insight.js";
+import { assembleVerifiedEvidence } from "./verified-evidence.js";
+import type {
+  FreeVisionFrameRequest,
+  VerifiedVisionFrameRequest,
+} from "./types.js";
 import {
   createLetterboxTransform,
+  assertInferenceJpeg,
+  encodeInferenceFrame,
   inverseInferencePoint,
 } from "./transform.js";
 
 const attemptId = "11111111-1111-4111-8111-111111111111";
+const jpeg = new Uint8Array(
+  encode(
+    {
+      width: 1440,
+      height: 1080,
+      data: new Uint8Array(1440 * 1080 * 4).fill(255),
+    },
+    80,
+  ).data,
+);
 
 function freeRequest(index = 0) {
   return {
@@ -21,12 +41,127 @@ function freeRequest(index = 0) {
       timestampMs: index * 100,
       sourceWidth: 1440,
       sourceHeight: 1080,
-      jpeg: Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
+      jpeg,
     },
   };
 }
 
+function verifiedRequest(index: number) {
+  return {
+    kind: "verified-wall-pass" as const,
+    attemptId,
+    challenge: { id: "wall-pass" as const, version: 1 as const },
+    frame: {
+      index,
+      timestampMs: index * 100,
+      sourceWidth: 1440,
+      sourceHeight: 1080,
+      jpeg,
+    },
+  };
+}
+
+const freeCorrelationFixture = {
+  kind: "free-training",
+  attemptId,
+  frame: {
+    index: 0,
+    timestampMs: 0,
+    sourceWidth: 1440,
+    sourceHeight: 1080,
+    jpeg,
+  },
+} satisfies FreeVisionFrameRequest;
+
+const verifiedCorrelationFixture = {
+  kind: "verified-wall-pass",
+  attemptId,
+  challenge: { id: "wall-pass", version: 1 },
+  frame: {
+    index: 0,
+    timestampMs: 0,
+    sourceWidth: 1440,
+    sourceHeight: 1080,
+    jpeg,
+  },
+} satisfies VerifiedVisionFrameRequest;
+
+const invalidCrossKindFixture = {
+  kind: "free-training",
+  attemptId,
+  // @ts-expect-error Free request must not carry a verified challenge selector.
+  challenge: { id: "wall-pass", version: 1 },
+  frame: freeCorrelationFixture.frame,
+} satisfies FreeVisionFrameRequest;
+void invalidCrossKindFixture;
+
+function verifiedWorkflowOutput(overrides: Record<string, unknown> = {}) {
+  return {
+    kind: "wall-pass-geometry-v1",
+    image: { width: 1280, height: 720, coordinateSystem: "inference_pixels" },
+    workflow: {
+      id: "revelai-wall-pass-geometry-v1",
+      version: "1.0.0",
+      modelBundleId: "verified-bundle-v1",
+      providerVersion: "provider-v1",
+    },
+    detections: [
+      {
+        class: "athlete",
+        xMin: 160,
+        yMin: 20,
+        xMax: 1120,
+        yMax: 700,
+        confidence: 0.9,
+      },
+      {
+        class: "ball",
+        xMin: 600,
+        yMin: 500,
+        xMax: 630,
+        yMax: 530,
+        confidence: 0.9,
+      },
+    ],
+    keypoints: [
+      { class: "left_foot", x: 600, y: 530, confidence: 0.9 },
+      { class: "right_foot", x: 650, y: 530, confidence: 0.9 },
+    ],
+    fiducials: [
+      "a-top-left",
+      "a-top-right",
+      "a-bottom-right",
+      "a-bottom-left",
+      "b-top-left",
+      "b-top-right",
+      "b-bottom-right",
+      "b-bottom-left",
+    ].map((id, index) => ({
+      class: id,
+      x: 200 + index * 20,
+      y: 300 + (index % 2) * 20,
+      confidence: 0.9,
+    })),
+    geometry: {
+      wallFloorEdge: { x1: 160, y1: 0, x2: 1120, y2: 0, confidence: 0.9 },
+    },
+    ...overrides,
+  };
+}
+
 describe("vision providers", () => {
+  it("keeps Free and verified request fixtures discriminated at compile time", () => {
+    expect(freeCorrelationFixture.kind).toBe("free-training");
+    expect(verifiedCorrelationFixture.kind).toBe("verified-wall-pass");
+  });
+
+  it("rejects a mixed Free/verified request array before any provider dispatch", async () => {
+    const provider = createDemoVisionProvider();
+    await expect(
+      analyzeBatch(provider, [freeRequest(), verifiedRequest(1)]),
+    ).rejects.toMatchObject({ code: "provider_output_invalid" });
+  });
+
   it("uses injected demo fixture selection and never emits an eligibility verdict", async () => {
     const provider = createDemoVisionProvider({
       free: "free-limited-ball-v1",
@@ -42,6 +177,70 @@ describe("vision providers", () => {
     });
     expect(JSON.stringify(batch)).not.toContain("eligible");
     expect(batch.frames[1]?.ball).toBeUndefined();
+  });
+
+  it("provides four semantically distinct deterministic fixture timelines end to end", async () => {
+    const balanced = createDemoVisionProvider();
+    const verified = await analyzeBatch(
+      balanced,
+      Array.from({ length: 640 }, (_, index) => verifiedRequest(index)),
+    );
+    if (verified.kind !== "verified-wall-pass")
+      throw new Error("wrong fixture kind");
+    const evidence = assembleVerifiedEvidence({
+      batch: verified,
+      binding: {
+        attemptId,
+        generation: 1,
+        mediaId: "22222222-2222-4222-8222-222222222222",
+        mediaSha256: "a".repeat(64),
+        rawPreRollSha256: "b".repeat(64),
+        calibrationSessionId: "33333333-3333-4333-8333-333333333333",
+        calibrationNonce: "c".repeat(43),
+      },
+    });
+    expect(evidence.selectedReferenceFrameIndex).toBe(0);
+    expect(evidence.activeStableCount).toBe(600);
+    expect(evidence.passEvidence).toContainEqual(
+      expect.objectContaining({ kind: "complete" }),
+    );
+
+    const insufficient = createDemoVisionProvider({
+      free: "free-limited-ball-v1",
+      verified: "wall-pass-insufficient-v1",
+    });
+    const insufficientBatch = await analyzeBatch(
+      insufficient,
+      Array.from({ length: 640 }, (_, index) => verifiedRequest(index)),
+    );
+    if (insufficientBatch.kind !== "verified-wall-pass")
+      throw new Error("wrong fixture kind");
+    const insufficientEvidence = assembleVerifiedEvidence({
+      batch: insufficientBatch,
+      binding: {
+        attemptId,
+        generation: 1,
+        mediaId: "22222222-2222-4222-8222-222222222222",
+        mediaSha256: "a".repeat(64),
+        rawPreRollSha256: "b".repeat(64),
+        calibrationSessionId: "33333333-3333-4333-8333-333333333333",
+        calibrationNonce: "c".repeat(43),
+      },
+    });
+    expect(insufficientEvidence.selectedReferenceFrameIndex).toBeNull();
+    expect(insufficientEvidence.activeStableCount).toBe(0);
+
+    const free = await analyzeBatch(
+      balanced,
+      Array.from({ length: 12 }, (_, index) => freeRequest(index)),
+    );
+    if (free.kind !== "free-training") throw new Error("wrong fixture kind");
+    expect(
+      assembleFreeInsight({
+        batch: free,
+        generatedAt: "2030-01-01T00:00:00.000Z",
+      }).observations[2],
+    ).toMatchObject({ kind: "movement-activity", range: "high" });
   });
 
   it("submits every ordinary batch through the four-frame scheduler", async () => {
@@ -111,7 +310,6 @@ describe("vision providers", () => {
         freeProviderVersion: "provider-v1",
         verifiedProviderVersion: "provider-v1",
       },
-      transformer: { transform: async (frame) => frame.jpeg },
       fetch: async (url, init) => {
         calls.push({ url, init });
         return {
@@ -158,12 +356,107 @@ describe("vision providers", () => {
           "content-type": "application/json",
           accept: "application/json",
         },
-        body: JSON.stringify({
-          inputs: { image: { type: "base64", value: "/9j/2Q==" } },
-        }),
       },
     });
+    const body = JSON.parse((calls[0]!.init as { body: string }).body) as {
+      inputs: { image: { type: string; value: string } };
+    };
+    expect(body.inputs.image.type).toBe("base64");
+    expect(() =>
+      assertInferenceJpeg(
+        new Uint8Array(Buffer.from(body.inputs.image.value, "base64")),
+      ),
+    ).not.toThrow();
+    expect(result.inference).toMatchObject({
+      transform: { scaledWidth: 960, scaledHeight: 720, padLeft: 160 },
+    });
     expect(JSON.stringify(calls[0])).not.toContain("Authorization");
+  });
+
+  it("normalizes the exact verified Workflow branch and rejects cross-kind or unknown classes", async () => {
+    const provider = createRoboflowVisionProvider({
+      config: {
+        apiUrl: "http://127.0.0.1:9001",
+        workspaceId: "revelai",
+        freeModelBundleId: "free-bundle-v1",
+        verifiedModelBundleId: "verified-bundle-v1",
+        freeProviderVersion: "provider-v1",
+        verifiedProviderVersion: "provider-v1",
+      },
+      fetch: async () => ({
+        status: 200,
+        json: async () => ({ outputs: [verifiedWorkflowOutput()] }),
+      }),
+    });
+    await expect(
+      provider.analyzeVerified(verifiedRequest(0)),
+    ).resolves.toMatchObject({
+      kind: "verified-wall-pass",
+      feet: [{ side: "left" }, { side: "right" }],
+      fiducialCorners: { length: 8 },
+    });
+
+    for (const output of [
+      { ...verifiedWorkflowOutput(), kind: "free-training-v1" },
+      {
+        ...verifiedWorkflowOutput(),
+        detections: [
+          ...verifiedWorkflowOutput().detections,
+          {
+            class: "unknown",
+            xMin: 1,
+            yMin: 1,
+            xMax: 2,
+            yMax: 2,
+            confidence: 0.9,
+          },
+        ],
+      },
+      {
+        ...verifiedWorkflowOutput(),
+        detections: [
+          ...verifiedWorkflowOutput().detections,
+          {
+            ...verifiedWorkflowOutput().detections[0]!,
+          },
+        ],
+      },
+      {
+        ...verifiedWorkflowOutput(),
+        image: {
+          width: 1280,
+          height: 721,
+          coordinateSystem: "inference_pixels",
+        },
+      },
+      {
+        ...verifiedWorkflowOutput(),
+        workflow: {
+          ...verifiedWorkflowOutput().workflow,
+          modelBundleId: "different-bundle-v1",
+        },
+      },
+    ]) {
+      const invalid = createRoboflowVisionProvider({
+        config: {
+          apiUrl: "http://127.0.0.1:9001",
+          workspaceId: "revelai",
+          freeModelBundleId: "free-bundle-v1",
+          verifiedModelBundleId: "verified-bundle-v1",
+          freeProviderVersion: "provider-v1",
+          verifiedProviderVersion: "provider-v1",
+        },
+        fetch: async () => ({
+          status: 200,
+          json: async () => ({ outputs: [output] }),
+        }),
+      });
+      await expect(
+        invalid.analyzeVerified(verifiedRequest(0)),
+      ).rejects.toMatchObject({
+        code: "provider_output_invalid",
+      });
+    }
   });
 
   it("rejects cross-kind Workflow output, unknown class, and insecure keyed URL", async () => {
@@ -178,7 +471,10 @@ describe("vision providers", () => {
           freeProviderVersion: "provider-v1",
           verifiedProviderVersion: "provider-v1",
         },
-        transformer: { transform: async (frame) => frame.jpeg },
+        transformer: {
+          transform: async (frame, _transform, signal) =>
+            encodeInferenceFrame(frame, signal),
+        },
         fetch: async () => ({ status: 500, json: async () => ({}) }),
       }),
     ).toThrow(VisionProviderError);
@@ -194,7 +490,10 @@ describe("vision providers", () => {
         freeProviderVersion: "provider-v1",
         verifiedProviderVersion: "provider-v1",
       },
-      transformer: { transform: async (frame) => frame.jpeg },
+      transformer: {
+        transform: async (frame, _transform, signal) =>
+          encodeInferenceFrame(frame, signal),
+      },
       fetch: async () => ({
         status: 200,
         json: async () => ({
@@ -233,7 +532,10 @@ describe("vision providers", () => {
         freeProviderVersion: "provider-v1",
         verifiedProviderVersion: "provider-v1",
       },
-      transformer: { transform: async (frame) => frame.jpeg },
+      transformer: {
+        transform: async (frame, _transform, signal) =>
+          encodeInferenceFrame(frame, signal),
+      },
       fetch: async () => ({
         status: 200,
         json: async () => Promise.reject(new Error("unreadable response")),
@@ -242,5 +544,101 @@ describe("vision providers", () => {
     await expect(provider.analyzeFree(freeRequest())).rejects.toMatchObject({
       code: "provider_output_invalid",
     });
+  });
+
+  it("never starts fetch when external cancellation wins while a transform is pending", async () => {
+    let releaseTransform:
+      | ((value: ReturnType<typeof encodeInferenceFrame>) => void)
+      | undefined;
+    let fetches = 0;
+    const provider = createRoboflowVisionProvider({
+      config: {
+        apiUrl: "http://127.0.0.1:9001",
+        workspaceId: "revelai",
+        freeModelBundleId: "free-bundle-v1",
+        verifiedModelBundleId: "verified-bundle-v1",
+        freeProviderVersion: "provider-v1",
+        verifiedProviderVersion: "provider-v1",
+      },
+      transformer: {
+        transform: async (frame) =>
+          new Promise((resolve) => {
+            releaseTransform = resolve;
+            void frame;
+          }),
+      },
+      fetch: async () => {
+        fetches += 1;
+        return { status: 500, json: async () => ({}) };
+      },
+    });
+    const controller = new AbortController();
+    const analysis = provider.analyzeFree(freeRequest(), controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    releaseTransform?.(encodeInferenceFrame(freeRequest().frame));
+    await expect(analysis).rejects.toMatchObject({
+      code: "provider_temporary_unavailable",
+    });
+    expect(fetches).toBe(0);
+  });
+
+  it("rejects a decoder-valid transformed JPEG bound to a different inverse transform", async () => {
+    let fetches = 0;
+    const provider = createRoboflowVisionProvider({
+      config: {
+        apiUrl: "http://127.0.0.1:9001",
+        workspaceId: "revelai",
+        freeModelBundleId: "free-bundle-v1",
+        verifiedModelBundleId: "verified-bundle-v1",
+        freeProviderVersion: "provider-v1",
+        verifiedProviderVersion: "provider-v1",
+      },
+      transformer: {
+        transform: async (frame) => {
+          const encoded = encodeInferenceFrame(frame);
+          return {
+            ...encoded,
+            transform: { ...encoded.transform, padLeft: 0 },
+          };
+        },
+      },
+      fetch: async () => {
+        fetches += 1;
+        return { status: 500, json: async () => ({}) };
+      },
+    });
+    await expect(provider.analyzeFree(freeRequest())).rejects.toMatchObject({
+      code: "provider_output_invalid",
+    });
+    expect(fetches).toBe(0);
+  });
+
+  it("rejects an encoded-frame receipt hash that does not match bytes before fetch", async () => {
+    let fetches = 0;
+    const provider = createRoboflowVisionProvider({
+      config: {
+        apiUrl: "http://127.0.0.1:9001",
+        workspaceId: "revelai",
+        freeModelBundleId: "free-bundle-v1",
+        verifiedModelBundleId: "verified-bundle-v1",
+        freeProviderVersion: "provider-v1",
+        verifiedProviderVersion: "provider-v1",
+      },
+      transformer: {
+        transform: async (frame) => ({
+          ...encodeInferenceFrame(frame),
+          sha256: "a".repeat(64),
+        }),
+      },
+      fetch: async () => {
+        fetches += 1;
+        return { status: 500, json: async () => ({}) };
+      },
+    });
+    await expect(provider.analyzeFree(freeRequest())).rejects.toMatchObject({
+      code: "provider_output_invalid",
+    });
+    expect(fetches).toBe(0);
   });
 });

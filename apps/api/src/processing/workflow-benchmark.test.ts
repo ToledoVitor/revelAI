@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { encode } from "jpeg-js";
 import { describe, expect, it } from "vitest";
 import { VisionBatchScheduler } from "@revelai/vision";
 import {
@@ -16,6 +18,16 @@ const manifestIds = [
   "wall-pass-benchmark-d",
   "wall-pass-benchmark-e",
 ] as const;
+const benchmarkJpeg = new Uint8Array(
+  encode(
+    {
+      width: 1280,
+      height: 720,
+      data: new Uint8Array(1280 * 720 * 4).fill(255),
+    },
+    80,
+  ).data,
+);
 
 function receiptInput(
   overrides: Partial<Parameters<typeof createWorkflowBenchmarkReceipt>[0]> = {},
@@ -111,6 +123,7 @@ describe("workflow benchmark receipt", () => {
             },
           );
         }),
+      schedule: () => () => undefined,
     };
     const scheduler = new VisionBatchScheduler({ clock });
     const provider = {
@@ -134,7 +147,7 @@ describe("workflow benchmark receipt", () => {
         throw new Error("not used by verified benchmark");
       },
       async analyzeVerified(request: {
-        frame: { index: number; timestampMs: number };
+        frame: { index: number; timestampMs: number; jpeg: Uint8Array };
       }) {
         return {
           kind: "verified-wall-pass" as const,
@@ -142,14 +155,29 @@ describe("workflow benchmark receipt", () => {
           timestampMs: request.frame.timestampMs,
           sourceWidth: 1280,
           sourceHeight: 720,
+          inference: {
+            sha256: createHash("sha256")
+              .update(request.frame.jpeg)
+              .digest("hex"),
+            transform: {
+              sourceWidth: 1280,
+              sourceHeight: 720,
+              inferenceWidth: 1280 as const,
+              inferenceHeight: 720 as const,
+              scale: 1,
+              scaledWidth: 1280,
+              scaledHeight: 720,
+              padLeft: 0,
+              padTop: 0,
+            },
+          },
           feet: [],
           fiducialCorners: [],
         };
       },
     } as const;
-    const manifests = manifestIds.map((id, manifestIndex) => ({
+    const manifests = manifestIds.map((id) => ({
       id,
-      sha256: String(manifestIndex + 1).repeat(64),
       frames: Array.from({ length: 640 }, (_, index) => ({
         kind: "verified-wall-pass" as const,
         attemptId: "11111111-1111-4111-8111-111111111111",
@@ -159,7 +187,7 @@ describe("workflow benchmark receipt", () => {
           timestampMs: index * 100,
           sourceWidth: 1280,
           sourceHeight: 720,
-          jpeg: Uint8Array.of(0xff),
+          jpeg: benchmarkJpeg,
         },
       })),
     }));

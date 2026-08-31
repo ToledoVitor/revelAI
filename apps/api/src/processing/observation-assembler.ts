@@ -37,6 +37,8 @@ export async function assembleVerifiedObservation(
     frames: OpaqueFrameReader;
     provider: VisionProvider;
     scheduler?: VisionBatchScheduler;
+    calibrationSessionId: string;
+    calibrationNonce: string;
   }>,
 ): Promise<ReturnType<typeof assembleVerifiedEvidence>> {
   const requests = await extractionManifestToVisionRequests({
@@ -54,6 +56,8 @@ export async function assembleVerifiedObservation(
       mediaId: input.manifest.mediaId,
       mediaSha256: input.manifest.mediaSha256,
       rawPreRollSha256: input.manifest.rawPreRollSha256,
+      calibrationSessionId: input.calibrationSessionId,
+      calibrationNonce: input.calibrationNonce,
     },
   });
 }

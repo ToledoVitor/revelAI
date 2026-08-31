@@ -22,6 +22,9 @@ export type FrameGeometry = Readonly<{
   medianReprojectionError: number | null;
   maxReprojectionError: number | null;
   wallEdgeError: number | null;
+  /** Private capture-orientation facts consumed by C7, never a verdict. */
+  orientationValid: boolean;
+  wallSideValid: boolean;
   anchorPoints: Readonly<
     Record<(typeof FIDUCIAL_CORNER_IDS)[number], GroundPoint>
   > | null;
@@ -46,12 +49,10 @@ export function estimateFrameGeometry(
   const observed = new Map(
     frame.fiducialCorners.map((corner) => [corner.id, corner]),
   );
-  if (
-    observed.size !== FIDUCIAL_CORNER_IDS.length ||
-    FIDUCIAL_CORNER_IDS.some((id) => !observed.has(id))
-  )
+  if (observed.size !== frame.fiducialCorners.length || observed.size < 4)
     return invalidGeometry(frame.frameIndex);
-  const pairs = FIDUCIAL_CORNER_IDS.map((id) => ({
+  const ids = FIDUCIAL_CORNER_IDS.filter((id) => observed.has(id));
+  const pairs = ids.map((id) => ({
     source: observed.get(id)!,
     world: WORLD_CORNERS[id],
   }));
@@ -78,19 +79,28 @@ export function estimateFrameGeometry(
         ),
       ])
     : Number.POSITIVE_INFINITY;
-  const orientation = hasExpectedBoardOrientation(observed, inlierIndices);
+  const inlierIds = inlierIndices.map((index) => ids[index]!);
+  const orientationValid = hasExpectedImageOrientation(inverse);
+  const wallSideValid = hasExpectedWallSide(
+    observed,
+    inlierIds,
+    frame.wallFloorEdge,
+  );
   const valid =
     inlierIndices.length >= 4 &&
     medianReprojectionError <= 4 &&
     maxReprojectionError <= 8 &&
     wallEdgeError <= 8 &&
-    orientation;
+    orientationValid &&
+    wallSideValid;
   if (!valid)
     return invalidGeometry(frame.frameIndex, {
       medianReprojectionError,
       maxReprojectionError,
       wallEdgeError,
       inlierCount: inlierIndices.length,
+      orientationValid,
+      wallSideValid,
     });
   return Object.freeze({
     frameIndex: frame.frameIndex,
@@ -109,6 +119,8 @@ export function estimateFrameGeometry(
         ]),
       ) as Record<(typeof FIDUCIAL_CORNER_IDS)[number], GroundPoint>,
     ),
+    orientationValid,
+    wallSideValid,
   });
 }
 
@@ -432,44 +444,46 @@ function isBetterRansacCandidate(
   );
 }
 
-function hasExpectedBoardOrientation(
+function hasExpectedImageOrientation(inverse: Homography): boolean {
+  try {
+    // Source-display coordinates use +X right and +Y away from the wall. A
+    // mirrored label projection reverses this known challenge orientation.
+    const origin = project(inverse, { x: 0, y: 2 });
+    const xAxis = project(inverse, { x: 0.1, y: 2 });
+    const yAxis = project(inverse, { x: 0, y: 2.1 });
+    const signedArea =
+      (xAxis.x - origin.x) * (yAxis.y - origin.y) -
+      (xAxis.y - origin.y) * (yAxis.x - origin.x);
+    return Number.isFinite(signedArea) && signedArea > 1e-9;
+  } catch {
+    return false;
+  }
+}
+
+function hasExpectedWallSide(
   observed: ReadonlyMap<string, Readonly<{ x: number; y: number }>>,
-  inlierIndices: readonly number[],
+  inlierIds: readonly (typeof FIDUCIAL_CORNER_IDS)[number][],
+  edge: WallPassFrameObservation["wallFloorEdge"],
 ): boolean {
-  const boardOrientation = (
-    topLeft: (typeof FIDUCIAL_CORNER_IDS)[number],
-    topRight: (typeof FIDUCIAL_CORNER_IDS)[number],
-    bottomRight: (typeof FIDUCIAL_CORNER_IDS)[number],
-    bottomLeft: (typeof FIDUCIAL_CORNER_IDS)[number],
-  ) => {
-    const corners = [topLeft, topRight, bottomRight, bottomLeft].map(
-      (id) => observed.get(id)!,
-    );
-    return corners.reduce((sum, point, index) => {
-      const next = corners[(index + 1) % corners.length]!;
-      return sum + point.x * next.y - point.y * next.x;
-    }, 0);
-  };
-  const boards = [
-    ["a-top-left", "a-top-right", "a-bottom-right", "a-bottom-left"],
-    ["b-top-left", "b-top-right", "b-bottom-right", "b-bottom-left"],
-  ] as const;
-  const orientations = boards
-    .filter((board) =>
-      board.every((id) =>
-        inlierIndices.includes(FIDUCIAL_CORNER_IDS.indexOf(id)),
-      ),
-    )
-    .map(([topLeft, topRight, bottomRight, bottomLeft]) =>
-      boardOrientation(topLeft, topRight, bottomRight, bottomLeft),
-    );
-  return (
-    orientations.length > 0 &&
-    orientations.every(
-      (value) => Number.isFinite(value) && Math.abs(value) > 1e-9,
-    ) &&
-    orientations.every((value) => value * orientations[0]! > 0)
-  );
+  if (!edge || Math.abs(edge.x2 - edge.x1) < 1e-9) return false;
+  const start =
+    edge.x1 <= edge.x2
+      ? { x: edge.x1, y: edge.y1 }
+      : { x: edge.x2, y: edge.y2 };
+  const end =
+    edge.x1 <= edge.x2
+      ? { x: edge.x2, y: edge.y2 }
+      : { x: edge.x1, y: edge.y1 };
+  // Boards must be on the capture-guide side of the observed wall-floor line:
+  // below a left-to-right edge in display-image coordinates. This is distinct
+  // from reprojection error and works with any distributed four inliers.
+  return inlierIds.every((id) => {
+    const point = observed.get(id)!;
+    const side =
+      (end.x - start.x) * (point.y - start.y) -
+      (end.y - start.y) * (point.x - start.x);
+    return Number.isFinite(side) && side > 1e-9;
+  });
 }
 
 function invalidGeometry(
@@ -490,6 +504,8 @@ function invalidGeometry(
     medianReprojectionError: values.medianReprojectionError ?? null,
     maxReprojectionError: values.maxReprojectionError ?? null,
     wallEdgeError: values.wallEdgeError ?? null,
+    orientationValid: values.orientationValid ?? false,
+    wallSideValid: values.wallSideValid ?? false,
     anchorPoints: null,
   });
 }

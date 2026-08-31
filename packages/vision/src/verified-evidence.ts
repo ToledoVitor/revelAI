@@ -22,6 +22,8 @@ export type VerifiedEvidenceBinding = Readonly<{
   mediaId: string;
   mediaSha256: string;
   rawPreRollSha256: string;
+  calibrationSessionId: string;
+  calibrationNonce: string;
 }>;
 
 export type VerifiedObservationEvidence = Readonly<{
@@ -34,11 +36,13 @@ export type VerifiedObservationEvidence = Readonly<{
     frameIndex: number;
     confidencePresent: boolean;
     geometry: FrameGeometry;
+    inference: VerifiedVisionObservationBatch["frames"][number]["inference"];
   }>[];
   active: readonly Readonly<{
     frameIndex: number;
     stable: boolean;
     geometry: FrameGeometry;
+    inference: VerifiedVisionObservationBatch["frames"][number]["inference"];
     anchorMedianDrift: number | null;
     anchorMaximumDrift: number | null;
     mappedBall: GroundPoint | null;
@@ -81,11 +85,13 @@ export function assembleVerifiedEvidence(
   }>,
 ): VerifiedObservationEvidence {
   const batch = VerifiedVisionObservationBatchSchema.parse(input.batch);
+  assertVerifiedBinding(input.binding);
   if (batch.attemptId !== input.binding.attemptId)
     throw new Error("cross-attempt verified evidence");
   const ordered = [...batch.frames].sort(
     (left, right) => left.frameIndex - right.frameIndex,
   );
+  assertVerifiedTimeline(ordered);
   const preRollFrames = ordered.slice(0, 40);
   const preRoll = preRollFrames.map((frame) => {
     const geometry = estimateFrameGeometry(frame);
@@ -93,6 +99,7 @@ export function assembleVerifiedEvidence(
       frameIndex: frame.frameIndex,
       confidencePresent: hasCalibrationConfidence(frame),
       geometry,
+      inference: frame.inference,
     });
   });
   const reference = selectReferenceGeometry(
@@ -105,7 +112,7 @@ export function assembleVerifiedEvidence(
     .map((frame) => activeEvidence(frame, reference?.reference ?? null));
   const activeFrames = ordered.slice(40);
   const ballTracks = collectBallTrackSegments(active, activeFrames);
-  const contactCandidates = collectContacts(active, activeFrames);
+  const contactCandidates = collectContacts(active, activeFrames, ballTracks);
   const contacts = contactCandidates.map((contact) =>
     Object.freeze({
       timestampMs: contact.timestampMs,
@@ -117,7 +124,7 @@ export function assembleVerifiedEvidence(
   const passEvidence = collectPassEvidence(
     contactCandidates,
     wallImpacts,
-    ballTracks.flat(),
+    ballTracks,
   );
   return Object.freeze({
     kind: "wall-pass-geometry-evidence-v1",
@@ -133,6 +140,46 @@ export function assembleVerifiedEvidence(
     wallImpacts: Object.freeze(wallImpacts),
     passEvidence: Object.freeze(passEvidence),
   });
+}
+
+function assertVerifiedBinding(binding: VerifiedEvidenceBinding): void {
+  if (
+    !isUuid(binding.attemptId) ||
+    !Number.isSafeInteger(binding.generation) ||
+    binding.generation < 1 ||
+    !isUuid(binding.mediaId) ||
+    !isUuid(binding.calibrationSessionId) ||
+    !/^[a-f0-9]{64}$/.test(binding.mediaSha256) ||
+    !/^[a-f0-9]{64}$/.test(binding.rawPreRollSha256) ||
+    !/^[A-Za-z0-9_-]{43}$/.test(binding.calibrationNonce)
+  )
+    throw new Error("invalid verified evidence binding");
+}
+
+function assertVerifiedTimeline(
+  frames: readonly VerifiedVisionObservationBatch["frames"][number][],
+): void {
+  if (frames.length !== 640)
+    throw new Error("verified evidence requires exactly 40+600 frames");
+  for (const [index, frame] of frames.entries()) {
+    const previous = frames[index - 1];
+    if (
+      frame.frameIndex !== index ||
+      (previous &&
+        (frame.timestampMs <= previous.timestampMs ||
+          frame.timestampMs - previous.timestampMs > 250)) ||
+      (index < 40
+        ? frame.timestampMs < 0 || frame.timestampMs >= 4000
+        : frame.timestampMs < 4000 || frame.timestampMs >= 64_000)
+    )
+      throw new Error("invalid verified 40+600 timeline");
+  }
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value,
+  );
 }
 
 function activeEvidence(
@@ -161,6 +208,7 @@ function activeEvidence(
       frameIndex: frame.frameIndex,
       stable: false,
       geometry,
+      inference: frame.inference,
       anchorMedianDrift: medianDrift,
       anchorMaximumDrift: maximumDrift,
       mappedBall: null,
@@ -187,6 +235,7 @@ function activeEvidence(
     frameIndex: frame.frameIndex,
     stable: true,
     geometry,
+    inference: frame.inference,
     anchorMedianDrift: medianDrift,
     anchorMaximumDrift: maximumDrift,
     mappedBall,
@@ -216,6 +265,7 @@ function hasCalibrationConfidence(
 function collectContacts(
   active: readonly ReturnType<typeof activeEvidence>[],
   frames: readonly VerifiedVisionObservationBatch["frames"][number][],
+  tracks: readonly BallTrack[],
 ) {
   const candidates: Array<
     Readonly<{
@@ -223,12 +273,15 @@ function collectContacts(
       side: "left" | "right";
       point: GroundPoint;
       confidence: number;
+      trackId: number;
     }>
   > = [];
   for (let index = 0; index < active.length; index += 1) {
     const evidence = active[index]!;
     const frame = frames[index]!;
     if (!evidence.usableTracks || !evidence.mappedBall) continue;
+    const ball = findTrackSample(tracks, frame.timestampMs);
+    if (!ball) continue;
     const candidate = evidence.mappedFeet
       .filter((foot) => distance(foot.point, evidence.mappedBall!) <= 0.35)
       .sort(
@@ -243,6 +296,7 @@ function collectContacts(
           side: candidate.side,
           point: evidence.mappedBall,
           confidence: candidate.confidence,
+          trackId: ball.trackId,
         }),
       );
   }
@@ -270,14 +324,12 @@ function collectContacts(
 function collectBallTrackSegments(
   active: readonly ReturnType<typeof activeEvidence>[],
   frames: readonly VerifiedVisionObservationBatch["frames"][number][],
-) {
-  const segments: Array<
-    Array<Readonly<{ timestampMs: number; point: GroundPoint }>>
-  > = [];
+): readonly BallTrack[] {
+  const segments: Array<Array<BallTrackSample>> = [];
   for (let index = 0; index < active.length; index += 1) {
     const point = active[index]!.mappedBall;
     if (!point) continue;
-    const sample = Object.freeze({
+    const sample: BallTrackSample = Object.freeze({
       timestampMs: frames[index]!.timestampMs,
       point,
     });
@@ -291,22 +343,20 @@ function collectBallTrackSegments(
       segments.push([sample]);
     else current.push(sample);
   }
-  return segments.map((segment) => Object.freeze(segment));
+  return Object.freeze(
+    segments.map((samples, trackId) =>
+      Object.freeze({ trackId, samples: Object.freeze(samples) }),
+    ),
+  );
 }
 
-function collectWallImpacts(
-  tracks: readonly (readonly Readonly<{
-    timestampMs: number;
-    point: GroundPoint;
-  }>[])[],
-) {
-  const impacts: Array<Readonly<{ timestampMs: number; point: GroundPoint }>> =
-    [];
+function collectWallImpacts(tracks: readonly BallTrack[]) {
+  const impacts: WallImpact[] = [];
   for (const track of tracks)
-    for (let index = 1; index + 1 < track.length; index += 1) {
-      const previous = track[index - 1]!;
-      const current = track[index]!;
-      const next = track[index + 1]!;
+    for (let index = 1; index + 1 < track.samples.length; index += 1) {
+      const previous = track.samples[index - 1]!;
+      const current = track.samples[index]!;
+      const next = track.samples[index + 1]!;
       const arrivesAtWall =
         previous.point.y > current.point.y && current.point.y <= 0.25;
       const reverses =
@@ -317,6 +367,7 @@ function collectWallImpacts(
           Object.freeze({
             timestampMs: current.timestampMs,
             point: current.point,
+            trackId: track.trackId,
           }),
         );
     }
@@ -329,54 +380,134 @@ function collectPassEvidence(
     side: "left" | "right";
     point: GroundPoint;
     confidence: number;
+    trackId: number;
   }>[],
-  wallImpacts: readonly Readonly<{ timestampMs: number; point: GroundPoint }>[],
-  trackedBalls: readonly Readonly<{
-    timestampMs: number;
-    point: GroundPoint;
-  }>[],
+  wallImpacts: readonly WallImpact[],
+  tracks: readonly BallTrack[],
 ) {
   const evidence: Array<VerifiedObservationEvidence["passEvidence"][number]> =
     [];
-  for (const contact of contacts) {
-    const outbound = trackedBalls.some(
-      (ball) =>
-        ball.timestampMs > contact.timestampMs &&
-        ball.timestampMs - contact.timestampMs <= 700 &&
-        contact.point.y - ball.point.y >= 0.25,
+  for (const track of tracks) {
+    const trackContacts = contacts.filter(
+      (contact) => contact.trackId === track.trackId,
     );
-    if (!outbound) continue;
-    const wall = wallImpacts.find(
-      (impact) =>
-        impact.timestampMs - contact.timestampMs >= 200 &&
-        impact.timestampMs - contact.timestampMs <= 2000,
+    const trackImpacts = wallImpacts.filter(
+      (impact) => impact.trackId === track.trackId,
     );
-    const completed = wall
-      ? contacts.find(
-          (next) =>
-            next.timestampMs > contact.timestampMs &&
-            next.timestampMs - wall.timestampMs >= 200 &&
-            next.timestampMs - wall.timestampMs <= 4000,
-        )
-      : undefined;
-    evidence.push(
-      completed && wall
-        ? Object.freeze({
-            kind: "complete" as const,
-            startedAtMs: contact.timestampMs,
-            wallImpactAtMs: wall.timestampMs,
-            completedAtMs: completed.timestampMs,
-            side: contact.side,
-          })
-        : Object.freeze({
-            kind: "missed" as const,
-            startedAtMs: contact.timestampMs,
-            deadlineAtMs: contact.timestampMs + 4000,
-            side: contact.side,
-          }),
+    const events = [
+      ...trackContacts.map((contact) =>
+        Object.freeze({
+          kind: "contact" as const,
+          timestampMs: contact.timestampMs,
+          contact,
+        }),
+      ),
+      ...trackImpacts.map((impact) =>
+        Object.freeze({
+          kind: "wall" as const,
+          timestampMs: impact.timestampMs,
+          impact,
+        }),
+      ),
+    ].sort(
+      (left, right) =>
+        left.timestampMs - right.timestampMs || (left.kind === "wall" ? -1 : 1),
     );
+    let pending:
+      | Readonly<{
+          contact: (typeof trackContacts)[number];
+          wallImpactAtMs?: number;
+        }>
+      | undefined;
+    for (const event of events) {
+      if (pending && event.timestampMs > pending.contact.timestampMs + 4000) {
+        evidence.push(missedPass(pending.contact));
+        pending = undefined;
+      }
+      if (event.kind === "contact") {
+        if (pending?.wallImpactAtMs !== undefined) {
+          const elapsed = event.timestampMs - pending.wallImpactAtMs;
+          if (elapsed >= 200 && elapsed <= 4000) {
+            evidence.push(
+              Object.freeze({
+                kind: "complete" as const,
+                startedAtMs: pending.contact.timestampMs,
+                wallImpactAtMs: pending.wallImpactAtMs,
+                completedAtMs: event.timestampMs,
+                side: pending.contact.side,
+              }),
+            );
+            pending = undefined;
+            continue;
+          }
+        }
+        if (!pending && hasOutboundMotion(track, event.contact))
+          pending = Object.freeze({ contact: event.contact });
+        continue;
+      }
+      if (!pending || pending.wallImpactAtMs !== undefined) continue;
+      const elapsed = event.timestampMs - pending.contact.timestampMs;
+      if (elapsed >= 200 && elapsed <= 2000)
+        pending = Object.freeze({
+          contact: pending.contact,
+          wallImpactAtMs: event.timestampMs,
+        });
+    }
+    if (pending) evidence.push(missedPass(pending.contact));
   }
   return evidence;
+}
+
+type BallTrackSample = Readonly<{
+  timestampMs: number;
+  point: GroundPoint;
+}>;
+
+type BallTrack = Readonly<{
+  trackId: number;
+  samples: readonly BallTrackSample[];
+}>;
+
+type WallImpact = Readonly<{
+  timestampMs: number;
+  point: GroundPoint;
+  trackId: number;
+}>;
+
+function findTrackSample(
+  tracks: readonly BallTrack[],
+  timestampMs: number,
+): (BallTrackSample & Readonly<{ trackId: number }>) | undefined {
+  for (const track of tracks) {
+    const sample = track.samples.find(
+      (candidate) => candidate.timestampMs === timestampMs,
+    );
+    if (sample) return Object.freeze({ ...sample, trackId: track.trackId });
+  }
+  return undefined;
+}
+
+function hasOutboundMotion(
+  track: BallTrack,
+  contact: Readonly<{ timestampMs: number; point: GroundPoint }>,
+): boolean {
+  return track.samples.some(
+    (ball) =>
+      ball.timestampMs > contact.timestampMs &&
+      ball.timestampMs - contact.timestampMs <= 700 &&
+      contact.point.y - ball.point.y >= 0.25,
+  );
+}
+
+function missedPass(
+  contact: Readonly<{ timestampMs: number; side: "left" | "right" }>,
+): VerifiedObservationEvidence["passEvidence"][number] {
+  return Object.freeze({
+    kind: "missed" as const,
+    startedAtMs: contact.timestampMs,
+    deadlineAtMs: contact.timestampMs + 4000,
+    side: contact.side,
+  });
 }
 
 function longestRun(values: readonly boolean[]): number {

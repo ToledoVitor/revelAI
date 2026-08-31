@@ -4,12 +4,36 @@ import { describe, expect, it } from "vitest";
 describe("vision boundary", () => {
   it("keeps production vision code away from domain decisions, repositories, and routes", async () => {
     const files = await productionFiles(new URL(".", import.meta.url));
-    const sources = await Promise.all(
-      files.map((file) => readFile(file, "utf8")),
+    const entries = await Promise.all(
+      files.map(async (file) =>
+        Object.freeze({ file, source: await readFile(file, "utf8") }),
+      ),
     );
-    const forbidden =
-      /from\s+["'][^"']*(?:@revelai\/domain|integrity|repository|score|rank|leaderboard|route)[^"']*["']|import\s*\(\s*["'][^"']*(?:@revelai\/domain|integrity|repository|score|rank|leaderboard|route)[^"']*["']\s*\)/;
-    expect(sources.join("\n")).not.toMatch(forbidden);
+    const forbiddenImport =
+      /(?:from|import\s*\()\s*["'][^"']*(?:@revelai\/domain|integrity|competitive-policy|repository|score|rank|leaderboard|route|result)[^"']*["']/;
+    expect(entries.map((entry) => entry.source).join("\n")).not.toMatch(
+      forbiddenImport,
+    );
+
+    const provider = entries.find((entry) =>
+      entry.file.endsWith("providers.ts"),
+    )?.source;
+    expect(provider).toBeDefined();
+    const exportedSymbols = [
+      ...(provider?.matchAll(
+        /export\s+(?:type|class|function|const)\s+(\w+)/g,
+      ) ?? []),
+    ].map((match) => match[1]!);
+    expect(exportedSymbols.join(" ")).not.toMatch(
+      /(?:verdict|eligib|score|result|policy|rank|persist)/i,
+    );
+    const providerShape = provider?.match(
+      /export\s+type\s+VisionProvider\s*=\s*Readonly<\{([\s\S]*?)\}>;/,
+    )?.[1];
+    expect(providerShape).toBeDefined();
+    expect(providerShape).not.toMatch(
+      /(?:verdict|eligib|retry|score|result|policy|rank|persist)/i,
+    );
   });
 });
 

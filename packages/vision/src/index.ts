@@ -7,6 +7,7 @@ export {
   VisionFrameRequestSchema,
   BoxSchema,
   WorkflowEnvelopeSchema,
+  InferenceFrameBindingSchema,
   FreeFrameObservationSchema,
   WallPassFrameObservationSchema,
   FreeVisionObservationBatchSchema,
@@ -17,6 +18,7 @@ export {
   type FreeVisionFrameRequest,
   type VisionFrameRequest,
   type WorkflowEnvelope,
+  type InferenceFrameBinding,
   type FreeFrameObservation,
   type WallPassFrameObservation,
   type FreeVisionObservationBatch,
@@ -25,9 +27,13 @@ export {
 } from "./types.js";
 export {
   createLetterboxTransform,
+  encodeInferenceFrame,
+  assertInferenceJpeg,
   forwardSourcePoint,
   inverseInferencePoint,
   roundHalfUp,
+  sameLetterboxTransform,
+  type EncodedInferenceFrame,
   type LetterboxTransform,
   type Point,
 } from "./transform.js";
