@@ -45,6 +45,104 @@ describe("vision public boundary", () => {
       ]),
     );
   });
+
+  it("rejects const-computed namespace keys and computed bindings", () => {
+    const program = fixtureProgram(
+      new Map([
+        [
+          "/vision-guard/index.ts",
+          [
+            'import * as neutral from "./neutral.js";',
+            'const key = "VerifiedResultSchema" as const;',
+            "export const throughConstKey = neutral[key];",
+            "const { [key]: throughComputedBinding } = neutral;",
+            "export { throughComputedBinding };",
+          ].join("\n"),
+        ],
+        [
+          "/vision-guard/neutral.ts",
+          "export const VerifiedResultSchema = Object.freeze({});",
+        ],
+      ]),
+    );
+    const entry = program.getSourceFile("/vision-guard/index.ts");
+    expect(entry).toBeDefined();
+    if (!entry) throw new Error("fixture entry source was not loaded");
+
+    expect(
+      collectPublicBoundaryViolations(program, entry, (file) =>
+        file.startsWith("/vision-guard/"),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("element-access:VerifiedResultSchema"),
+        expect.stringContaining("binding:VerifiedResultSchema"),
+      ]),
+    );
+  });
+
+  it("rejects VisionProvider generic constraints and defaults", () => {
+    const program = fixtureProgram(
+      new Map([
+        [
+          "/vision-guard/index.ts",
+          [
+            "export interface VisionProvider {",
+            "  constraint<T extends { retry: string }>(value: T): Promise<void>;",
+            "  defaulted<T = { policy: string }>(value: T): Promise<void>;",
+            "}",
+          ].join("\n"),
+        ],
+      ]),
+    );
+    const entry = program.getSourceFile("/vision-guard/index.ts");
+    expect(entry).toBeDefined();
+    if (!entry) throw new Error("fixture entry source was not loaded");
+
+    expect(
+      collectPublicBoundaryViolations(program, entry, (file) =>
+        file.startsWith("/vision-guard/"),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("field:retry"),
+        expect.stringContaining("field:policy"),
+      ]),
+    );
+  });
+
+  it("allows safe const-computed namespace keys and VisionProvider generics", () => {
+    const program = fixtureProgram(
+      new Map([
+        [
+          "/vision-guard/index.ts",
+          [
+            'import * as neutral from "./neutral.js";',
+            'const key = "AllowedSchema" as const;',
+            "export const throughConstKey = neutral[key];",
+            "const { [key]: throughComputedBinding } = neutral;",
+            "export { throughComputedBinding };",
+            "export interface VisionProvider {",
+            "  reviewGeneric?<T extends { safe: string } = { safe: string }>(value: T): Promise<void>;",
+            "}",
+          ].join("\n"),
+        ],
+        [
+          "/vision-guard/neutral.ts",
+          "export const AllowedSchema = Object.freeze({});",
+        ],
+      ]),
+    );
+    const entry = program.getSourceFile("/vision-guard/index.ts");
+    expect(entry).toBeDefined();
+    if (!entry) throw new Error("fixture entry source was not loaded");
+
+    expect(
+      collectPublicBoundaryViolations(program, entry, (file) =>
+        file.startsWith("/vision-guard/"),
+      ),
+    ).toEqual([]);
+  });
 });
 
 async function productionProgram(): Promise<ts.Program> {
@@ -141,12 +239,7 @@ function collectResolvedImportsAndUses(
     if (ts.isElementAccessExpression(node))
       reportElementAccess(node, checker, violations);
     if (ts.isBindingElement(node))
-      reportSymbol(
-        node.propertyName ?? node.name,
-        checker,
-        violations,
-        "binding",
-      );
+      reportBindingElement(node, checker, violations);
     ts.forEachChild(node, visit);
   };
   visit(source);
@@ -157,9 +250,8 @@ function reportElementAccess(
   checker: ts.TypeChecker,
   violations: Set<string>,
 ): void {
-  const argument = node.argumentExpression;
-  if (!ts.isStringLiteral(argument)) return;
-  const propertyName = argument.text;
+  const propertyName = literalPropertyName(node.argumentExpression, checker);
+  if (!propertyName) return;
   const namespaceSymbol = checker.getSymbolAtLocation(node.expression);
   const namespace = namespaceSymbol && resolveAlias(namespaceSymbol, checker);
   const property = namespace
@@ -171,6 +263,34 @@ function reportElementAccess(
     reportResolvedSymbol(property, checker, violations, "element-access");
   else if (forbiddenPublicName.test(propertyName))
     violations.add(`element-access:${propertyName}`);
+}
+
+function reportBindingElement(
+  node: ts.BindingElement,
+  checker: ts.TypeChecker,
+  violations: Set<string>,
+): void {
+  const propertyName = node.propertyName;
+  if (propertyName && ts.isComputedPropertyName(propertyName)) {
+    const literalName = literalPropertyName(propertyName.expression, checker);
+    if (literalName && forbiddenPublicName.test(literalName))
+      violations.add(`binding:${literalName}`);
+    return;
+  }
+  reportSymbol(propertyName ?? node.name, checker, violations, "binding");
+}
+
+function literalPropertyName(
+  expression: ts.Expression,
+  checker: ts.TypeChecker,
+): string | undefined {
+  if (
+    ts.isStringLiteral(expression) ||
+    ts.isNoSubstitutionTemplateLiteral(expression)
+  )
+    return expression.text;
+  const type = checker.getTypeAtLocation(expression);
+  return type.isStringLiteral() ? type.value : undefined;
 }
 
 function reportSymbol(
@@ -260,7 +380,29 @@ function walkPublicType(
   withinVisionProvider: boolean,
 ): void {
   if (!markUnseen(seenTypes, type, withinVisionProvider)) return;
-  if (type.flags & ts.TypeFlags.TypeParameter) return;
+  if (type.flags & ts.TypeFlags.TypeParameter) {
+    const constraint = checker.getBaseConstraintOfType(type);
+    if (constraint)
+      walkPublicType(
+        constraint,
+        checker,
+        violations,
+        seenSymbols,
+        seenTypes,
+        withinVisionProvider,
+      );
+    const defaultType = checker.getDefaultFromTypeParameter(type);
+    if (defaultType)
+      walkPublicType(
+        defaultType,
+        checker,
+        violations,
+        seenSymbols,
+        seenTypes,
+        withinVisionProvider,
+      );
+    return;
+  }
   const typeSymbol = type.aliasSymbol ?? type.getSymbol();
   const standardLibraryType =
     typeSymbol !== undefined && isStandardLibrarySymbol(typeSymbol);
@@ -361,6 +503,15 @@ function walkPublicSignature(
   seenTypes: Map<ts.Type, Set<boolean>>,
   withinVisionProvider: boolean,
 ): void {
+  for (const typeParameter of signature.getTypeParameters() ?? [])
+    walkPublicType(
+      typeParameter,
+      checker,
+      violations,
+      seenSymbols,
+      seenTypes,
+      withinVisionProvider,
+    );
   for (const parameter of signature.getParameters()) {
     reportPublicName(
       parameter.getName(),
@@ -476,6 +627,10 @@ function adversarialFixtureProgram(): ts.Program {
       "declare const payload: { rank: number }; export default payload;",
     ],
   ]);
+  return fixtureProgram(files);
+}
+
+function fixtureProgram(files: ReadonlyMap<string, string>): ts.Program {
   const host = ts.createCompilerHost(compilerOptions());
   const nativeGetSourceFile = host.getSourceFile.bind(host);
   const nativeFileExists = host.fileExists.bind(host);
