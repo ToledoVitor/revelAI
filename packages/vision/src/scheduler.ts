@@ -67,7 +67,7 @@ export class VisionBatchScheduler {
 
   public async run<Item, Result>(
     items: readonly Item[],
-    dispatch: (item: Item, signal: AbortSignal) => Promise<Result>,
+    dispatch: (item: Item, signal: AbortSignal) => Promise<Result> | Result,
     externalSignal?: AbortSignal,
   ): Promise<readonly Result[]> {
     const startedAt = this.clock.now();
@@ -127,7 +127,7 @@ export class VisionBatchScheduler {
 
   private async dispatchWithRetry<Item, Result>(
     item: Item,
-    dispatch: (item: Item, signal: AbortSignal) => Promise<Result>,
+    dispatch: (item: Item, signal: AbortSignal) => Promise<Result> | Result,
     startedAt: number,
     batchController: AbortController,
   ): Promise<Result> {
@@ -144,7 +144,7 @@ export class VisionBatchScheduler {
         if (batchController.signal.aborted)
           throw new VisionProviderError("provider_temporary_unavailable");
         const result = await this.withTimeout(
-          dispatch(item, requestController.signal),
+          () => dispatch(item, requestController.signal),
           requestController,
           startedAt,
         );
@@ -171,7 +171,7 @@ export class VisionBatchScheduler {
   }
 
   private async withTimeout<Result>(
-    task: Promise<Result>,
+    dispatch: () => Promise<Result> | Result,
     controller: AbortController,
     batchStartedAt: number,
   ): Promise<Result> {
@@ -182,19 +182,37 @@ export class VisionBatchScheduler {
       throw new VisionProviderError("provider_temporary_unavailable");
     }
     const timeoutMs = Math.min(this.requestTimeoutMs, remainingBatchMs);
-    const timeoutController = new AbortController();
-    const timeout = this.clock
-      .sleep(timeoutMs, timeoutController.signal)
-      .then(() => {
+    const requestStartedAt = this.clock.now();
+    let timedOut = false;
+    let rejectTimeout: (error: VisionProviderError) => void = () => undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      rejectTimeout = reject;
+    });
+    const cancelTimeout = this.clock.schedule(timeoutMs, () => {
+      timedOut = true;
+      controller.abort();
+      rejectTimeout(new VisionProviderError("provider_temporary_unavailable"));
+    });
+    // Constructing the promise starts the timer before any synchronous image
+    // decode/transform work from the provider can consume the eight-second
+    // budget. The microtask also turns a synchronous throw into a rejection.
+    const task = Promise.resolve().then(() => {
+      if (controller.signal.aborted)
+        throw new VisionProviderError("provider_temporary_unavailable");
+      return dispatch();
+    });
+    try {
+      const result = await Promise.race([task, timeout]);
+      if (timedOut || this.clock.now() - requestStartedAt >= timeoutMs) {
         controller.abort();
         throw new VisionProviderError("provider_temporary_unavailable");
-      });
-    try {
-      return await Promise.race([task, timeout]);
+      }
+      return result;
     } finally {
-      timeoutController.abort();
-      // A cancelled system-clock sleep rejects; retain a sink for that loser so
-      // a successfully settled request cannot leave an unhandled rejection.
+      cancelTimeout();
+      // A late provider rejection must never become an unhandled rejection
+      // after the scheduler has already timed out or cancelled the request.
+      void task.catch(() => undefined);
       void timeout.catch(() => undefined);
     }
   }

@@ -200,6 +200,87 @@ describe("verified geometry", () => {
         binding,
       }),
     ).toThrow("invalid verified 40+600 timeline");
+
+    const reordered = Array.from({ length: 640 }, (_, index) => frame(index));
+    [reordered[40], reordered[41]] = [reordered[41]!, reordered[40]!];
+    expect(() =>
+      assembleVerifiedEvidence({
+        batch: {
+          attemptId: binding.attemptId,
+          kind: "verified-wall-pass",
+          provenance: {
+            kind: "demo",
+            fixtureId: "wall-pass-balanced-v1",
+            providerVersion: "demo-observations-v1",
+          },
+          frames: reordered,
+        },
+        binding,
+      }),
+    ).toThrow("invalid verified 40+600 timeline");
+  });
+
+  it("closes an opportunity on an intervening contact and immediately reuses a valid return", () => {
+    const preRoll = Array.from({ length: 40 }, (_, index) => frame(index));
+    const interveningActive = [
+      frame(40),
+      frame(41),
+      ballFrame(42, 500),
+      ballFrame(43, 400),
+      ballFrame(44, 300),
+      frame(45),
+      frame(46),
+      ballFrame(47, 100),
+      ballFrame(48, 10),
+      ballFrame(49, 40),
+      frame(50),
+      frame(51),
+      ...Array.from({ length: 588 }, (_, index) => noTrackFrame(52 + index)),
+    ];
+    const intervening = assembleVerifiedEvidence({
+      batch: verifiedDemoBatch([...preRoll, ...interveningActive]),
+      binding,
+    });
+    expect(intervening.passEvidence).toContainEqual(
+      expect.objectContaining({ kind: "missed", startedAtMs: 4000 }),
+    );
+    expect(intervening.passEvidence).toContainEqual(
+      expect.objectContaining({
+        kind: "complete",
+        startedAtMs: 4500,
+        wallImpactAtMs: 4800,
+        completedAtMs: 5000,
+      }),
+    );
+    expect(
+      intervening.passEvidence.filter((pass) => pass.kind === "complete"),
+    ).toHaveLength(1);
+
+    const chainedActive = [
+      frame(40),
+      frame(41),
+      ballFrame(42, 100),
+      ballFrame(43, 10),
+      ballFrame(44, 40),
+      frame(45),
+      frame(46),
+      ballFrame(47, 100),
+      ballFrame(48, 10),
+      ballFrame(49, 40),
+      frame(50),
+      frame(51),
+      ...Array.from({ length: 588 }, (_, index) => noTrackFrame(52 + index)),
+    ];
+    const chained = assembleVerifiedEvidence({
+      batch: verifiedDemoBatch([...preRoll, ...chainedActive]),
+      binding,
+    });
+    expect(
+      chained.passEvidence.filter((pass) => pass.kind === "complete"),
+    ).toEqual([
+      expect.objectContaining({ startedAtMs: 4000, completedAtMs: 4500 }),
+      expect.objectContaining({ startedAtMs: 4500, completedAtMs: 5000 }),
+    ]);
   });
 
   it("never completes a pass across a marker-loss ball-track gap", () => {
@@ -239,6 +320,19 @@ describe("verified geometry", () => {
     );
   });
 });
+
+function verifiedDemoBatch(frames: WallPassFrameObservation[]) {
+  return {
+    attemptId: binding.attemptId,
+    kind: "verified-wall-pass" as const,
+    provenance: {
+      kind: "demo" as const,
+      fixtureId: "wall-pass-balanced-v1" as const,
+      providerVersion: "demo-observations-v1" as const,
+    },
+    frames,
+  };
+}
 
 function ballFrame(index: number, ballY: number): WallPassFrameObservation {
   const observation = frame(index);

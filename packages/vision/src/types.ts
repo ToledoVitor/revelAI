@@ -1,6 +1,8 @@
 import {
-  FreeAnalysisProvenanceSchema,
-  VerifiedAnalysisProvenanceSchema,
+  FreeDemoAnalysisProvenanceSchema,
+  FreeRoboflowAnalysisProvenanceSchema,
+  VerifiedDemoAnalysisProvenanceSchema,
+  VerifiedRoboflowAnalysisProvenanceSchema,
 } from "@revelai/contracts";
 import { z } from "zod";
 
@@ -200,6 +202,25 @@ export const InferenceFrameBindingSchema = z
       })
       .strict()
       .superRefine((value, context) => {
+        const scale = Math.min(
+          1280 / value.sourceWidth,
+          720 / value.sourceHeight,
+        );
+        const scaledWidth = Math.floor(value.sourceWidth * scale + 0.5);
+        const scaledHeight = Math.floor(value.sourceHeight * scale + 0.5);
+        const padLeft = Math.floor((1280 - scaledWidth) / 2);
+        const padTop = Math.floor((720 - scaledHeight) / 2);
+        if (
+          value.scale !== scale ||
+          value.scaledWidth !== scaledWidth ||
+          value.scaledHeight !== scaledHeight ||
+          value.padLeft !== padLeft ||
+          value.padTop !== padTop
+        )
+          context.addIssue({
+            code: "custom",
+            message: "inference transform does not match source dimensions",
+          });
         if (value.padLeft * 2 + value.scaledWidth > 1280)
           context.addIssue({
             code: "custom",
@@ -214,100 +235,133 @@ export const InferenceFrameBindingSchema = z
   })
   .strict();
 
-export const FreeFrameObservationSchema = z
-  .object({
-    kind: z.literal("free-training"),
-    frameIndex: nonNegativeInteger,
-    timestampMs: nonNegativeInteger,
-    sourceWidth: positiveInteger,
-    sourceHeight: positiveInteger,
-    inference: InferenceFrameBindingSchema.optional(),
-    athlete: SourceBoxSchema.optional(),
-    ball: SourceBoxSchema.optional(),
-  })
-  .strict()
-  .superRefine((frame, context) => {
-    assertSourceGeometry(frame, context);
-  });
+const FreeFrameObservationBaseSchema = z.object({
+  kind: z.literal("free-training"),
+  frameIndex: nonNegativeInteger,
+  timestampMs: nonNegativeInteger,
+  sourceWidth: positiveInteger,
+  sourceHeight: positiveInteger,
+  athlete: SourceBoxSchema.optional(),
+  ball: SourceBoxSchema.optional(),
+});
 
-export const WallPassFrameObservationSchema = z
-  .object({
-    kind: z.literal("verified-wall-pass"),
-    frameIndex: nonNegativeInteger,
-    timestampMs: nonNegativeInteger,
-    sourceWidth: positiveInteger,
-    sourceHeight: positiveInteger,
-    inference: InferenceFrameBindingSchema.optional(),
-    athlete: SourceBoxSchema.optional(),
-    ball: SourceBoxSchema.optional(),
-    feet: z.array(
-      SourcePointSchema.extend({ side: z.enum(["left", "right"]) }).strict(),
-    ),
-    fiducialCorners: z.array(
-      SourcePointSchema.extend({ id: FiducialCornerIdSchema }).strict(),
-    ),
-    wallFloorEdge: z
-      .object({ x1: finite, y1: finite, x2: finite, y2: finite, confidence })
-      .strict()
-      .optional(),
-  })
-  .strict()
-  .superRefine((frame, context) => {
-    assertSourceGeometry(frame, context);
-    for (const [index, foot] of frame.feet.entries())
-      assertSourcePoint(foot, frame, context, ["feet", index]);
-    for (const [index, corner] of frame.fiducialCorners.entries())
-      assertSourcePoint(corner, frame, context, ["fiducialCorners", index]);
-    if (frame.wallFloorEdge) {
-      assertSourcePoint(
-        frame.wallFloorEdge,
-        frame,
-        context,
-        ["wallFloorEdge"],
-        "x1",
-        "y1",
-      );
-      assertSourcePoint(
-        frame.wallFloorEdge,
-        frame,
-        context,
-        ["wallFloorEdge"],
-        "x2",
-        "y2",
-      );
-    }
-  });
+const WallPassFrameObservationBaseSchema = z.object({
+  kind: z.literal("verified-wall-pass"),
+  frameIndex: nonNegativeInteger,
+  timestampMs: nonNegativeInteger,
+  sourceWidth: positiveInteger,
+  sourceHeight: positiveInteger,
+  athlete: SourceBoxSchema.optional(),
+  ball: SourceBoxSchema.optional(),
+  feet: z.array(
+    SourcePointSchema.extend({ side: z.enum(["left", "right"]) }).strict(),
+  ),
+  fiducialCorners: z.array(
+    SourcePointSchema.extend({ id: FiducialCornerIdSchema }).strict(),
+  ),
+  wallFloorEdge: z
+    .object({ x1: finite, y1: finite, x2: finite, y2: finite, confidence })
+    .strict()
+    .optional(),
+});
 
-export const FreeVisionObservationBatchSchema = z
+export const FreeFrameObservationSchema = refineFreeFrame(
+  FreeFrameObservationBaseSchema.extend({
+    inference: InferenceFrameBindingSchema.optional(),
+  }).strict(),
+);
+
+const DemoFreeFrameObservationSchema = refineFreeFrame(
+  FreeFrameObservationBaseSchema.extend({
+    inference: InferenceFrameBindingSchema.optional(),
+  }).strict(),
+);
+
+const RoboflowFreeFrameObservationSchema = refineFreeFrame(
+  FreeFrameObservationBaseSchema.extend({
+    inference: InferenceFrameBindingSchema,
+  }).strict(),
+);
+
+export const WallPassFrameObservationSchema = refineWallPassFrame(
+  WallPassFrameObservationBaseSchema.extend({
+    inference: InferenceFrameBindingSchema.optional(),
+  }).strict(),
+);
+
+const DemoWallPassFrameObservationSchema = refineWallPassFrame(
+  WallPassFrameObservationBaseSchema.extend({
+    inference: InferenceFrameBindingSchema.optional(),
+  }).strict(),
+);
+
+const RoboflowWallPassFrameObservationSchema = refineWallPassFrame(
+  WallPassFrameObservationBaseSchema.extend({
+    inference: InferenceFrameBindingSchema,
+  }).strict(),
+);
+
+const FreeDemoVisionObservationBatchSchema = z
   .object({
     attemptId: z.string().uuid(),
     kind: z.literal("free-training"),
-    frames: z.array(FreeFrameObservationSchema),
-    provenance: FreeAnalysisProvenanceSchema,
+    frames: z.array(DemoFreeFrameObservationSchema),
+    provenance: FreeDemoAnalysisProvenanceSchema,
   })
   .strict()
   .superRefine((batch, context) => {
-    if (batch.frames.some((frame) => frame.kind !== batch.kind))
-      context.addIssue({ code: "custom", message: "mixed Free frame batch" });
-  });
-
-export const VerifiedVisionObservationBatchSchema = z
-  .object({
-    attemptId: z.string().uuid(),
-    kind: z.literal("verified-wall-pass"),
-    frames: z.array(WallPassFrameObservationSchema),
-    provenance: VerifiedAnalysisProvenanceSchema,
-  })
-  .strict()
-  .superRefine((batch, context) => {
-    if (batch.frames.some((frame) => frame.kind !== batch.kind))
+    if (batch.frames.some((frame) => frame.inference !== undefined))
       context.addIssue({
         code: "custom",
-        message: "mixed verified frame batch",
+        message: "demo frames cannot carry Roboflow inference bindings",
       });
   });
 
-export const VisionObservationBatchSchema = z.discriminatedUnion("kind", [
+const FreeRoboflowVisionObservationBatchSchema = z
+  .object({
+    attemptId: z.string().uuid(),
+    kind: z.literal("free-training"),
+    frames: z.array(RoboflowFreeFrameObservationSchema),
+    provenance: FreeRoboflowAnalysisProvenanceSchema,
+  })
+  .strict();
+
+export const FreeVisionObservationBatchSchema = z.union([
+  FreeDemoVisionObservationBatchSchema,
+  FreeRoboflowVisionObservationBatchSchema,
+]);
+
+const VerifiedDemoVisionObservationBatchSchema = z
+  .object({
+    attemptId: z.string().uuid(),
+    kind: z.literal("verified-wall-pass"),
+    frames: z.array(DemoWallPassFrameObservationSchema),
+    provenance: VerifiedDemoAnalysisProvenanceSchema,
+  })
+  .strict()
+  .superRefine((batch, context) => {
+    if (batch.frames.some((frame) => frame.inference !== undefined))
+      context.addIssue({
+        code: "custom",
+        message: "demo frames cannot carry Roboflow inference bindings",
+      });
+  });
+
+const VerifiedRoboflowVisionObservationBatchSchema = z
+  .object({
+    attemptId: z.string().uuid(),
+    kind: z.literal("verified-wall-pass"),
+    frames: z.array(RoboflowWallPassFrameObservationSchema),
+    provenance: VerifiedRoboflowAnalysisProvenanceSchema,
+  })
+  .strict();
+
+export const VerifiedVisionObservationBatchSchema = z.union([
+  VerifiedDemoVisionObservationBatchSchema,
+  VerifiedRoboflowVisionObservationBatchSchema,
+]);
+
+export const VisionObservationBatchSchema = z.union([
   FreeVisionObservationBatchSchema,
   VerifiedVisionObservationBatchSchema,
 ]);
@@ -335,6 +389,49 @@ export type VerifiedVisionObservationBatch = z.infer<
 export type VisionObservationBatch = z.infer<
   typeof VisionObservationBatchSchema
 >;
+
+function refineFreeFrame<T extends z.ZodTypeAny>(schema: T): T {
+  return schema.superRefine((value, context) => {
+    assertSourceGeometry(value as never, context);
+  }) as T;
+}
+
+function refineWallPassFrame<T extends z.ZodTypeAny>(schema: T): T {
+  return schema.superRefine((value, context) => {
+    const frame = value as never as Readonly<{
+      sourceWidth: number;
+      sourceHeight: number;
+      athlete?: z.infer<typeof SourceBoxSchema>;
+      ball?: z.infer<typeof SourceBoxSchema>;
+      feet: readonly Record<string, unknown>[];
+      fiducialCorners: readonly Record<string, unknown>[];
+      wallFloorEdge?: Record<string, unknown>;
+    }>;
+    assertSourceGeometry(frame, context);
+    for (const [index, foot] of frame.feet.entries())
+      assertSourcePoint(foot, frame, context, ["feet", index]);
+    for (const [index, corner] of frame.fiducialCorners.entries())
+      assertSourcePoint(corner, frame, context, ["fiducialCorners", index]);
+    if (frame.wallFloorEdge) {
+      assertSourcePoint(
+        frame.wallFloorEdge,
+        frame,
+        context,
+        ["wallFloorEdge"],
+        "x1",
+        "y1",
+      );
+      assertSourcePoint(
+        frame.wallFloorEdge,
+        frame,
+        context,
+        ["wallFloorEdge"],
+        "x2",
+        "y2",
+      );
+    }
+  }) as T;
+}
 
 function assertSourceGeometry(
   frame: Readonly<{

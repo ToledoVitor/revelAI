@@ -15,7 +15,7 @@ export function assembleFreeInsight(
     generatedAt: string;
   }>,
 ): FreeInsight {
-  const batch = FreeVisionObservationBatchSchema.parse(input.batch);
+  const batch = parseFreeObservationBatch(input.batch);
   const sampledFrames = batch.frames.length;
   if (sampledFrames === 0)
     throw new VisionProviderError("provider_output_invalid");
@@ -78,6 +78,38 @@ export function assembleFreeInsight(
     tips,
     generatedAt: input.generatedAt,
   });
+}
+
+function parseFreeObservationBatch(
+  input: FreeVisionObservationBatch,
+): FreeVisionObservationBatch {
+  if (containsNonFiniteTimestamp(input))
+    throw new VisionProviderError("provider_temporary_unavailable");
+  const parsed = FreeVisionObservationBatchSchema.safeParse(input);
+  if (parsed.success) return parsed.data;
+  if (
+    parsed.error.issues.some(
+      (issue) => issue.path[issue.path.length - 1] === "timestampMs",
+    )
+  )
+    throw new VisionProviderError("provider_temporary_unavailable");
+  throw new VisionProviderError("provider_output_invalid");
+}
+
+function containsNonFiniteTimestamp(input: unknown): boolean {
+  if (!input || typeof input !== "object") return false;
+  const frames = (input as Readonly<{ frames?: unknown }>).frames;
+  if (!Array.isArray(frames)) return false;
+  return frames.some(
+    (frame) =>
+      Boolean(frame) &&
+      typeof frame === "object" &&
+      typeof (frame as Readonly<{ timestampMs?: unknown }>).timestampMs ===
+        "number" &&
+      !Number.isFinite(
+        (frame as Readonly<{ timestampMs: number }>).timestampMs,
+      ),
+  );
 }
 
 function movementPairs(

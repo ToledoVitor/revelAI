@@ -796,14 +796,41 @@ function canonicalizeLegacyMedia(value: string): string {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
       throw new Error("invalid legacy C5 media record");
     const media = parsed as Record<string, unknown>;
-    const keys = Object.keys(media).sort();
-    const exactLegacy =
-      keys.length === 4 &&
-      keys.every(
-        (key, index) =>
-          key === ["bytes", "contentType", "deleteAt", "id"][index],
-      );
-    if ("uploadedAt" in media) return value;
+    const exactLegacy = hasExactObjectKeys(media, [
+      "id",
+      "contentType",
+      "bytes",
+      "deleteAt",
+    ]);
+    const isNamedV11Predecessor =
+      hasExactObjectKeys(media, [
+        "id",
+        "contentType",
+        "bytes",
+        "uploadedAt",
+        "deleteAt",
+        "transition",
+      ]) ||
+      hasExactObjectKeys(media, [
+        "id",
+        "contentType",
+        "bytes",
+        "uploadedAt",
+        "deleteAt",
+        "transitionResourceId",
+      ]) ||
+      hasExactObjectKeys(media, [
+        "id",
+        "contentType",
+        "bytes",
+        "uploadedAt",
+        "deleteAt",
+        "sha256",
+        "probe",
+        "manifest",
+        "transition",
+      ]);
+    if (isNamedV11Predecessor) return value;
     if (!exactLegacy) throw new Error("invalid legacy C5 media record");
     if (
       typeof media.id !== "string" ||
@@ -848,20 +875,35 @@ function canonicalizeStoredMediaV12(value: string): string {
   }
   if (!isPlainRecord(parsed)) throw new Error("invalid legacy C5 media record");
   const media = parsed;
-  const permitted = new Set([
-    "id",
-    "contentType",
-    "bytes",
-    "uploadedAt",
-    "deleteAt",
-    "transition",
-    "transitionResourceId",
-    "sha256",
-    "probe",
-    "manifest",
-  ]);
-  if (Object.keys(media).some((key) => !permitted.has(key)))
-    throw new Error("invalid legacy C5 media record");
+  const isNamedV12Predecessor =
+    hasExactObjectKeys(media, [
+      "id",
+      "contentType",
+      "bytes",
+      "uploadedAt",
+      "deleteAt",
+      "transition",
+    ]) ||
+    hasExactObjectKeys(media, [
+      "id",
+      "contentType",
+      "bytes",
+      "uploadedAt",
+      "deleteAt",
+      "transitionResourceId",
+    ]) ||
+    hasExactObjectKeys(media, [
+      "id",
+      "contentType",
+      "bytes",
+      "uploadedAt",
+      "deleteAt",
+      "sha256",
+      "probe",
+      "manifest",
+      "transition",
+    ]);
+  if (!isNamedV12Predecessor) throw new Error("invalid legacy C5 media record");
   if (
     typeof media.id !== "string" ||
     media.id.length === 0 ||

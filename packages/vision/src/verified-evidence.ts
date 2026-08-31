@@ -88,9 +88,9 @@ export function assembleVerifiedEvidence(
   assertVerifiedBinding(input.binding);
   if (batch.attemptId !== input.binding.attemptId)
     throw new Error("cross-attempt verified evidence");
-  const ordered = [...batch.frames].sort(
-    (left, right) => left.frameIndex - right.frameIndex,
-  );
+  // Correlation is meaningful only in the producer-supplied sequence. Sorting
+  // would silently repair a mismatched frame/observation batch.
+  const ordered = batch.frames;
   assertVerifiedTimeline(ordered);
   const preRollFrames = ordered.slice(0, 40);
   const preRoll = preRollFrames.map((frame) => {
@@ -425,21 +425,26 @@ function collectPassEvidence(
         pending = undefined;
       }
       if (event.kind === "contact") {
-        if (pending?.wallImpactAtMs !== undefined) {
-          const elapsed = event.timestampMs - pending.wallImpactAtMs;
-          if (elapsed >= 200 && elapsed <= 4000) {
-            evidence.push(
-              Object.freeze({
-                kind: "complete" as const,
-                startedAtMs: pending.contact.timestampMs,
-                wallImpactAtMs: pending.wallImpactAtMs,
-                completedAtMs: event.timestampMs,
-                side: pending.contact.side,
-              }),
-            );
-            pending = undefined;
-            continue;
+        if (pending) {
+          if (pending.wallImpactAtMs !== undefined) {
+            const elapsed = event.timestampMs - pending.wallImpactAtMs;
+            if (elapsed >= 200 && elapsed <= 4000)
+              evidence.push(
+                Object.freeze({
+                  kind: "complete" as const,
+                  startedAtMs: pending.contact.timestampMs,
+                  wallImpactAtMs: pending.wallImpactAtMs,
+                  completedAtMs: event.timestampMs,
+                  side: pending.contact.side,
+                }),
+              );
+            else evidence.push(missedPass(pending.contact));
+          } else {
+            // A distinct contact before the next qualifying wall closes the
+            // first opportunity. It may itself begin the next one below.
+            evidence.push(missedPass(pending.contact));
           }
+          pending = undefined;
         }
         if (!pending && hasOutboundMotion(track, event.contact))
           pending = Object.freeze({ contact: event.contact });

@@ -39,11 +39,15 @@ export {
 } from "./transform.js";
 export {
   analyzeBatch,
+  analyzeOwnedRoboflowBenchmarkFrame,
   createDemoVisionProvider,
   createRoboflowVisionProvider,
+  ownedRoboflowBenchmarkFrameIdentity,
   VisionProviderError,
   type DemoFixtureSelection,
   type FrameTransformer,
+  type OwnedRoboflowBenchmarkFrame,
+  type OwnedRoboflowBenchmarkFrameIdentity,
   type ProviderFetch,
   type ProviderHttpResponse,
   type RoboflowVisionConfig,

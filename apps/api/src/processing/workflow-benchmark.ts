@@ -8,11 +8,14 @@ import {
   type WorkflowBenchmarkReceiptPayload,
 } from "@revelai/contracts";
 import {
+  analyzeOwnedRoboflowBenchmarkFrame,
   assertInferenceJpeg,
+  ownedRoboflowBenchmarkFrameIdentity,
   VerifiedVisionFrameRequestSchema,
   VisionBatchScheduler,
   WallPassFrameObservationSchema,
   type SchedulerClock,
+  type OwnedRoboflowBenchmarkFrame,
   type VerifiedVisionFrameRequest,
   type VisionProvider,
 } from "@revelai/vision";
@@ -145,39 +148,45 @@ export async function runWorkflowBenchmark(
   input: RunWorkflowBenchmarkInput,
 ): Promise<WorkflowBenchmarkReceipt> {
   const manifests = exactFive(input.manifests, "benchmark manifests");
+  const validatedJpegDigests = new Set<string>();
+  const sourceManifestDigests = manifests.map((manifest) =>
+    assertBenchmarkManifest(manifest, validatedJpegDigests),
+  );
+  if (new Set(sourceManifestDigests).size !== 5)
+    throw new Error("benchmark source manifest sets must be distinct");
   if (input.provider.verifiedProvenance.kind !== "roboflow")
     throw new Error("benchmark requires a configured Roboflow provider");
   const samples: number[] = [];
   const runs: CompletedBenchmarkRun[] = [];
   const receiptManifests: BenchmarkManifestIdentity[] = [];
-  const validatedJpegDigests = new Set<string>();
   for (const manifest of manifests) {
-    assertBenchmarkManifest(manifest, validatedJpegDigests);
     const batchStartedAt = input.clock.now();
-    const observations = await input.scheduler.run(
+    const ownedFrames = await input.scheduler.run(
       manifest.frames,
       async (request, signal) => {
         const dispatchedAt = input.clock.now();
-        const observation = await input.provider.analyzeVerified(
+        const owned = await analyzeOwnedRoboflowBenchmarkFrame(
+          input.provider,
           request,
           signal,
         );
         const duration = input.clock.now() - dispatchedAt;
         if (!Number.isFinite(duration) || duration < 0)
           throw new Error("invalid benchmark dispatch duration");
-        assertBenchmarkObservation(request, observation);
+        assertBenchmarkObservation(request, owned.observation);
+        assertOwnedBenchmarkFrame(request, owned);
         samples.push(duration);
-        return observation;
+        return owned;
       },
     );
     const batchDuration = input.clock.now() - batchStartedAt;
     if (!Number.isFinite(batchDuration) || batchDuration <= 0)
       throw new Error("invalid benchmark batch duration");
-    if (observations.length !== 640)
+    if (ownedFrames.length !== 640)
       throw new Error("benchmark batch did not complete every frame request");
     receiptManifests.push({
       id: manifest.id,
-      sha256: encodedManifestDigest(observations),
+      sha256: ownedEncodedManifestDigest(ownedFrames),
     });
     runs.push({
       manifestId: manifest.id,
@@ -189,6 +198,8 @@ export async function runWorkflowBenchmark(
     throw new Error(
       "benchmark did not capture every dispatch observation sample",
     );
+  if (new Set(receiptManifests.map((manifest) => manifest.sha256)).size !== 5)
+    throw new Error("benchmark encoded manifest sets must be distinct");
   const provenance = input.provider.verifiedProvenance;
   return createWorkflowBenchmarkReceipt({
     id: input.id(),
@@ -267,9 +278,10 @@ export function percentile95(samples: readonly number[]): number {
 function assertBenchmarkManifest(
   manifest: VerifiedBenchmarkManifest,
   validatedJpegDigests: Set<string>,
-): void {
+): string {
   if (manifest.frames.length !== 640)
     throw new Error("benchmark manifest must contain 640 frames");
+  const sourceHashes: string[] = [];
   for (const [index, request] of manifest.frames.entries()) {
     const parsed = VerifiedVisionFrameRequestSchema.parse(request);
     if (
@@ -279,6 +291,7 @@ function assertBenchmarkManifest(
     )
       throw new Error("benchmark frame must be 1280x720");
     const digest = createHash("sha256").update(parsed.frame.jpeg).digest("hex");
+    sourceHashes.push(digest);
     if (!validatedJpegDigests.has(digest)) {
       try {
         assertInferenceJpeg(parsed.frame.jpeg);
@@ -290,6 +303,7 @@ function assertBenchmarkManifest(
       validatedJpegDigests.add(digest);
     }
   }
+  return orderedFrameDigest(sourceHashes);
 }
 
 function assertBenchmarkObservation(
@@ -316,29 +330,42 @@ function assertBenchmarkObservation(
     throw new Error("benchmark observation transform does not match its frame");
 }
 
-function encodedManifestDigest(
-  observations: readonly Readonly<{
-    frameIndex: number;
-    inference?: Readonly<{ sha256: string }>;
-  }>[],
-): string {
-  if (
-    observations.length !== 640 ||
-    observations.some(
-      (observation, index) =>
-        observation.frameIndex !== index ||
-        !observation.inference ||
-        !/^[a-f0-9]{64}$/.test(observation.inference.sha256),
-    )
-  )
-    throw new Error("benchmark output is not an ordered encoded-frame set");
-  return createHash("sha256")
-    .update(
-      JSON.stringify(
-        observations.map((observation) => observation.inference!.sha256),
-      ),
-    )
+function assertOwnedBenchmarkFrame(
+  request: VerifiedVisionFrameRequest,
+  frame: OwnedRoboflowBenchmarkFrame,
+): void {
+  const identity = ownedRoboflowBenchmarkFrameIdentity(frame);
+  const sourceSha256 = createHash("sha256")
+    .update(request.frame.jpeg)
     .digest("hex");
+  if (
+    identity.frameIndex !== request.frame.index ||
+    identity.sourceSha256 !== sourceSha256 ||
+    identity.encodedSha256 !== frame.observation.inference?.sha256
+  )
+    throw new Error("benchmark owned encoded frame does not match its request");
+}
+
+function ownedEncodedManifestDigest(
+  frames: readonly OwnedRoboflowBenchmarkFrame[],
+): string {
+  if (frames.length !== 640)
+    throw new Error("benchmark output is not an ordered encoded-frame set");
+  const hashes = frames.map((frame, index) => {
+    const identity = ownedRoboflowBenchmarkFrameIdentity(frame);
+    if (
+      identity.frameIndex !== index ||
+      identity.encodedSha256 !== frame.observation.inference?.sha256 ||
+      !/^[a-f0-9]{64}$/.test(identity.encodedSha256)
+    )
+      throw new Error("benchmark output is not an ordered encoded-frame set");
+    return identity.encodedSha256;
+  });
+  return orderedFrameDigest(hashes);
+}
+
+function orderedFrameDigest(hashes: readonly string[]): string {
+  return createHash("sha256").update(JSON.stringify(hashes)).digest("hex");
 }
 
 function exactFive<T>(

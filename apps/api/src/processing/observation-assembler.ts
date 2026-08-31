@@ -19,13 +19,20 @@ export async function assembleFreeObservation(
     provider: VisionProvider;
     scheduler?: VisionBatchScheduler;
     generatedAt: string;
+    signal?: AbortSignal;
   }>,
 ): Promise<FreeInsight> {
   const requests = await extractionManifestToVisionRequests({
     manifest: input.manifest,
     frames: input.frames,
+    signal: input.signal,
   });
-  const batch = await analyzeBatch(input.provider, requests, input.scheduler);
+  const batch = await analyzeBatch(
+    input.provider,
+    requests,
+    input.scheduler,
+    input.signal,
+  );
   if (batch.kind !== "free-training")
     throw new Error("cross-kind observation batch");
   return assembleFreeInsight({ batch, generatedAt: input.generatedAt });
@@ -39,13 +46,20 @@ export async function assembleVerifiedObservation(
     scheduler?: VisionBatchScheduler;
     calibrationSessionId: string;
     calibrationNonce: string;
+    signal?: AbortSignal;
   }>,
 ): Promise<ReturnType<typeof assembleVerifiedEvidence>> {
   const requests = await extractionManifestToVisionRequests({
     manifest: input.manifest,
     frames: input.frames,
+    signal: input.signal,
   });
-  const batch = await analyzeBatch(input.provider, requests, input.scheduler);
+  const batch = await analyzeBatch(
+    input.provider,
+    requests,
+    input.scheduler,
+    input.signal,
+  );
   if (batch.kind !== "verified-wall-pass")
     throw new Error("cross-kind observation batch");
   return assembleVerifiedEvidence({

@@ -77,6 +77,35 @@ export type VisionProvider = Readonly<{
   verifiedProvenance: VerifiedAnalysisProvenance;
 }>;
 
+/**
+ * Opaque factory-owned receipt for the operator-only benchmark runner. Its
+ * identity is registered in a module-private WeakMap; a structural
+ * VisionProvider or caller-authored observation cannot manufacture one.
+ */
+export type OwnedRoboflowBenchmarkFrame = Readonly<{
+  observation: WallPassFrameObservation;
+}>;
+
+export type OwnedRoboflowBenchmarkFrameIdentity = Readonly<{
+  frameIndex: number;
+  sourceSha256: string;
+  encodedSha256: string;
+}>;
+
+type OwnedBenchmarkRunner = (
+  request: VerifiedVisionFrameRequest,
+  signal?: AbortSignal,
+) => Promise<OwnedRoboflowBenchmarkFrame>;
+
+const ownedBenchmarkRunners = new WeakMap<
+  VisionProvider,
+  OwnedBenchmarkRunner
+>();
+const ownedBenchmarkFrameIdentities = new WeakMap<
+  OwnedRoboflowBenchmarkFrame,
+  OwnedRoboflowBenchmarkFrameIdentity
+>();
+
 export type DemoFixtureSelection = Readonly<{
   free: "free-well-framed-active-v1" | "free-limited-ball-v1";
   verified: "wall-pass-balanced-v1" | "wall-pass-insufficient-v1";
@@ -140,15 +169,26 @@ export function createDemoVisionProvider(
           feet: [],
           fiducialCorners: [],
         });
-      const phase = frame.index % 7;
-      const ballY = [530, 530, 100, 10, 40, 530, 530][phase]!;
-      const contact = phase === 0 || phase === 1 || phase === 5 || phase === 6;
-      const feet = contact
-        ? [
-            pointAt(frame, "left", 515, ballY, 0.9),
-            pointAt(frame, "right", 550, ballY, 0.9),
-          ]
-        : [];
+      const activeIndex = frame.index - 40;
+      const active = activeIndex >= 0 && activeIndex < 600;
+      const phase = activeIndex >= 0 ? activeIndex % 5 : 0;
+      const contact =
+        active && activeIndex < 597 && (phase === 0 || phase === 1);
+      const ballY =
+        !active || activeIndex >= 597
+          ? undefined
+          : phase === 0 || phase === 1
+            ? 530
+            : phase === 2
+              ? 100
+              : phase === 3
+                ? 10
+                : 40;
+      const side = Math.floor(activeIndex / 5) % 2 === 0 ? "left" : "right";
+      const feet =
+        contact && ballY !== undefined
+          ? [pointAt(frame, side, 515, ballY, 0.9)]
+          : [];
       return WallPassFrameObservationSchema.parse({
         kind: "verified-wall-pass" as const,
         frameIndex: frame.index,
@@ -156,7 +196,18 @@ export function createDemoVisionProvider(
         sourceWidth: frame.sourceWidth,
         sourceHeight: frame.sourceHeight,
         athlete: boxAt(frame, 400, 100, 800, 650, 0.93),
-        ball: boxAt(frame, 500, Math.max(0, ballY - 15), 530, ballY, 0.88),
+        ...(ballY === undefined
+          ? {}
+          : {
+              ball: boxAt(
+                frame,
+                500,
+                Math.max(0, ballY - 15),
+                530,
+                ballY,
+                0.88,
+              ),
+            }),
         feet,
         fiducialCorners: calibratedCornerPoints(),
         wallFloorEdge: {
@@ -189,6 +240,7 @@ export function createRoboflowVisionProvider(
   }>,
 ): VisionProvider {
   const config = validateRoboflowConfig(input.config);
+  const validatedEncodedJpegs = new Set<string>();
   const freeProvenance = Object.freeze({
     kind: "roboflow" as const,
     workspaceId: config.workspaceId,
@@ -205,42 +257,93 @@ export function createRoboflowVisionProvider(
     modelBundleId: config.verifiedModelBundleId,
     providerVersion: config.verifiedProviderVersion,
   });
-  return Object.freeze({
+  const runFree = async (
+    inputRequest: FreeVisionFrameRequest,
+    signal?: AbortSignal,
+  ) => {
+    const request = FreeVisionFrameRequestSchema.parse(inputRequest);
+    const normalized = await runWorkflow({
+      request,
+      config,
+      fetch: input.fetch,
+      transformer: input.transformer ?? defaultFrameTransformer,
+      validatedEncodedJpegs,
+      signal,
+      workflowId: "revelai-free-training-v1",
+      modelBundleId: config.freeModelBundleId,
+      providerVersion: config.freeProviderVersion,
+    });
+    if (normalized.kind !== "free-training-v1")
+      throw new VisionProviderError("provider_output_invalid");
+    return normalized;
+  };
+  const runVerified = async (
+    inputRequest: VerifiedVisionFrameRequest,
+    signal?: AbortSignal,
+  ) => {
+    const request = VerifiedVisionFrameRequestSchema.parse(inputRequest);
+    const normalized = await runWorkflow({
+      request,
+      config,
+      fetch: input.fetch,
+      transformer: input.transformer ?? defaultFrameTransformer,
+      validatedEncodedJpegs,
+      signal,
+      workflowId: "revelai-wall-pass-geometry-v1",
+      modelBundleId: config.verifiedModelBundleId,
+      providerVersion: config.verifiedProviderVersion,
+    });
+    if (normalized.kind !== "wall-pass-geometry-v1")
+      throw new VisionProviderError("provider_output_invalid");
+    return normalized;
+  };
+  const provider: VisionProvider = {
     freeProvenance,
     verifiedProvenance,
     async analyzeFree(inputRequest, signal) {
-      const request = FreeVisionFrameRequestSchema.parse(inputRequest);
-      const normalized = await runWorkflow({
-        request,
-        config,
-        fetch: input.fetch,
-        transformer: input.transformer ?? defaultFrameTransformer,
-        signal,
-        workflowId: "revelai-free-training-v1",
-        modelBundleId: config.freeModelBundleId,
-        providerVersion: config.freeProviderVersion,
-      });
-      if (normalized.kind !== "free-training-v1")
-        throw new VisionProviderError("provider_output_invalid");
-      return normalized.observation;
+      return (await runFree(inputRequest, signal)).observation;
     },
     async analyzeVerified(inputRequest, signal) {
-      const request = VerifiedVisionFrameRequestSchema.parse(inputRequest);
-      const normalized = await runWorkflow({
-        request,
-        config,
-        fetch: input.fetch,
-        transformer: input.transformer ?? defaultFrameTransformer,
-        signal,
-        workflowId: "revelai-wall-pass-geometry-v1",
-        modelBundleId: config.verifiedModelBundleId,
-        providerVersion: config.verifiedProviderVersion,
-      });
-      if (normalized.kind !== "wall-pass-geometry-v1")
-        throw new VisionProviderError("provider_output_invalid");
-      return normalized.observation;
+      return (await runVerified(inputRequest, signal)).observation;
     },
+  };
+  const frozenProvider = Object.freeze(provider);
+  ownedBenchmarkRunners.set(frozenProvider, async (request, signal) => {
+    const normalized = await runVerified(request, signal);
+    const receipt: OwnedRoboflowBenchmarkFrame = Object.freeze({
+      observation: normalized.observation,
+    });
+    ownedBenchmarkFrameIdentities.set(
+      receipt,
+      Object.freeze({
+        frameIndex: request.frame.index,
+        sourceSha256: createHash("sha256")
+          .update(request.frame.jpeg)
+          .digest("hex"),
+        encodedSha256: normalized.encoded.sha256,
+      }),
+    );
+    return receipt;
   });
+  return frozenProvider;
+}
+
+export async function analyzeOwnedRoboflowBenchmarkFrame(
+  provider: VisionProvider,
+  request: VerifiedVisionFrameRequest,
+  signal?: AbortSignal,
+): Promise<OwnedRoboflowBenchmarkFrame> {
+  const runner = ownedBenchmarkRunners.get(provider);
+  if (!runner) throw new VisionProviderError("provider_output_invalid");
+  return runner(VerifiedVisionFrameRequestSchema.parse(request), signal);
+}
+
+export function ownedRoboflowBenchmarkFrameIdentity(
+  frame: OwnedRoboflowBenchmarkFrame,
+): OwnedRoboflowBenchmarkFrameIdentity {
+  const identity = ownedBenchmarkFrameIdentities.get(frame);
+  if (!identity) throw new VisionProviderError("provider_output_invalid");
+  return identity;
 }
 
 export class VisionProviderError extends Error {
@@ -259,6 +362,7 @@ export async function analyzeBatch(
   provider: VisionProvider,
   requests: readonly VisionFrameRequest[],
   scheduler: VisionBatchScheduler = new VisionBatchScheduler(),
+  signal?: AbortSignal,
 ): Promise<FreeVisionObservationBatch | VerifiedVisionObservationBatch> {
   const first = requests[0];
   if (!first) throw new VisionProviderError("provider_output_invalid");
@@ -271,29 +375,51 @@ export async function analyzeBatch(
   )
     throw new VisionProviderError("provider_output_invalid");
   if (first.kind === "free-training") {
-    const frames = await scheduler.run(requests, (request, signal) => {
-      const parsed = FreeVisionFrameRequestSchema.parse(request);
-      return provider.analyzeFree(parsed, signal);
-    });
+    const frames = await scheduler.run(
+      requests,
+      (request, requestSignal) => {
+        const parsed = FreeVisionFrameRequestSchema.parse(request);
+        return provider.analyzeFree(parsed, requestSignal);
+      },
+      signal,
+    );
     assertFrameCorrelation(requests, frames);
-    return FreeVisionObservationBatchSchema.parse({
+    return parseFreeObservationBatch({
       attemptId,
       kind: first.kind,
       frames,
       provenance: provider.freeProvenance,
     });
   }
-  const frames = await scheduler.run(requests, (request, signal) => {
-    const parsed = VerifiedVisionFrameRequestSchema.parse(request);
-    return provider.analyzeVerified(parsed, signal);
-  });
+  const frames = await scheduler.run(
+    requests,
+    (request, requestSignal) => {
+      const parsed = VerifiedVisionFrameRequestSchema.parse(request);
+      return provider.analyzeVerified(parsed, requestSignal);
+    },
+    signal,
+  );
   assertFrameCorrelation(requests, frames);
-  return VerifiedVisionObservationBatchSchema.parse({
+  return parseVerifiedObservationBatch({
     attemptId,
     kind: first.kind,
     frames,
     provenance: provider.verifiedProvenance,
   });
+}
+
+function parseFreeObservationBatch(input: unknown): FreeVisionObservationBatch {
+  const parsed = FreeVisionObservationBatchSchema.safeParse(input);
+  if (!parsed.success) throw new VisionProviderError("provider_output_invalid");
+  return parsed.data;
+}
+
+function parseVerifiedObservationBatch(
+  input: unknown,
+): VerifiedVisionObservationBatch {
+  const parsed = VerifiedVisionObservationBatchSchema.safeParse(input);
+  if (!parsed.success) throw new VisionProviderError("provider_output_invalid");
+  return parsed.data;
 }
 
 function assertFrameCorrelation(
@@ -328,6 +454,7 @@ function assertNotAborted(signal: AbortSignal): void {
 function assertEncodedInferenceFrame(
   encoded: EncodedInferenceFrame,
   expectedTransform: LetterboxTransform,
+  validatedEncodedJpegs: Set<string>,
 ): void {
   if (
     !encoded ||
@@ -338,11 +465,19 @@ function assertEncodedInferenceFrame(
     !sameLetterboxTransform(encoded.transform, expectedTransform)
   )
     throw new VisionProviderError("provider_output_invalid");
-  try {
-    assertInferenceJpeg(encoded.jpeg);
-  } catch {
-    throw new VisionProviderError("provider_output_invalid");
+  if (!validatedEncodedJpegs.has(encoded.sha256)) {
+    try {
+      assertInferenceJpeg(encoded.jpeg);
+    } catch {
+      throw new VisionProviderError("provider_output_invalid");
+    }
+    rememberValidatedJpeg(validatedEncodedJpegs, encoded.sha256);
   }
+}
+
+function rememberValidatedJpeg(cache: Set<string>, sha256: string): void {
+  cache.add(sha256);
+  if (cache.size > 128) cache.delete(cache.values().next().value!);
 }
 
 async function runWorkflow(
@@ -351,16 +486,22 @@ async function runWorkflow(
     config: Required<RoboflowVisionConfig>;
     fetch: ProviderFetch;
     transformer: FrameTransformer;
+    validatedEncodedJpegs: Set<string>;
     signal?: AbortSignal;
     workflowId: "revelai-free-training-v1" | "revelai-wall-pass-geometry-v1";
     modelBundleId: string;
     providerVersion: string;
   }>,
 ): Promise<
-  | Readonly<{ kind: "free-training-v1"; observation: FreeFrameObservation }>
+  | Readonly<{
+      kind: "free-training-v1";
+      observation: FreeFrameObservation;
+      encoded: EncodedInferenceFrame;
+    }>
   | Readonly<{
       kind: "wall-pass-geometry-v1";
       observation: WallPassFrameObservation;
+      encoded: EncodedInferenceFrame;
     }>
 > {
   const controller = new AbortController();
@@ -376,7 +517,11 @@ async function runWorkflow(
       controller.signal,
     );
     assertNotAborted(controller.signal);
-    assertEncodedInferenceFrame(encoded, transform);
+    assertEncodedInferenceFrame(
+      encoded,
+      transform,
+      input.validatedEncodedJpegs,
+    );
     const body = {
       ...(input.config.apiKey ? { api_key: input.config.apiKey } : {}),
       inputs: {
@@ -423,13 +568,25 @@ async function runWorkflow(
       output.workflow.providerVersion !== input.providerVersion
     )
       throw new VisionProviderError("provider_output_invalid");
-    return normalizeWorkflowOutput(input.request.frame, encoded, output);
+    return Object.freeze({
+      ...normalizeWorkflowOutput(input.request.frame, encoded, output),
+      encoded,
+    });
   } catch (error) {
     if (error instanceof VisionProviderError) throw error;
-    throw new VisionProviderError("provider_temporary_unavailable");
+    if (controller.signal.aborted || isRetryableTransportError(error))
+      throw new VisionProviderError("provider_temporary_unavailable");
+    throw new VisionProviderError("provider_output_invalid");
   } finally {
     input.signal?.removeEventListener("abort", abort);
   }
+}
+
+function isRetryableTransportError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code =
+    "code" in error && typeof error.code === "string" ? error.code : error.name;
+  return ["ECONNRESET", "ETIMEDOUT", "ECONNABORTED"].includes(code);
 }
 
 function normalizeWorkflowOutput(

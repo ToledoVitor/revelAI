@@ -2804,6 +2804,49 @@ describe("SQLiteAttemptRepository", () => {
     );
   });
 
+  it("fails closed and remains unreopenable for an uploaded-at-only near miss at every predecessor version", () => {
+    for (const version of [10, 11, 12] as const) {
+      const filename = join(
+        fixture.directory,
+        `invalid-c5-v${version}-uploaded-at-only.sqlite`,
+      );
+      const legacy = openSqliteDatabaseAtVersionForTest(filename, version);
+      const uploadedAt = fixture.clock.now();
+      legacy.raw
+        .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+        .run(ATHLETE_A, uploadedAt);
+      if (version === 12)
+        legacy.raw.exec(
+          "DROP TRIGGER attempts_media_json_requires_c5_transition; DROP TRIGGER attempts_media_json_insert_requires_c5_transition;",
+        );
+      legacy.raw
+        .prepare(
+          "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, created_at, updated_at) VALUES (?, ?, 'free', NULL, NULL, NULL, 'uploaded', 'active', ?, 1, ?, ?)",
+        )
+        .run(
+          ATTEMPT_A,
+          ATHLETE_A,
+          JSON.stringify({
+            id: "media-a",
+            contentType: "video/mp4",
+            bytes: 10,
+            uploadedAt,
+            deleteAt: "2030-01-16T11:00:00.000Z",
+          }),
+          uploadedAt,
+          uploadedAt,
+        );
+      legacy.close();
+
+      expect(() => openSqliteDatabase(filename)).toThrow(
+        "invalid legacy C5 media record",
+      );
+      expect(() => openSqliteDatabase(filename)).toThrow(
+        "invalid legacy C5 media record",
+      );
+    }
+  });
+
   it("rejects a v12 nested transition shape instead of reopening persisted corruption", () => {
     const filename = join(fixture.directory, "invalid-c5-v12.sqlite");
     const legacy = openSqliteDatabaseAtVersionForTest(filename, 12);

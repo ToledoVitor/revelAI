@@ -7,11 +7,20 @@ import {
   createRoboflowVisionProvider,
   VisionProviderError,
 } from "./providers.js";
+import { VisionBatchScheduler } from "./scheduler.js";
 import { assembleFreeInsight } from "./free-insight.js";
 import { assembleVerifiedEvidence } from "./verified-evidence.js";
 import type {
+  FreeVisionObservationBatch,
   FreeVisionFrameRequest,
+  VerifiedVisionObservationBatch,
   VerifiedVisionFrameRequest,
+  WorkflowEnvelope,
+} from "./types.js";
+import {
+  FreeVisionObservationBatchSchema,
+  VerifiedVisionObservationBatchSchema,
+  WorkflowEnvelopeSchema,
 } from "./types.js";
 import {
   createLetterboxTransform,
@@ -95,6 +104,151 @@ const invalidCrossKindFixture = {
 } satisfies FreeVisionFrameRequest;
 void invalidCrossKindFixture;
 
+const roboflowFreeBatchFixture = {
+  attemptId,
+  kind: "free-training",
+  frames: [
+    {
+      kind: "free-training",
+      frameIndex: 0,
+      timestampMs: 0,
+      sourceWidth: 1440,
+      sourceHeight: 1080,
+      inference: {
+        sha256: "a".repeat(64),
+        transform: {
+          sourceWidth: 1440,
+          sourceHeight: 1080,
+          inferenceWidth: 1280,
+          inferenceHeight: 720,
+          scale: 2 / 3,
+          scaledWidth: 960,
+          scaledHeight: 720,
+          padLeft: 160,
+          padTop: 0,
+        },
+      },
+    },
+  ],
+  provenance: {
+    kind: "roboflow",
+    workspaceId: "revelai",
+    workflowId: "revelai-free-training-v1",
+    workflowVersion: "1.0.0",
+    modelBundleId: "free-bundle-v1",
+    providerVersion: "provider-v1",
+  },
+} satisfies FreeVisionObservationBatch;
+void roboflowFreeBatchFixture;
+
+const demoFreeBatchFixture = {
+  attemptId,
+  kind: "free-training",
+  frames: [
+    {
+      kind: "free-training",
+      frameIndex: 0,
+      timestampMs: 0,
+      sourceWidth: 1440,
+      sourceHeight: 1080,
+    },
+  ],
+  provenance: {
+    kind: "demo",
+    fixtureId: "free-well-framed-active-v1",
+    providerVersion: "demo-observations-v1",
+  },
+} satisfies FreeVisionObservationBatch;
+void demoFreeBatchFixture;
+
+const invalidCrossBranchBatchFixture = {
+  ...demoFreeBatchFixture,
+  provenance: {
+    kind: "roboflow" as const,
+    workspaceId: "revelai",
+    workflowId: "revelai-wall-pass-geometry-v1" as const,
+    workflowVersion: "1.0.0" as const,
+    modelBundleId: "verified-bundle-v1",
+    providerVersion: "provider-v1",
+  },
+};
+const invalidCrossBranchBatchCorrelationFixture =
+  // @ts-expect-error Free batches cannot carry verified workflow provenance.
+  invalidCrossBranchBatchFixture satisfies FreeVisionObservationBatch;
+void invalidCrossBranchBatchCorrelationFixture;
+
+const invalidRoboflowBatchFixture = {
+  attemptId,
+  kind: "verified-wall-pass" as const,
+  frames: [
+    {
+      kind: "verified-wall-pass" as const,
+      frameIndex: 0,
+      timestampMs: 0,
+      sourceWidth: 1440,
+      sourceHeight: 1080,
+      feet: [],
+      fiducialCorners: [],
+    },
+  ],
+  provenance: {
+    kind: "roboflow" as const,
+    workspaceId: "revelai",
+    workflowId: "revelai-wall-pass-geometry-v1" as const,
+    workflowVersion: "1.0.0" as const,
+    modelBundleId: "verified-bundle-v1",
+    providerVersion: "provider-v1",
+  },
+};
+const invalidRoboflowBatchCorrelationFixture =
+  // @ts-expect-error Roboflow batches require every frame to bind exact inference bytes.
+  invalidRoboflowBatchFixture satisfies VerifiedVisionObservationBatch;
+void invalidRoboflowBatchFixture;
+void invalidRoboflowBatchCorrelationFixture;
+
+const freeWorkflowCorrelationFixture = {
+  outputs: [
+    {
+      kind: "free-training-v1",
+      image: {
+        width: 1280,
+        height: 720,
+        coordinateSystem: "inference_pixels",
+      },
+      workflow: {
+        id: "revelai-free-training-v1",
+        version: "1.0.0",
+        modelBundleId: "free-bundle-v1",
+        providerVersion: "provider-v1",
+      },
+      detections: [],
+    },
+  ],
+} satisfies WorkflowEnvelope;
+void freeWorkflowCorrelationFixture;
+
+const invalidWorkflowCorrelationFixture = {
+  outputs: [
+    // @ts-expect-error Free output requires the Free workflow ID.
+    {
+      kind: "free-training-v1" as const,
+      image: {
+        width: 1280 as const,
+        height: 720 as const,
+        coordinateSystem: "inference_pixels" as const,
+      },
+      workflow: {
+        id: "revelai-wall-pass-geometry-v1",
+        version: "1.0.0" as const,
+        modelBundleId: "free-bundle-v1",
+        providerVersion: "provider-v1",
+      },
+      detections: [],
+    },
+  ],
+} satisfies WorkflowEnvelope;
+void invalidWorkflowCorrelationFixture;
+
 function verifiedWorkflowOutput(overrides: Record<string, unknown> = {}) {
   return {
     kind: "wall-pass-geometry-v1",
@@ -155,6 +309,62 @@ describe("vision providers", () => {
     expect(verifiedCorrelationFixture.kind).toBe("verified-wall-pass");
   });
 
+  it("correlates Roboflow provenance to exact per-frame inference bindings", () => {
+    expect(
+      FreeVisionObservationBatchSchema.safeParse(roboflowFreeBatchFixture)
+        .success,
+    ).toBe(true);
+    for (const invalid of [
+      {
+        ...roboflowFreeBatchFixture,
+        frames: roboflowFreeBatchFixture.frames.map((frame) => ({
+          kind: frame.kind,
+          frameIndex: frame.frameIndex,
+          timestampMs: frame.timestampMs,
+          sourceWidth: frame.sourceWidth,
+          sourceHeight: frame.sourceHeight,
+        })),
+      },
+      {
+        ...roboflowFreeBatchFixture,
+        frames: roboflowFreeBatchFixture.frames.map((frame) => ({
+          ...frame,
+          inference: {
+            ...frame.inference,
+            transform: { ...frame.inference.transform, padLeft: 159 },
+          },
+        })),
+      },
+      invalidCrossBranchBatchFixture,
+    ])
+      expect(FreeVisionObservationBatchSchema.safeParse(invalid).success).toBe(
+        false,
+      );
+    expect(
+      WorkflowEnvelopeSchema.safeParse(freeWorkflowCorrelationFixture).success,
+    ).toBe(true);
+    expect(
+      WorkflowEnvelopeSchema.safeParse(invalidWorkflowCorrelationFixture)
+        .success,
+    ).toBe(false);
+    expect(
+      VerifiedVisionObservationBatchSchema.safeParse({
+        ...invalidRoboflowBatchFixture,
+        provenance: {
+          kind: "demo",
+          fixtureId: "wall-pass-balanced-v1",
+          providerVersion: "demo-observations-v1",
+        },
+        frames: [
+          {
+            ...invalidRoboflowBatchFixture.frames[0],
+            inference: roboflowFreeBatchFixture.frames[0]!.inference,
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
   it("rejects a mixed Free/verified request array before any provider dispatch", async () => {
     const provider = createDemoVisionProvider();
     await expect(
@@ -201,9 +411,17 @@ describe("vision providers", () => {
     });
     expect(evidence.selectedReferenceFrameIndex).toBe(0);
     expect(evidence.activeStableCount).toBe(600);
-    expect(evidence.passEvidence).toContainEqual(
-      expect.objectContaining({ kind: "complete" }),
+    expect(evidence.wallImpacts).toHaveLength(119);
+    const completedPasses = evidence.passEvidence.filter(
+      (pass) => pass.kind === "complete",
     );
+    expect(completedPasses).toHaveLength(119);
+    expect(completedPasses.filter((pass) => pass.side === "left")).toHaveLength(
+      60,
+    );
+    expect(
+      completedPasses.filter((pass) => pass.side === "right"),
+    ).toHaveLength(59);
 
     const insufficient = createDemoVisionProvider({
       free: "free-limited-ball-v1",
@@ -544,6 +762,99 @@ describe("vision providers", () => {
     await expect(provider.analyzeFree(freeRequest())).rejects.toMatchObject({
       code: "provider_output_invalid",
     });
+  });
+
+  it("does not retry an ordinary fetch programming error as a network outage", async () => {
+    let fetches = 0;
+    const sleeps: number[] = [];
+    const provider = createRoboflowVisionProvider({
+      config: {
+        apiUrl: "http://127.0.0.1:9001",
+        workspaceId: "revelai",
+        freeModelBundleId: "free-bundle-v1",
+        verifiedModelBundleId: "verified-bundle-v1",
+        freeProviderVersion: "provider-v1",
+        verifiedProviderVersion: "provider-v1",
+      },
+      fetch: async () => {
+        fetches += 1;
+        throw new Error("fixture programming error");
+      },
+    });
+    const scheduler = new VisionBatchScheduler({
+      clock: {
+        now: () => 0,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds);
+        },
+        schedule: () => () => undefined,
+      },
+    });
+    await expect(
+      analyzeBatch(provider, [freeRequest()], scheduler),
+    ).rejects.toMatchObject({ code: "provider_output_invalid" });
+    expect(fetches).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("retries only an exact configured transport code through batch scheduling", async () => {
+    let fetches = 0;
+    const sleeps: number[] = [];
+    const provider = createRoboflowVisionProvider({
+      config: {
+        apiUrl: "http://127.0.0.1:9001",
+        workspaceId: "revelai",
+        freeModelBundleId: "free-bundle-v1",
+        verifiedModelBundleId: "verified-bundle-v1",
+        freeProviderVersion: "provider-v1",
+        verifiedProviderVersion: "provider-v1",
+      },
+      fetch: async () => {
+        fetches += 1;
+        const error = Object.assign(new Error("connection reset"), {
+          code: "ECONNRESET",
+        });
+        throw error;
+      },
+    });
+    const scheduler = new VisionBatchScheduler({
+      clock: {
+        now: () => 0,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds);
+        },
+        schedule: () => () => undefined,
+      },
+    });
+    await expect(
+      analyzeBatch(provider, [freeRequest()], scheduler),
+    ).rejects.toMatchObject({ code: "provider_temporary_unavailable" });
+    expect(fetches).toBe(3);
+    expect(sleeps).toEqual([250, 1000]);
+  });
+
+  it("does not retry an unlisted HTTP status through batch scheduling", async () => {
+    let fetches = 0;
+    const provider = createRoboflowVisionProvider({
+      config: {
+        apiUrl: "http://127.0.0.1:9001",
+        workspaceId: "revelai",
+        freeModelBundleId: "free-bundle-v1",
+        verifiedModelBundleId: "verified-bundle-v1",
+        freeProviderVersion: "provider-v1",
+        verifiedProviderVersion: "provider-v1",
+      },
+      fetch: async () => {
+        fetches += 1;
+        return { status: 400, json: async () => ({}) };
+      },
+    });
+    await expect(analyzeBatch(provider, [freeRequest()])).rejects.toMatchObject(
+      {
+        code: "provider_output_invalid",
+      },
+    );
+    expect(fetches).toBe(1);
   });
 
   it("never starts fetch when external cancellation wins while a transform is pending", async () => {

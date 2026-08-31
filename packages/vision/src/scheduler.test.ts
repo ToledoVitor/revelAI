@@ -41,13 +41,17 @@ describe("VisionBatchScheduler", () => {
   it("retries temporary provider failures only at the exact bounded count", async () => {
     let calls = 0;
     const sleeps: number[] = [];
+    const timers: number[] = [];
     const scheduler = new VisionBatchScheduler({
       clock: {
         now: () => 0,
         sleep: async (milliseconds) => {
           sleeps.push(milliseconds);
         },
-        schedule: () => () => undefined,
+        schedule: (milliseconds) => {
+          timers.push(milliseconds);
+          return () => undefined;
+        },
       },
     });
     const result = await scheduler.run(["frame"], async () => {
@@ -60,7 +64,7 @@ describe("VisionBatchScheduler", () => {
     expect(sleeps.filter((milliseconds) => milliseconds !== 8000)).toEqual([
       250, 1000,
     ]);
-    expect(sleeps.filter((milliseconds) => milliseconds === 8000)).toHaveLength(
+    expect(timers.filter((milliseconds) => milliseconds === 8000)).toHaveLength(
       3,
     );
     expect(result).toEqual(["ok"]);
@@ -86,6 +90,7 @@ describe("VisionBatchScheduler", () => {
 
   it("aborts an 8-second request timeout and applies only the two exact retries", async () => {
     const sleeps: number[] = [];
+    const requestTimeouts: Array<() => void> = [];
     let calls = 0;
     const scheduler = new VisionBatchScheduler({
       clock: {
@@ -93,12 +98,16 @@ describe("VisionBatchScheduler", () => {
         sleep: async (milliseconds) => {
           sleeps.push(milliseconds);
         },
-        schedule: () => () => undefined,
+        schedule: (milliseconds, callback) => {
+          if (milliseconds === 8000) requestTimeouts.push(callback);
+          return () => undefined;
+        },
       },
     });
     await expect(
       scheduler.run(["frame"], async (_item, signal) => {
         calls += 1;
+        queueMicrotask(() => requestTimeouts.at(-1)?.());
         return new Promise<string>((_resolve, reject) => {
           signal.addEventListener("abort", () => reject(new Error("timeout")), {
             once: true,
@@ -107,12 +116,24 @@ describe("VisionBatchScheduler", () => {
       }),
     ).rejects.toMatchObject({ code: "provider_temporary_unavailable" });
     expect(calls).toBe(3);
-    expect(sleeps.filter((milliseconds) => milliseconds === 8000)).toHaveLength(
-      3,
-    );
-    expect(sleeps.filter((milliseconds) => milliseconds !== 8000)).toEqual([
-      250, 1000,
-    ]);
+    expect(sleeps).toEqual([250, 1000]);
+  });
+
+  it("arms the eight-second boundary before synchronous dispatch work begins", async () => {
+    let now = 0;
+    const scheduler = new VisionBatchScheduler({
+      clock: {
+        now: () => now,
+        sleep: async () => undefined,
+        schedule: () => () => undefined,
+      },
+    });
+    await expect(
+      scheduler.run(["frame"], () => {
+        now += 8001;
+        return Promise.resolve("late");
+      }),
+    ).rejects.toMatchObject({ code: "provider_temporary_unavailable" });
   });
 
   it("uses one external cancellation boundary, settles workers, and never dispatches queued frames", async () => {
@@ -148,16 +169,16 @@ describe("VisionBatchScheduler", () => {
   });
 
   it("arms exactly one absolute 180-second deadline for a complete batch", async () => {
-    let deadlineMs: number | undefined;
-    let triggerDeadline: (() => void) | undefined;
+    const scheduled: number[] = [];
+    let triggerBatchDeadline: (() => void) | undefined;
     let cancelled = 0;
     const scheduler = new VisionBatchScheduler({
       clock: {
         now: () => 0,
         sleep: async () => undefined,
         schedule: (milliseconds, callback) => {
-          deadlineMs = milliseconds;
-          triggerDeadline = callback;
+          scheduled.push(milliseconds);
+          if (milliseconds === 180_000) triggerBatchDeadline = callback;
           return () => {
             cancelled += 1;
           };
@@ -176,11 +197,14 @@ describe("VisionBatchScheduler", () => {
         }),
     );
     await Promise.resolve();
-    expect(deadlineMs).toBe(180_000);
-    triggerDeadline?.();
+    expect(
+      scheduled.filter((milliseconds) => milliseconds === 180_000),
+    ).toHaveLength(1);
+    expect(scheduled).toContain(8000);
+    triggerBatchDeadline?.();
     await expect(running).rejects.toMatchObject({
       code: "provider_temporary_unavailable",
     });
-    expect(cancelled).toBe(1);
+    expect(cancelled).toBe(2);
   });
 });
