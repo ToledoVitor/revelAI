@@ -576,7 +576,7 @@ function isJpeg(bytes: Uint8Array): boolean {
     } else if (marker === 0xc4) {
       if (!parseHuffmanTables(bytes, segmentStart, segmentEnd, huffmanTables))
         return false;
-    } else if (isStartOfFrame(marker)) {
+    } else if (marker === 0xc0) {
       if (
         sawSof ||
         !parseStartOfFrame(
@@ -625,9 +625,13 @@ function parseQuantizationTables(
     if (table === undefined) return false;
     const precision = table >>> 4;
     const id = table & 0x0f;
-    if (precision > 1 || id > 3 || tables.has(id)) return false;
-    const values = precision === 0 ? 64 : 128;
+    // FFmpeg frame evidence is deliberately restricted to baseline 8-bit
+    // JPEG: 8-bit DQT values only, each non-zero, and a unique table ID.
+    if (precision !== 0 || id > 3 || tables.has(id)) return false;
+    const values = 64;
     if (cursor + values > end) return false;
+    for (let index = 0; index < values; index += 1)
+      if (bytes[cursor + index] === 0) return false;
     cursor += values;
     tables.add(id);
   }
@@ -650,8 +654,26 @@ function parseHuffmanTables(
     const key = `${tableClass}:${id}`;
     if (tableClass > 1 || id > 3 || tables.has(key)) return false;
     let symbols = 0;
-    for (let index = 0; index < 16; index += 1) symbols += bytes[cursor++]!;
+    let availableCodes = 1;
+    for (let index = 0; index < 16; index += 1) {
+      const count = bytes[cursor++]!;
+      symbols += count;
+      availableCodes = availableCodes * 2 - count;
+      // Negative capacity is an oversubscribed canonical prefix tree.
+      if (availableCodes < 0) return false;
+    }
     if (symbols < 1 || cursor + symbols > end) return false;
+    const seenSymbols = new Set<number>();
+    for (let index = 0; index < symbols; index += 1) {
+      const symbol = bytes[cursor + index];
+      if (
+        symbol === undefined ||
+        seenSymbols.has(symbol) ||
+        !isBaselineHuffmanSymbol(tableClass, symbol)
+      )
+        return false;
+      seenSymbols.add(symbol);
+    }
     cursor += symbols;
     tables.add(key);
   }
@@ -672,8 +694,7 @@ function parseStartOfFrame(
   const count = bytes[start + 5];
   if (
     precision === undefined ||
-    precision < 2 ||
-    precision > 16 ||
+    precision !== 8 ||
     height === 0 ||
     width === 0 ||
     count === undefined ||
@@ -692,6 +713,10 @@ function parseStartOfFrame(
       id === 0 ||
       sampling === undefined ||
       sampling === 0 ||
+      sampling >>> 4 === 0 ||
+      (sampling & 0x0f) === 0 ||
+      sampling >>> 4 > 4 ||
+      (sampling & 0x0f) > 4 ||
       quantizationId === undefined ||
       !quantizationTables.has(quantizationId) ||
       components.has(id)
@@ -713,7 +738,7 @@ function parseStartOfScan(
   if (
     count === undefined ||
     count < 1 ||
-    count > components.size ||
+    count !== components.size ||
     segmentLength !== 6 + 2 * count
   )
     return false;
@@ -746,8 +771,9 @@ function parseStartOfScan(
     spectralStart !== undefined &&
     spectralEnd !== undefined &&
     approximation !== undefined &&
-    spectralStart <= spectralEnd &&
-    approximation <= 0x0f
+    spectralStart === 0 &&
+    spectralEnd === 63 &&
+    approximation === 0
   );
 }
 
@@ -775,11 +801,11 @@ function hasOneBoundedEntropyScan(bytes: Uint8Array, start: number): boolean {
   return false;
 }
 
-function isStartOfFrame(marker: number): boolean {
-  return (
-    (marker >= 0xc0 && marker <= 0xc3) ||
-    (marker >= 0xc5 && marker <= 0xc7) ||
-    (marker >= 0xc9 && marker <= 0xcb) ||
-    (marker >= 0xcd && marker <= 0xcf)
-  );
+function isBaselineHuffmanSymbol(tableClass: number, symbol: number): boolean {
+  if (tableClass === 0) return symbol <= 11;
+  const run = symbol >>> 4;
+  const size = symbol & 0x0f;
+  if (size > 10) return false;
+  // Baseline AC permits EOB (0x00), ZRL (0xf0), and non-zero magnitudes.
+  return size !== 0 || run === 0 || run === 15;
 }

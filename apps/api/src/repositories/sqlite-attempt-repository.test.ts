@@ -2732,7 +2732,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 12 });
+    ).toMatchObject({ count: 13 });
     reopened.close();
     upgraded.close();
   });
@@ -2773,6 +2773,45 @@ describe("SQLiteAttemptRepository", () => {
     );
   });
 
+  it("rejects a v12 nested transition shape instead of reopening persisted corruption", () => {
+    const filename = join(fixture.directory, "invalid-c5-v12.sqlite");
+    const legacy = openSqliteDatabaseAtVersionForTest(filename, 12);
+    const uploadedAt = fixture.clock.now();
+    legacy.raw
+      .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+      .run(ATHLETE_A, uploadedAt);
+    // v12's top-level trigger admits this nested extra. The following
+    // migration must fail closed rather than leave a parser-invalid row.
+    legacy.raw
+      .prepare(
+        "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, created_at, updated_at) VALUES (?, ?, 'free', NULL, NULL, NULL, 'uploaded', 'active', ?, 1, ?, ?)",
+      )
+      .run(
+        ATTEMPT_A,
+        ATHLETE_A,
+        JSON.stringify({
+          id: "media-a",
+          contentType: "video/mp4",
+          bytes: 10,
+          uploadedAt,
+          deleteAt: "2030-01-16T11:00:00.000Z",
+          transition: {
+            kind: "upload-transition",
+            resourceId: "media-a",
+            deleteAt: "2030-01-15T13:00:00.000Z",
+            unexpected: true,
+          },
+        }),
+        uploadedAt,
+        uploadedAt,
+      );
+    legacy.close();
+
+    expect(() => openSqliteDatabase(filename)).toThrow(
+      "invalid legacy C5 media record",
+    );
+  });
+
   it("enforces canonical C5 media identity and deadlines on both direct INSERT and UPDATE", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
@@ -2796,6 +2835,10 @@ describe("SQLiteAttemptRepository", () => {
       {
         ...canonical,
         transition: { ...canonical.transition, resourceId: "media-other" },
+      },
+      {
+        ...canonical,
+        transition: { ...canonical.transition, unexpected: true },
       },
       { ...canonical, deleteAt: "2030-01-16T10:59:59.000Z" },
       {
@@ -3030,7 +3073,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 12 });
+    ).toMatchObject({ count: 13 });
     reopened.close();
     upgraded.close();
   });
@@ -3108,7 +3151,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 12 });
+    ).toMatchObject({ count: 13 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -3259,7 +3302,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 12 });
+    ).toMatchObject({ count: 13 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);

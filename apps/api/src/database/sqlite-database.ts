@@ -571,6 +571,30 @@ const migrations: readonly Migration[] = [
       DROP TRIGGER IF EXISTS attempts_media_json_requires_c5_transition;
       CREATE TRIGGER attempts_media_json_requires_c5_transition
       BEFORE UPDATE OF media_json ON attempts
+      WHEN NEW.media_json IS NOT NULL AND (${invalidC5MediaV12Sql("NEW.media_json")})
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid C5 media transition');
+      END;
+
+      CREATE TRIGGER attempts_media_json_insert_requires_c5_transition
+      BEFORE INSERT ON attempts
+      WHEN NEW.media_json IS NOT NULL AND (${invalidC5MediaV12Sql("NEW.media_json")})
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid C5 media transition');
+      END;
+    `,
+    afterApply: canonicalizeAllStoredMedia,
+  },
+  {
+    // v12 guarded the six top-level fields but could still admit a nested
+    // transition extra which the repository would later reject. v13 closes
+    // both INSERT and UPDATE and only projects named, historical predecessors.
+    version: 13,
+    sql: `
+      DROP TRIGGER IF EXISTS attempts_media_json_requires_c5_transition;
+      DROP TRIGGER IF EXISTS attempts_media_json_insert_requires_c5_transition;
+      CREATE TRIGGER attempts_media_json_requires_c5_transition
+      BEFORE UPDATE OF media_json ON attempts
       WHEN NEW.media_json IS NOT NULL AND (${invalidC5MediaSql("NEW.media_json")})
       BEGIN
         SELECT RAISE(ABORT, 'invalid C5 media transition');
@@ -583,7 +607,7 @@ const migrations: readonly Migration[] = [
         SELECT RAISE(ABORT, 'invalid C5 media transition');
       END;
     `,
-    afterApply: canonicalizeAllStoredMedia,
+    afterApply: canonicalizeStoredMediaV13,
   },
 ];
 
@@ -695,6 +719,71 @@ function canonicalizeAllStoredMedia(raw: Database.Database): void {
     const canonical = canonicalizeStoredMediaV12(row.media_json);
     update.run(canonical, row.id);
   }
+}
+
+/**
+ * v13 accepts only exact named predecessor rows. In particular, an arbitrary
+ * five-field object cannot be upgraded by inventing an upload transition.
+ */
+function canonicalizeStoredMediaV13(raw: Database.Database): void {
+  const rows = raw
+    .prepare("SELECT id, media_json FROM attempts WHERE media_json IS NOT NULL")
+    .all() as readonly Readonly<{ id: string; media_json: string }>[];
+  const update = raw.prepare("UPDATE attempts SET media_json = ? WHERE id = ?");
+  for (const row of rows) {
+    const canonical = canonicalizeStoredMediaV13Value(row.media_json);
+    if (canonical !== row.media_json) update.run(canonical, row.id);
+  }
+}
+
+function canonicalizeStoredMediaV13Value(value: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("invalid legacy C5 media record");
+  }
+  if (!isPlainRecord(parsed)) throw new Error("invalid legacy C5 media record");
+  const keys = Object.keys(parsed).sort();
+  const exact = (...expected: readonly string[]): boolean =>
+    keys.length === expected.length &&
+    keys.every((key, index) => key === [...expected].sort()[index]);
+
+  // Canonical C5 attachment and two persisted v11 predecessor forms are the
+  // complete, explicit upgrade vocabulary. All routes yield the same strict
+  // projection; unknown five-field JSON fails within the migration transaction.
+  if (
+    exact(
+      "id",
+      "contentType",
+      "bytes",
+      "uploadedAt",
+      "deleteAt",
+      "transition",
+    ) ||
+    exact(
+      "id",
+      "contentType",
+      "bytes",
+      "uploadedAt",
+      "deleteAt",
+      "transitionResourceId",
+    ) ||
+    exact(
+      "id",
+      "contentType",
+      "bytes",
+      "uploadedAt",
+      "deleteAt",
+      "sha256",
+      "probe",
+      "manifest",
+      "transition",
+    )
+  )
+    return canonicalizeStoredMediaV12(value);
+
+  throw new Error("invalid legacy C5 media record");
 }
 
 function canonicalizeLegacyMedia(value: string): string {
@@ -853,6 +942,18 @@ function isCanonicalIso(value: string): boolean {
 
 /** SQLite equivalent of the repository's exact six-field media contract. */
 function invalidC5MediaSql(column: string): string {
+  return invalidC5MediaSqlWithTransitionKeys(column, true);
+}
+
+/** Historical v12 trigger shape, retained only for real upgrade fixtures. */
+function invalidC5MediaV12Sql(column: string): string {
+  return invalidC5MediaSqlWithTransitionKeys(column, false);
+}
+
+function invalidC5MediaSqlWithTransitionKeys(
+  column: string,
+  requireExactTransitionKeys: boolean,
+): string {
   return `
     CASE
     WHEN json_valid(${column}) = 0 THEN 1
@@ -872,6 +973,15 @@ function invalidC5MediaSql(column: string): string {
       OR json_type(${column}, '$.uploadedAt') IS NOT 'text'
       OR json_type(${column}, '$.deleteAt') IS NOT 'text'
       OR json_type(${column}, '$.transition') IS NOT 'object'
+      ${
+        requireExactTransitionKeys
+          ? `OR (SELECT COUNT(*) FROM json_each(${column}, '$.transition')) != 3
+      OR EXISTS (
+        SELECT 1 FROM json_each(${column}, '$.transition')
+        WHERE key NOT IN ('kind', 'resourceId', 'deleteAt')
+      )`
+          : ""
+      }
       OR json_extract(${column}, '$.transition.kind') IS NOT 'upload-transition'
       OR json_type(${column}, '$.transition.resourceId') IS NOT 'text'
       OR json_type(${column}, '$.transition.deleteAt') IS NOT 'text'
