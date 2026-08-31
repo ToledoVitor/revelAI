@@ -27,7 +27,12 @@ import {
   type Clock,
   type IdGenerator,
 } from "./sqlite-attempt-repository.js";
-import type { StoredMedia, TerminalCandidate } from "./attempt-repository.js";
+import {
+  createStoredMediaAttachment,
+  type StoredMedia,
+  type StoredMediaAttachment,
+  type TerminalCandidate,
+} from "./attempt-repository.js";
 import { SQLiteCompetitivePolicyRepository } from "./sqlite-competitive-policy-repository.js";
 
 const ATHLETE_A = "11111111-1111-4111-8111-111111111111";
@@ -507,7 +512,10 @@ async function attachMedia(
       "INSERT INTO retention_cleanup_records (resource_id, attempt_id, resource_kind, delete_at, created_at) VALUES (?, ?, 'temporary', ?, ?)",
     )
     .run(media.id, input.attemptId, media.transition.deleteAt, uploadedAt);
-  return fixture.repository.attachValidatedMedia({ ...input, media });
+  return fixture.repository.attachValidatedMedia({
+    ...input,
+    media: createStoredMediaAttachment(media),
+  });
 }
 
 describe("SQLiteAttemptRepository", () => {
@@ -816,7 +824,7 @@ describe("SQLiteAttemptRepository", () => {
           contentType: "video/mp4",
           bytes: 10,
           deleteAt: "2040-01-01T00:00:00.000Z",
-        } as unknown as StoredMedia,
+        } as unknown as StoredMediaAttachment,
       }),
     ).rejects.toMatchObject({ code: "invalid_input" });
     await expect(
@@ -834,7 +842,7 @@ describe("SQLiteAttemptRepository", () => {
             resourceId: "media-a",
             deleteAt: "2030-01-15T13:00:00.000Z",
           },
-        },
+        } as unknown as StoredMediaAttachment,
       }),
     ).rejects.toMatchObject({ code: "invalid_input" });
     await expect(
@@ -852,7 +860,7 @@ describe("SQLiteAttemptRepository", () => {
             resourceId: "media-b",
             deleteAt: "2030-01-15T13:00:00.000Z",
           },
-        },
+        } as unknown as StoredMediaAttachment,
       }),
     ).rejects.toMatchObject({ code: "invalid_input" });
     expect(
@@ -2620,6 +2628,222 @@ describe("SQLiteAttemptRepository", () => {
     ).toMatchObject({ id: ATTEMPT_A });
   });
 
+  it("projects every valid pre-v12 C5 attachment shape during repeated reopen", async () => {
+    const filename = join(fixture.directory, "legacy-c5-v10.sqlite");
+    const legacy = openSqliteDatabaseAtVersionForTest(filename, 10);
+    const uploadedAt = fixture.clock.now();
+    const deleteAt = "2030-01-16T11:00:00.000Z";
+    const temporaryDeleteAt = "2030-01-15T13:00:00.000Z";
+    legacy.raw
+      .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+      .run(ATHLETE_A, uploadedAt);
+    const insert = legacy.raw.prepare(
+      "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, created_at, updated_at) VALUES (?, ?, 'free', NULL, NULL, NULL, 'uploaded', 'active', ?, 1, ?, ?)",
+    );
+    const transitionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const richId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const canonicalId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    insert.run(
+      ATTEMPT_A,
+      ATHLETE_A,
+      JSON.stringify({
+        id: transitionId,
+        contentType: "video/mp4",
+        bytes: 10,
+        uploadedAt,
+        deleteAt,
+        transitionResourceId: transitionId,
+      }),
+      uploadedAt,
+      uploadedAt,
+    );
+    insert.run(
+      ATTEMPT_B,
+      ATHLETE_A,
+      JSON.stringify({
+        id: richId,
+        contentType: "video/mp4",
+        bytes: 11,
+        uploadedAt,
+        deleteAt,
+        sha256: "a".repeat(64),
+        probe: { container: "mp4" },
+        manifest: { extractionVersion: "c5" },
+        transition: {
+          kind: "upload-transition",
+          resourceId: richId,
+          deleteAt: temporaryDeleteAt,
+        },
+      }),
+      uploadedAt,
+      uploadedAt,
+    );
+    insert.run(
+      ATTEMPT_C,
+      ATHLETE_A,
+      JSON.stringify({
+        id: canonicalId,
+        contentType: "video/mp4",
+        bytes: 12,
+        uploadedAt,
+        deleteAt,
+        transition: {
+          kind: "upload-transition",
+          resourceId: canonicalId,
+          deleteAt: temporaryDeleteAt,
+        },
+      }),
+      uploadedAt,
+      uploadedAt,
+    );
+    legacy.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    const repository = new SQLiteAttemptRepository({
+      database: upgraded,
+      clock: fixture.clock,
+      ids: new TestIds(LEASE_A),
+    });
+    for (const [attemptId, mediaId] of [
+      [ATTEMPT_A, transitionId],
+      [ATTEMPT_B, richId],
+      [ATTEMPT_C, canonicalId],
+    ] as const) {
+      await expect(
+        repository.getAttempt({ attemptId, athleteId: ATHLETE_A }),
+      ).resolves.toMatchObject({
+        media: {
+          id: mediaId,
+          uploadedAt,
+          deleteAt,
+          transition: { resourceId: mediaId, deleteAt: temporaryDeleteAt },
+        },
+      });
+      expect(
+        upgraded.raw
+          .prepare("SELECT media_json FROM attempts WHERE id = ?")
+          .get(attemptId),
+      ).toMatchObject({
+        media_json: expect.not.stringContaining("sha256"),
+      });
+    }
+    const reopened = upgraded.reopen();
+    expect(
+      reopened.raw
+        .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+        .get(),
+    ).toMatchObject({ count: 12 });
+    reopened.close();
+    upgraded.close();
+  });
+
+  it("fails startup rather than marking conflicting legacy C5 media as migrated", () => {
+    const filename = join(fixture.directory, "invalid-c5-v11.sqlite");
+    const legacy = openSqliteDatabaseAtVersionForTest(filename, 11);
+    const uploadedAt = fixture.clock.now();
+    legacy.raw
+      .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+      .run(ATHLETE_A, uploadedAt);
+    legacy.raw
+      .prepare(
+        "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, created_at, updated_at) VALUES (?, ?, 'free', NULL, NULL, NULL, 'uploaded', 'active', ?, 1, ?, ?)",
+      )
+      .run(
+        ATTEMPT_A,
+        ATHLETE_A,
+        JSON.stringify({
+          id: "media-a",
+          contentType: "video/mp4",
+          bytes: 10,
+          uploadedAt,
+          deleteAt: "2030-01-16T11:00:00.000Z",
+          transition: {
+            kind: "upload-transition",
+            resourceId: "media-b",
+            deleteAt: "2030-01-15T13:00:00.000Z",
+          },
+        }),
+        uploadedAt,
+        uploadedAt,
+      );
+    legacy.close();
+
+    expect(() => openSqliteDatabase(filename)).toThrow(
+      "invalid legacy C5 media record",
+    );
+  });
+
+  it("enforces canonical C5 media identity and deadlines on both direct INSERT and UPDATE", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const canonical = {
+      id: "media-a",
+      contentType: "video/mp4",
+      bytes: 10,
+      uploadedAt: fixture.clock.now(),
+      deleteAt: "2030-01-16T11:00:00.000Z",
+      transition: {
+        kind: "upload-transition",
+        resourceId: "media-a",
+        deleteAt: "2030-01-15T13:00:00.000Z",
+      },
+    } as const;
+    const invalidValues = [
+      { ...canonical, transition: undefined },
+      {
+        ...canonical,
+        transition: { ...canonical.transition, resourceId: "media-other" },
+      },
+      { ...canonical, deleteAt: "2030-01-16T10:59:59.000Z" },
+      {
+        ...canonical,
+        uploadedAt: "2030-01-15T24:00:00.000Z",
+        deleteAt: "2030-01-16T23:00:00.000Z",
+        transition: {
+          ...canonical.transition,
+          deleteAt: "2030-01-16T01:00:00.000Z",
+        },
+      },
+    ];
+    const insert = fixture.database.raw.prepare(
+      "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, created_at, updated_at) VALUES (?, ?, 'free', NULL, NULL, NULL, 'uploaded', 'active', ?, 1, ?, ?)",
+    );
+    for (const [index, invalid] of invalidValues.entries())
+      expect(() =>
+        insert.run(
+          `raw-${index}`,
+          ATHLETE_A,
+          JSON.stringify(invalid),
+          fixture.clock.now(),
+          fixture.clock.now(),
+        ),
+      ).toThrow("invalid C5 media transition");
+    expect(() =>
+      insert.run(
+        ATTEMPT_B,
+        ATHLETE_A,
+        JSON.stringify(canonical),
+        fixture.clock.now(),
+        fixture.clock.now(),
+      ),
+    ).not.toThrow();
+    for (const invalid of invalidValues)
+      expect(() =>
+        fixture.database.raw
+          .prepare("UPDATE attempts SET media_json = ? WHERE id = ?")
+          .run(JSON.stringify(invalid), ATTEMPT_B),
+      ).toThrow("invalid C5 media transition");
+    await expect(
+      fixture.repository.getAttempt({
+        attemptId: ATTEMPT_B,
+        athleteId: ATHLETE_A,
+      }),
+    ).resolves.toMatchObject({ media: canonical });
+  });
+
   it("canonicalizes a v4 ranked request into its candidate so upgraded redelivery stays idempotent", async () => {
     const filename = join(fixture.directory, "legacy-v4.sqlite");
     const legacy = openSqliteDatabaseAtVersionForTest(filename, 4);
@@ -2806,7 +3030,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 11 });
+    ).toMatchObject({ count: 12 });
     reopened.close();
     upgraded.close();
   });
@@ -2884,7 +3108,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 11 });
+    ).toMatchObject({ count: 12 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -3035,7 +3259,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 11 });
+    ).toMatchObject({ count: 12 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);

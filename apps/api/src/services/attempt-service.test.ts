@@ -4,10 +4,14 @@ import {
   type AnalysisJob,
   type AnalysisQueue,
 } from "../queue/analysis-queue.js";
-import type { StoredMedia } from "../repositories/attempt-repository.js";
+import {
+  createStoredMediaAttachment,
+  type StoredMedia,
+  type StoredMediaAttachment,
+} from "../repositories/attempt-repository.js";
 import { AttemptService } from "./attempt-service.js";
 
-const media: StoredMedia = {
+const storedMedia: StoredMedia = {
   id: "media-a",
   contentType: "video/mp4",
   bytes: 10,
@@ -19,14 +23,15 @@ const media: StoredMedia = {
     deleteAt: "2030-01-15T14:00:00.000Z",
   },
 } as const;
+const media = createStoredMediaAttachment(storedMedia);
 
 class AttachmentStore {
-  public attached: StoredMedia | null = null;
+  public attached: StoredMediaAttachment | null = null;
   public rollbackInput: unknown = null;
 
   public async attachValidatedMedia(
     input: Readonly<{
-      media: StoredMedia;
+      media: StoredMediaAttachment;
       attemptId: string;
       athleteId: string;
     }>,

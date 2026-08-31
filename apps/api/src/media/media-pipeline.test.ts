@@ -84,8 +84,10 @@ describe("MediaPipeline", () => {
         retention,
       }),
     ).resolves.toMatchObject({
-      id: mediaId,
-      contentType: "video/mp4",
+      storedMedia: {
+        id: mediaId,
+        contentType: "video/mp4",
+      },
       manifest: { mode: "free" },
     });
   });

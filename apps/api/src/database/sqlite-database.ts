@@ -562,6 +562,29 @@ const migrations: readonly Migration[] = [
     `,
     afterApply: canonicalizeLegacyStoredMedia,
   },
+  {
+    // Migration 11 may already be recorded on durable C5 databases. Keep its
+    // historical behavior intact and repair every accepted predecessor shape
+    // in a new, replay-safe migration.
+    version: 12,
+    sql: `
+      DROP TRIGGER IF EXISTS attempts_media_json_requires_c5_transition;
+      CREATE TRIGGER attempts_media_json_requires_c5_transition
+      BEFORE UPDATE OF media_json ON attempts
+      WHEN NEW.media_json IS NOT NULL AND (${invalidC5MediaSql("NEW.media_json")})
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid C5 media transition');
+      END;
+
+      CREATE TRIGGER attempts_media_json_insert_requires_c5_transition
+      BEFORE INSERT ON attempts
+      WHEN NEW.media_json IS NOT NULL AND (${invalidC5MediaSql("NEW.media_json")})
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid C5 media transition');
+      END;
+    `,
+    afterApply: canonicalizeAllStoredMedia,
+  },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {
@@ -659,6 +682,21 @@ function canonicalizeLegacyStoredMedia(raw: Database.Database): void {
   }
 }
 
+/**
+ * v12 projection. Any unreadable non-null legacy attachment stops startup
+ * inside the migration transaction rather than being silently marked current.
+ */
+function canonicalizeAllStoredMedia(raw: Database.Database): void {
+  const rows = raw
+    .prepare("SELECT id, media_json FROM attempts WHERE media_json IS NOT NULL")
+    .all() as readonly Readonly<{ id: string; media_json: string }>[];
+  const update = raw.prepare("UPDATE attempts SET media_json = ? WHERE id = ?");
+  for (const row of rows) {
+    const canonical = canonicalizeStoredMediaV12(row.media_json);
+    update.run(canonical, row.id);
+  }
+}
+
 function canonicalizeLegacyMedia(value: string): string {
   try {
     const parsed = JSON.parse(value);
@@ -689,6 +727,167 @@ function canonicalizeLegacyMedia(value: string): string {
   } catch {
     return value;
   }
+}
+
+/** Strictly recognizes only C5's valid predecessor attachment contracts. */
+function canonicalizeStoredMediaV12(value: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("invalid legacy C5 media record");
+  }
+  if (!isPlainRecord(parsed)) throw new Error("invalid legacy C5 media record");
+  const media = parsed;
+  const permitted = new Set([
+    "id",
+    "contentType",
+    "bytes",
+    "uploadedAt",
+    "deleteAt",
+    "transition",
+    "transitionResourceId",
+    "sha256",
+    "probe",
+    "manifest",
+  ]);
+  if (Object.keys(media).some((key) => !permitted.has(key)))
+    throw new Error("invalid legacy C5 media record");
+  if (
+    typeof media.id !== "string" ||
+    media.id.length === 0 ||
+    typeof media.contentType !== "string" ||
+    media.contentType.length === 0 ||
+    typeof media.bytes !== "number" ||
+    !Number.isSafeInteger(media.bytes) ||
+    media.bytes < 0 ||
+    typeof media.deleteAt !== "string" ||
+    !isCanonicalIso(media.deleteAt)
+  )
+    throw new Error("invalid legacy C5 media record");
+
+  const uploadedAt =
+    typeof media.uploadedAt === "string"
+      ? media.uploadedAt
+      : new Date(
+          Date.parse(media.deleteAt) - 23 * 60 * 60 * 1000,
+        ).toISOString();
+  if (
+    !isCanonicalIso(uploadedAt) ||
+    media.deleteAt !==
+      new Date(Date.parse(uploadedAt) + 23 * 60 * 60 * 1000).toISOString()
+  )
+    throw new Error("invalid legacy C5 media record");
+
+  const richKeys = ["sha256", "probe", "manifest"] as const;
+  const richCount = richKeys.filter((key) => key in media).length;
+  if (
+    richCount !== 0 &&
+    (richCount !== richKeys.length ||
+      typeof media.sha256 !== "string" ||
+      !isPlainRecord(media.probe) ||
+      !isPlainRecord(media.manifest))
+  )
+    throw new Error("invalid legacy C5 media record");
+
+  const transitionDeleteAt = new Date(
+    Date.parse(uploadedAt) + 60 * 60 * 1000,
+  ).toISOString();
+  if ("transition" in media) {
+    if (
+      !isPlainRecord(media.transition) ||
+      !hasExactObjectKeys(media.transition, [
+        "kind",
+        "resourceId",
+        "deleteAt",
+      ]) ||
+      media.transition.kind !== "upload-transition" ||
+      media.transition.resourceId !== media.id ||
+      media.transition.deleteAt !== transitionDeleteAt
+    )
+      throw new Error("invalid legacy C5 media record");
+  }
+  if (
+    "transitionResourceId" in media &&
+    media.transitionResourceId !== media.id
+  )
+    throw new Error("invalid legacy C5 media record");
+
+  return canonicalJson({
+    id: media.id,
+    contentType: media.contentType,
+    bytes: media.bytes,
+    uploadedAt,
+    deleteAt: media.deleteAt,
+    transition: {
+      kind: "upload-transition",
+      resourceId: media.id,
+      deleteAt: transitionDeleteAt,
+    },
+  });
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactObjectKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return (
+    actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index])
+  );
+}
+
+function isCanonicalIso(value: string): boolean {
+  return (
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
+    Number.isFinite(Date.parse(value)) &&
+    new Date(Date.parse(value)).toISOString() === value
+  );
+}
+
+/** SQLite equivalent of the repository's exact six-field media contract. */
+function invalidC5MediaSql(column: string): string {
+  return `
+    CASE
+    WHEN json_valid(${column}) = 0 THEN 1
+    WHEN (
+      (SELECT COUNT(*) FROM json_each(${column})) != 6
+      OR EXISTS (
+        SELECT 1 FROM json_each(${column})
+        WHERE key NOT IN ('id', 'contentType', 'bytes', 'uploadedAt', 'deleteAt', 'transition')
+      )
+      OR json_type(${column}, '$.id') IS NOT 'text'
+      OR length(json_extract(${column}, '$.id')) = 0
+      OR json_type(${column}, '$.contentType') IS NOT 'text'
+      OR length(json_extract(${column}, '$.contentType')) = 0
+      OR json_type(${column}, '$.bytes') IS NOT 'integer'
+      OR json_extract(${column}, '$.bytes') < 0
+      OR json_extract(${column}, '$.bytes') > 9007199254740991
+      OR json_type(${column}, '$.uploadedAt') IS NOT 'text'
+      OR json_type(${column}, '$.deleteAt') IS NOT 'text'
+      OR json_type(${column}, '$.transition') IS NOT 'object'
+      OR json_extract(${column}, '$.transition.kind') IS NOT 'upload-transition'
+      OR json_type(${column}, '$.transition.resourceId') IS NOT 'text'
+      OR json_type(${column}, '$.transition.deleteAt') IS NOT 'text'
+      OR json_extract(${column}, '$.transition.resourceId') IS NOT json_extract(${column}, '$.id')
+      OR strftime('%Y-%m-%dT%H:%M:%fZ', json_extract(${column}, '$.uploadedAt')) IS NOT json_extract(${column}, '$.uploadedAt')
+      OR strftime('%Y-%m-%dT%H:%M:%fZ', json_extract(${column}, '$.deleteAt')) IS NOT json_extract(${column}, '$.deleteAt')
+      OR strftime('%Y-%m-%dT%H:%M:%fZ', json_extract(${column}, '$.transition.deleteAt')) IS NOT json_extract(${column}, '$.transition.deleteAt')
+      OR substr(json_extract(${column}, '$.uploadedAt'), 12, 2) = '24'
+      OR substr(json_extract(${column}, '$.deleteAt'), 12, 2) = '24'
+      OR substr(json_extract(${column}, '$.transition.deleteAt'), 12, 2) = '24'
+      OR strftime('%Y-%m-%dT%H:%M:%fZ', json_extract(${column}, '$.uploadedAt'), '+23 hours') IS NOT json_extract(${column}, '$.deleteAt')
+      OR strftime('%Y-%m-%dT%H:%M:%fZ', json_extract(${column}, '$.uploadedAt'), '+1 hour') IS NOT json_extract(${column}, '$.transition.deleteAt')
+    ) THEN 1
+    ELSE 0
+    END = 1
+  `;
 }
 
 function canonicalizeLegacyTerminalCandidate(value: string): string {

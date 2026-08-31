@@ -16,6 +16,7 @@ import {
   temporaryDeleteAt,
 } from "../media/retention-deadlines.js";
 import type { SqliteDatabase } from "../database/sqlite-database.js";
+import { isStoredMediaAttachment } from "./attempt-repository.js";
 import type {
   AttemptRecord,
   AttemptRepository,
@@ -27,6 +28,7 @@ import type {
   ProcessingFailureRecordOutcome,
   ProcessingClaim,
   StoredMedia,
+  StoredMediaAttachment,
   TerminalCandidate,
 } from "./attempt-repository.js";
 
@@ -290,11 +292,16 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     input: Readonly<{
       attemptId: string;
       athleteId: string;
-      media: StoredMedia;
+      media: StoredMediaAttachment;
     }>,
   ): Promise<AnalysisJob> {
     return this.transaction(() => {
-      assertTransitionMedia(input.media);
+      // Do not serialize caller object shape. C5's rich acceptance result
+      // contains probe/hash/manifest evidence, while this repository persists
+      // only its exact six-field attachment. Runtime projection also protects
+      // this SQL boundary from unchecked JavaScript callers.
+      const media = projectStoredMedia(input.media);
+      assertTransitionMedia(media);
       const row = this.mustGetScopedAttempt(input.attemptId, input.athleteId);
       const attempt = parseAttemptRow(row);
       if (attempt.media !== null)
@@ -307,7 +314,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
           "UPDATE attempts SET media_json = ?, status = 'uploaded', processing_generation = ?, updated_at = ? WHERE id = ? AND athlete_id = ? AND status = 'awaiting-upload' AND deletion_state = 'active'",
         )
         .run(
-          stableJson(input.media),
+          stableJson(media),
           row.processing_generation + 1,
           now,
           input.attemptId,
@@ -317,21 +324,15 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         .prepare(
           "INSERT INTO media_retention_records (media_id, attempt_id, metadata_json, delete_at, created_at) VALUES (?, ?, ?, ?, ?)",
         )
-        .run(
-          input.media.id,
-          input.attemptId,
-          stableJson(input.media),
-          input.media.deleteAt,
-          now,
-        );
+        .run(media.id, input.attemptId, stableJson(media), media.deleteAt, now);
       const acknowledged = this.raw
         .prepare(
           "DELETE FROM retention_cleanup_records WHERE resource_id = ? AND attempt_id = ? AND resource_kind = 'temporary' AND delete_at = ?",
         )
         .run(
-          input.media.transition.resourceId,
+          media.transition.resourceId,
           input.attemptId,
-          input.media.transition.deleteAt,
+          media.transition.deleteAt,
         );
       if (acknowledged.changes !== 1)
         throw new RepositoryError("invalid_input");
@@ -1129,6 +1130,42 @@ function assertTransitionMedia(media: StoredMedia): void {
     media.transition.deleteAt !== temporaryDeleteAt(media.uploadedAt)
   )
     throw new RepositoryError("invalid_input");
+}
+
+/**
+ * Runtime-only C5 boundary. Extra fields are intentionally discarded instead
+ * of becoming durable JSON; malformed canonical fields fail before SQL.
+ */
+function projectStoredMedia(value: unknown): StoredMedia {
+  if (!isStoredMediaAttachment(value) || !isRecord(value.transition))
+    throw new RepositoryError("invalid_input");
+  if (
+    typeof value.id !== "string" ||
+    value.id.length === 0 ||
+    typeof value.contentType !== "string" ||
+    value.contentType.length === 0 ||
+    typeof value.bytes !== "number" ||
+    !Number.isSafeInteger(value.bytes) ||
+    value.bytes < 0 ||
+    typeof value.uploadedAt !== "string" ||
+    typeof value.deleteAt !== "string" ||
+    value.transition.kind !== "upload-transition" ||
+    typeof value.transition.resourceId !== "string" ||
+    typeof value.transition.deleteAt !== "string"
+  )
+    throw new RepositoryError("invalid_input");
+  return Object.freeze({
+    id: value.id,
+    contentType: value.contentType,
+    bytes: value.bytes,
+    uploadedAt: value.uploadedAt,
+    deleteAt: value.deleteAt,
+    transition: Object.freeze({
+      kind: "upload-transition",
+      resourceId: value.transition.resourceId,
+      deleteAt: value.transition.deleteAt,
+    }),
+  });
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

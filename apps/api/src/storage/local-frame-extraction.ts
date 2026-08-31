@@ -536,90 +536,241 @@ function isJpeg(bytes: Uint8Array): boolean {
     return false;
 
   let cursor = 2;
-  let sawDht = false;
-  let sawDqt = false;
   let sawSof = false;
-  let sawSos = false;
-  let entropyBytes = 0;
-  while (cursor < bytes.length - 2) {
+  const quantizationTables = new Set<number>();
+  const huffmanTables = new Set<string>();
+  const components = new Map<number, number>();
+
+  while (cursor < bytes.length) {
     if (bytes[cursor] !== 0xff) return false;
     while (bytes[cursor] === 0xff) cursor += 1;
     const marker = bytes[cursor];
-    if (marker === undefined || marker === 0x00 || marker === 0xd9)
+    if (
+      marker === undefined ||
+      marker === 0x00 ||
+      marker === 0xd8 ||
+      marker === 0xd9
+    )
       return false;
     cursor += 1;
-    if (
-      marker === 0xd8 ||
-      marker === 0x01 ||
-      (marker >= 0xd0 && marker <= 0xd7)
-    )
-      continue;
+    if (marker === 0x01) continue;
+    if (marker >= 0xd0 && marker <= 0xd7) return false;
     if (cursor + 2 > bytes.length) return false;
     const segmentLength = (bytes[cursor]! << 8) | bytes[cursor + 1]!;
     if (segmentLength < 2 || cursor + segmentLength > bytes.length)
       return false;
     const segmentStart = cursor + 2;
     const segmentEnd = cursor + segmentLength;
+
     if (marker === 0xdb) {
-      // DQT: at least precision/table-id plus 64 quantisation entries.
-      if (segmentLength < 67) return false;
-      sawDqt = true;
-    }
-    if (marker === 0xc4) {
-      // DHT: class/id, sixteen code-length counts, and one value.
-      if (segmentLength < 20) return false;
-      sawDht = true;
-    }
-    if (isStartOfFrame(marker)) {
-      // precision + height + width + component count
       if (
-        segmentLength < 8 ||
-        bytes[segmentStart] === 0 ||
-        ((bytes[segmentStart + 1]! << 8) | bytes[segmentStart + 2]!) === 0 ||
-        ((bytes[segmentStart + 3]! << 8) | bytes[segmentStart + 4]!) === 0 ||
-        bytes[segmentStart + 5] === 0
+        sawSof ||
+        !parseQuantizationTables(
+          bytes,
+          segmentStart,
+          segmentEnd,
+          quantizationTables,
+        )
+      )
+        return false;
+    } else if (marker === 0xc4) {
+      if (!parseHuffmanTables(bytes, segmentStart, segmentEnd, huffmanTables))
+        return false;
+    } else if (isStartOfFrame(marker)) {
+      if (
+        sawSof ||
+        !parseStartOfFrame(
+          bytes,
+          segmentStart,
+          segmentLength,
+          quantizationTables,
+          components,
+        )
       )
         return false;
       sawSof = true;
+    } else if (marker === 0xda) {
+      if (
+        !sawSof ||
+        quantizationTables.size === 0 ||
+        huffmanTables.size === 0 ||
+        !parseStartOfScan(
+          bytes,
+          segmentStart,
+          segmentLength,
+          components,
+          huffmanTables,
+        )
+      )
+        return false;
+      return hasOneBoundedEntropyScan(bytes, segmentEnd);
+    } else if (marker === 0xdd) {
+      // Restart interval is a two-byte unsigned integer.
+      if (segmentLength !== 4) return false;
     }
-    if (marker !== 0xda) {
-      cursor = segmentEnd;
-      continue;
-    }
-    if (!sawDqt || !sawDht || !sawSof || segmentLength < 8) return false;
-    const scanComponents = bytes[segmentStart];
+    cursor = segmentEnd;
+  }
+  return false;
+}
+
+function parseQuantizationTables(
+  bytes: Uint8Array,
+  start: number,
+  end: number,
+  tables: Set<number>,
+): boolean {
+  let cursor = start;
+  while (cursor < end) {
+    const table = bytes[cursor++];
+    if (table === undefined) return false;
+    const precision = table >>> 4;
+    const id = table & 0x0f;
+    if (precision > 1 || id > 3 || tables.has(id)) return false;
+    const values = precision === 0 ? 64 : 128;
+    if (cursor + values > end) return false;
+    cursor += values;
+    tables.add(id);
+  }
+  return cursor === end && tables.size > 0;
+}
+
+function parseHuffmanTables(
+  bytes: Uint8Array,
+  start: number,
+  end: number,
+  tables: Set<string>,
+): boolean {
+  let cursor = start;
+  while (cursor < end) {
+    if (cursor + 17 > end) return false;
+    const selector = bytes[cursor++];
+    if (selector === undefined) return false;
+    const tableClass = selector >>> 4;
+    const id = selector & 0x0f;
+    const key = `${tableClass}:${id}`;
+    if (tableClass > 1 || id > 3 || tables.has(key)) return false;
+    let symbols = 0;
+    for (let index = 0; index < 16; index += 1) symbols += bytes[cursor++]!;
+    if (symbols < 1 || cursor + symbols > end) return false;
+    cursor += symbols;
+    tables.add(key);
+  }
+  return cursor === end && tables.size > 0;
+}
+
+function parseStartOfFrame(
+  bytes: Uint8Array,
+  start: number,
+  segmentLength: number,
+  quantizationTables: ReadonlySet<number>,
+  components: Map<number, number>,
+): boolean {
+  if (segmentLength < 11) return false;
+  const precision = bytes[start];
+  const height = (bytes[start + 1]! << 8) | bytes[start + 2]!;
+  const width = (bytes[start + 3]! << 8) | bytes[start + 4]!;
+  const count = bytes[start + 5];
+  if (
+    precision === undefined ||
+    precision < 2 ||
+    precision > 16 ||
+    height === 0 ||
+    width === 0 ||
+    count === undefined ||
+    count < 1 ||
+    count > 4 ||
+    segmentLength !== 8 + 3 * count
+  )
+    return false;
+  for (let index = 0; index < count; index += 1) {
+    const offset = start + 6 + index * 3;
+    const id = bytes[offset];
+    const sampling = bytes[offset + 1];
+    const quantizationId = bytes[offset + 2];
     if (
-      scanComponents === undefined ||
-      scanComponents < 1 ||
-      scanComponents > 4 ||
-      segmentLength !== 6 + 2 * scanComponents
+      id === undefined ||
+      id === 0 ||
+      sampling === undefined ||
+      sampling === 0 ||
+      quantizationId === undefined ||
+      !quantizationTables.has(quantizationId) ||
+      components.has(id)
     )
       return false;
-    sawSos = true;
-    cursor = segmentEnd;
-    // Entropy-coded data accepts byte-stuffed 0xff00 and restart markers. A
-    // next non-restart marker ends this scan and must be EOI for our one-scan
-    // frame contract; multi-scan/marker fragments are rejected fail-closed.
-    while (cursor < bytes.length - 1) {
-      if (bytes[cursor] !== 0xff) {
-        entropyBytes += 1;
-        cursor += 1;
-        continue;
-      }
-      const next = bytes[cursor + 1];
-      if (next === undefined) return false;
-      if (next === 0x00) {
-        entropyBytes += 1;
-        cursor += 2;
-        continue;
-      }
-      if (next >= 0xd0 && next <= 0xd7) {
-        cursor += 2;
-        continue;
-      }
-      return next === 0xd9 && entropyBytes > 0 && sawSos;
-    }
+    components.set(id, quantizationId);
+  }
+  return true;
+}
+
+function parseStartOfScan(
+  bytes: Uint8Array,
+  start: number,
+  segmentLength: number,
+  components: ReadonlyMap<number, number>,
+  huffmanTables: ReadonlySet<string>,
+): boolean {
+  const count = bytes[start];
+  if (
+    count === undefined ||
+    count < 1 ||
+    count > components.size ||
+    segmentLength !== 6 + 2 * count
+  )
     return false;
+  const seen = new Set<number>();
+  for (let index = 0; index < count; index += 1) {
+    const id = bytes[start + 1 + index * 2];
+    const selectors = bytes[start + 2 + index * 2];
+    if (
+      id === undefined ||
+      selectors === undefined ||
+      !components.has(id) ||
+      seen.has(id)
+    )
+      return false;
+    const dc = selectors >>> 4;
+    const ac = selectors & 0x0f;
+    if (
+      dc > 3 ||
+      ac > 3 ||
+      !huffmanTables.has(`0:${dc}`) ||
+      !huffmanTables.has(`1:${ac}`)
+    )
+      return false;
+    seen.add(id);
+  }
+  const spectralStart = bytes[start + 1 + count * 2];
+  const spectralEnd = bytes[start + 2 + count * 2];
+  const approximation = bytes[start + 3 + count * 2];
+  return (
+    spectralStart !== undefined &&
+    spectralEnd !== undefined &&
+    approximation !== undefined &&
+    spectralStart <= spectralEnd &&
+    approximation <= 0x0f
+  );
+}
+
+function hasOneBoundedEntropyScan(bytes: Uint8Array, start: number): boolean {
+  let cursor = start;
+  let entropyBytes = 0;
+  while (cursor < bytes.length) {
+    if (bytes[cursor] !== 0xff) {
+      entropyBytes += 1;
+      cursor += 1;
+      continue;
+    }
+    cursor += 1;
+    while (bytes[cursor] === 0xff) cursor += 1;
+    const marker = bytes[cursor];
+    if (marker === undefined) return false;
+    cursor += 1;
+    if (marker === 0x00) {
+      entropyBytes += 1;
+      continue;
+    }
+    if (marker >= 0xd0 && marker <= 0xd7) continue;
+    return marker === 0xd9 && entropyBytes > 0 && cursor === bytes.length;
   }
   return false;
 }

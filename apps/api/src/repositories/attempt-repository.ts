@@ -26,6 +26,49 @@ export type StoredMedia = Readonly<{
   }>;
 }>;
 
+/**
+ * Non-enumerable capability marker. It is absent from persisted JSON, but
+ * makes C5's attachment handoff unconstructable by structural coincidence.
+ */
+const storedMediaAttachmentBrand: unique symbol = Symbol(
+  "revelai.stored-media-attachment",
+);
+
+export type StoredMediaAttachment = StoredMedia &
+  Readonly<{ [storedMediaAttachmentBrand]: true }>;
+
+export function createStoredMediaAttachment(
+  media: StoredMedia,
+): StoredMediaAttachment {
+  const copied: StoredMedia = {
+    id: media.id,
+    contentType: media.contentType,
+    bytes: media.bytes,
+    uploadedAt: media.uploadedAt,
+    deleteAt: media.deleteAt,
+    transition: Object.freeze({
+      kind: media.transition.kind,
+      resourceId: media.transition.resourceId,
+      deleteAt: media.transition.deleteAt,
+    }),
+  };
+  Object.defineProperty(copied, storedMediaAttachmentBrand, {
+    value: true,
+    enumerable: false,
+  });
+  return Object.freeze(copied) as StoredMediaAttachment;
+}
+
+export function isStoredMediaAttachment(
+  value: unknown,
+): value is StoredMediaAttachment {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<PropertyKey, unknown>)[storedMediaAttachmentBrand] === true
+  );
+}
+
 export type CalibrationSessionRecord = Readonly<{
   id: string;
   challengeId: "wall-pass";
@@ -161,7 +204,7 @@ export interface AttemptRepository {
     input: Readonly<{
       attemptId: string;
       athleteId: string;
-      media: StoredMedia;
+      media: StoredMediaAttachment;
     }>,
   ): Promise<AnalysisJob>;
   rollbackMediaAttachment(

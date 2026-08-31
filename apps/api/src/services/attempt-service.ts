@@ -1,13 +1,13 @@
 import type { AnalysisJob, AnalysisQueue } from "../queue/analysis-queue.js";
 import { QueueUnavailableError } from "../queue/analysis-queue.js";
-import type { StoredMedia } from "../repositories/attempt-repository.js";
+import type { StoredMediaAttachment } from "../repositories/attempt-repository.js";
 
 export type AttachmentRepository = Readonly<{
   attachValidatedMedia(
     input: Readonly<{
       attemptId: string;
       athleteId: string;
-      media: StoredMedia;
+      media: StoredMediaAttachment;
     }>,
   ): Promise<AnalysisJob>;
   rollbackMediaAttachment(
@@ -34,7 +34,7 @@ export class AttemptService {
     input: Readonly<{
       attemptId: string;
       athleteId: string;
-      media: StoredMedia;
+      media: StoredMediaAttachment;
     }>,
   ): Promise<AnalysisJob> {
     if (!(await this.queue.isAvailable())) throw new QueueUnavailableError();

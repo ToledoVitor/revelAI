@@ -1,18 +1,22 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { FailureMessageByCode } from "@revelai/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   openSqliteDatabase,
   type SqliteDatabase,
 } from "../database/sqlite-database.js";
 import { SQLiteAttemptRepository } from "../repositories/sqlite-attempt-repository.js";
+import { createStoredMediaAttachment } from "../repositories/attempt-repository.js";
 import { QueueUnavailableError } from "../queue/analysis-queue.js";
 import { AttemptService } from "../services/attempt-service.js";
 import { RetentionScavenger } from "./retention-scavenger.js";
 import { LocalMediaStorage } from "../storage/local-media-storage.js";
 import { LocalRetentionObjectStore } from "../storage/local-retention-object-store.js";
 import { SQLiteRetentionRepository } from "./sqlite-retention-repository.js";
+import { MediaPipeline } from "./media-pipeline.js";
+import type { ExtractionManifest } from "./extraction-manifest.js";
 
 const ATHLETE = "11111111-1111-4111-8111-111111111111";
 const ATTEMPT = "22222222-2222-4222-8222-222222222222";
@@ -44,7 +48,7 @@ describe("SQLiteRetentionRepository", () => {
     await repository.attachValidatedMedia({
       attemptId: ATTEMPT,
       athleteId: ATHLETE,
-      media: {
+      media: createStoredMediaAttachment({
         id: MEDIA,
         contentType: "video/mp4",
         bytes: 1,
@@ -55,7 +59,7 @@ describe("SQLiteRetentionRepository", () => {
           resourceId: MEDIA,
           deleteAt: "2030-01-15T13:00:00.000Z",
         },
-      },
+      }),
     });
   });
 
@@ -175,7 +179,7 @@ describe("SQLiteRetentionRepository", () => {
     await reopenedAttempts.attachValidatedMedia({
       attemptId: secondAttempt,
       athleteId: ATHLETE,
-      media: {
+      media: createStoredMediaAttachment({
         id: secondMedia,
         contentType: "video/mp4",
         bytes: 1,
@@ -186,7 +190,7 @@ describe("SQLiteRetentionRepository", () => {
           resourceId: secondMedia,
           deleteAt: "2030-01-15T13:00:00.000Z",
         },
-      },
+      }),
     });
 
     database.close();
@@ -380,7 +384,7 @@ describe("SQLiteRetentionRepository", () => {
       service.attachValidatedMedia({
         attemptId: rolledBackAttempt,
         athleteId: ATHLETE,
-        media: {
+        media: createStoredMediaAttachment({
           id: stored.id,
           contentType: stored.contentType,
           bytes: stored.bytes,
@@ -391,7 +395,7 @@ describe("SQLiteRetentionRepository", () => {
             resourceId: stored.id,
             deleteAt: "2030-01-15T13:00:00.000Z",
           },
-        },
+        }),
       }),
     ).rejects.toBeInstanceOf(QueueUnavailableError);
     await expect(
@@ -459,6 +463,197 @@ describe("SQLiteRetentionRepository", () => {
     ).resolves.not.toContainEqual(
       expect.objectContaining({ id: rolledBackMedia }),
     );
+  });
+
+  it("passes only pipeline.storedMedia through SQLite, queue, reopen, rollback, and a new generation", async () => {
+    const uploadAttempt = "99999999-9999-4999-8999-999999999999";
+    const firstMedia = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const rejectedMedia = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const retryMedia = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const uploadedAt = "2030-01-15T12:00:00.000Z";
+    const payload = Buffer.from([
+      0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 1, 2, 3, 4,
+    ]);
+    const ids = [firstMedia, rejectedMedia, retryMedia];
+    const storage = new LocalMediaStorage({
+      root: join(directory, "pipeline-service-media"),
+      ids: {
+        next: () => {
+          const id = ids.shift();
+          if (!id) throw new Error("test IDs exhausted");
+          return id;
+        },
+      },
+      prober: {
+        probe: async () => ({
+          container: "mp4",
+          durationSeconds: 3,
+          displayWidth: 480,
+          displayHeight: 853,
+          nominalFps: 12,
+          codec: "h264",
+          sourceRotationDegrees: 0,
+        }),
+      },
+    });
+    const retention = new SQLiteRetentionRepository({ database });
+    const pipeline = new MediaPipeline({
+      storage,
+      extractor: {
+        extract: async () => ({}) as ExtractionManifest,
+      },
+    });
+    const attempts = new SQLiteAttemptRepository({
+      database,
+      clock: { now: () => uploadedAt },
+      ids: { next: () => "dddddddd-dddd-4ddd-8ddd-dddddddddddd" },
+    });
+    await attempts.createAttempt({
+      id: uploadAttempt,
+      athleteId: ATHLETE,
+      input: { mode: "free" },
+    });
+    const accept = async (generation: number) =>
+      pipeline.accept({
+        mode: "free",
+        source: chunks(payload),
+        maxBytes: payload.length,
+        retention: {
+          repository: retention,
+          attemptId: uploadAttempt,
+          generation,
+          uploadedAt,
+        },
+      });
+
+    const accepted = await accept(1);
+    expect(Object.keys(accepted).sort()).toEqual([
+      "manifest",
+      "probe",
+      "sha256",
+      "storedMedia",
+    ]);
+    expect(JSON.stringify(accepted)).not.toContain("transitionResourceId");
+    const queued: Array<Readonly<{ attemptId: string; generation: number }>> =
+      [];
+    const service = new AttemptService({
+      repository: attempts,
+      queue: {
+        isAvailable: async () => true,
+        enqueue: async (job) => void queued.push(job),
+        subscribe: () => () => undefined,
+      },
+    });
+    await service.attachValidatedMedia({
+      attemptId: uploadAttempt,
+      athleteId: ATHLETE,
+      media: accepted.storedMedia,
+    });
+    await expect(
+      attempts.getAttempt({ attemptId: uploadAttempt, athleteId: ATHLETE }),
+    ).resolves.toMatchObject({
+      status: "uploaded",
+      media: accepted.storedMedia,
+    });
+
+    database.close();
+    database = openSqliteDatabase(join(directory, "api.sqlite"));
+    const reopened = new SQLiteAttemptRepository({
+      database,
+      clock: { now: () => uploadedAt },
+      ids: { next: () => "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" },
+    });
+    const claim = await reopened.claimProcessing(queued[0]!);
+    expect(claim).not.toBeNull();
+    await expect(
+      reopened.finalizeTerminalResult({
+        attemptId: uploadAttempt,
+        leaseId: claim!.leaseId,
+        generation: claim!.generation,
+        candidate: {
+          state: "failed",
+          attemptId: uploadAttempt,
+          mode: "free",
+          code: "analysis_internal_error",
+          message: FailureMessageByCode.analysis_internal_error,
+          retryable: false,
+        },
+      }),
+    ).resolves.toMatchObject({ kind: "finalized" });
+
+    const retryAttempt = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    await reopened.createAttempt({
+      id: retryAttempt,
+      athleteId: ATHLETE,
+      input: { mode: "free" },
+    });
+    const rejectPipeline = new MediaPipeline({
+      storage,
+      extractor: { extract: async () => ({}) as ExtractionManifest },
+    });
+    const rejected = await rejectPipeline.accept({
+      mode: "free",
+      source: chunks(payload),
+      maxBytes: payload.length,
+      retention: {
+        repository: new SQLiteRetentionRepository({ database }),
+        attemptId: retryAttempt,
+        generation: 1,
+        uploadedAt,
+      },
+    });
+    const failing = new AttemptService({
+      repository: reopened,
+      queue: {
+        isAvailable: async () => true,
+        enqueue: async () => {
+          throw new QueueUnavailableError();
+        },
+        subscribe: () => () => undefined,
+      },
+    });
+    await expect(
+      failing.attachValidatedMedia({
+        attemptId: retryAttempt,
+        athleteId: ATHLETE,
+        media: rejected.storedMedia,
+      }),
+    ).rejects.toBeInstanceOf(QueueUnavailableError);
+
+    database.close();
+    database = openSqliteDatabase(join(directory, "api.sqlite"));
+    const afterRollback = new SQLiteAttemptRepository({
+      database,
+      clock: { now: () => uploadedAt },
+      ids: { next: () => "11111111-1111-4111-8111-111111111111" },
+    });
+    await expect(
+      afterRollback.getAttempt({ attemptId: retryAttempt, athleteId: ATHLETE }),
+    ).resolves.toMatchObject({ status: "awaiting-upload", media: null });
+    const retry = await rejectPipeline.accept({
+      mode: "free",
+      source: chunks(payload),
+      maxBytes: payload.length,
+      retention: {
+        repository: new SQLiteRetentionRepository({ database }),
+        attemptId: retryAttempt,
+        generation: 2,
+        uploadedAt,
+      },
+    });
+    const retried = await new AttemptService({
+      repository: afterRollback,
+      queue: {
+        isAvailable: async () => true,
+        enqueue: async () => undefined,
+        subscribe: () => () => undefined,
+      },
+    }).attachValidatedMedia({
+      attemptId: retryAttempt,
+      athleteId: ATHLETE,
+      media: retry.storedMedia,
+    });
+    expect(retried).toEqual({ attemptId: retryAttempt, generation: 2 });
   });
 });
 

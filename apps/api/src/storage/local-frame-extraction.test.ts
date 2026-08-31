@@ -143,6 +143,77 @@ describe("LocalFrameExtraction", () => {
     ).rejects.toThrow("media_probe_failed");
   });
 
+  it("rejects impossible DQT, DHT, SOF, SOS, and truncated JPEG structures before publication", async () => {
+    const timeline = Array.from({ length: 37 }, (_, index) => index / 12);
+    for (const kind of ["dqt", "dht", "sof", "sos", "truncated"] as const) {
+      const root = await setupRoot(roots);
+      const extractor = new LocalFrameExtraction({
+        root,
+        ids: { next: () => batchId },
+        runner: {
+          run: async (command) => {
+            await writeDecoded(
+              command.outputDirectory,
+              timeline,
+              malformedJpeg(kind),
+            );
+            return completedEvidence(timeline, []);
+          },
+        },
+        retention: { schedule: async () => ({ kind: "created" as const }) },
+      });
+      await expect(
+        extractor.extract({
+          mode: "free",
+          attemptId,
+          generation: 1,
+          mediaId,
+          mediaSha256: "a".repeat(64),
+          probe: { ...verifiedProbe, durationSeconds: 3 },
+          uploadedAt: "2030-01-15T12:00:00.000Z",
+          source: "staged",
+        }),
+      ).rejects.toThrow("media_probe_failed");
+      await expect(
+        readFile(join(root, "frames", batchId, ".complete")),
+      ).rejects.toThrow();
+    }
+  });
+
+  it("makes opaque reads re-validate structural JPEG evidence", async () => {
+    const root = await setupRoot(roots);
+    const timeline = Array.from({ length: 37 }, (_, index) => index / 12);
+    const extractor = new LocalFrameExtraction({
+      root,
+      ids: { next: () => batchId },
+      runner: {
+        run: async (command) => {
+          await writeDecoded(command.outputDirectory, timeline);
+          return completedEvidence(timeline, []);
+        },
+      },
+      retention: { schedule: async () => ({ kind: "created" as const }) },
+    });
+    const manifest = await extractor.extract({
+      mode: "free",
+      attemptId,
+      generation: 1,
+      mediaId,
+      mediaSha256: "a".repeat(64),
+      probe: { ...verifiedProbe, durationSeconds: 3 },
+      uploadedAt: "2030-01-15T12:00:00.000Z",
+      source: "staged",
+    });
+    await writeFile(
+      join(root, "frames", batchId, "frame-0000.jpg"),
+      malformedJpeg("sos"),
+      { mode: 0o600 },
+    );
+    await expect(
+      extractor.readFrame(manifest.frames.items[0]!.reference),
+    ).rejects.toThrow("media_probe_failed");
+  });
+
   it("selects cardinality-exact Free samples from real 12/24/30fps decoded timelines", async () => {
     for (const fps of [12, 24, 30]) {
       const root = await setupRoot(roots);
@@ -478,6 +549,39 @@ function rawShowinfo(timestamps: readonly number[], suffix = ""): string {
 
 function markerOnlyJpeg(): Uint8Array {
   return Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+}
+
+function malformedJpeg(
+  kind: "dqt" | "dht" | "sof" | "sos" | "truncated",
+): Uint8Array {
+  const output = Uint8Array.from(jpeg(0));
+  if (kind === "truncated") return output.slice(0, -3);
+  let cursor = 2;
+  while (cursor + 4 <= output.length) {
+    if (output[cursor] !== 0xff) throw new Error("fixture marker missing");
+    while (output[cursor] === 0xff) cursor += 1;
+    const marker = output[cursor++]!;
+    const length = (output[cursor]! << 8) | output[cursor + 1]!;
+    const start = cursor + 2;
+    if (kind === "dqt" && marker === 0xdb) {
+      output[start] = 0xff;
+      return output;
+    }
+    if (kind === "dht" && marker === 0xc4) {
+      output[start + 1] = 0x02;
+      return output;
+    }
+    if (kind === "sof" && marker === 0xc0) {
+      output[start + 5] = 0x02;
+      return output;
+    }
+    if (kind === "sos" && marker === 0xda) {
+      output[start + 2] = 0x22;
+      return output;
+    }
+    cursor += length;
+  }
+  throw new Error(`fixture ${kind} marker missing`);
 }
 
 async function ffmpegAvailable(): Promise<boolean> {

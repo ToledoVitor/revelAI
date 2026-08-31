@@ -1,6 +1,10 @@
 import { isMediaProbeAdmissible, type MediaMode } from "./eligibility.js";
 import { MediaPipelineError } from "./probe.js";
 import type { ExtractionManifest } from "./extraction-manifest.js";
+import {
+  createStoredMediaAttachment,
+  type StoredMediaAttachment,
+} from "../repositories/attempt-repository.js";
 import { originalOrFrameDeleteAt } from "./retention-deadlines.js";
 import { temporaryDeleteAt } from "./retention-deadlines.js";
 import {
@@ -26,18 +30,18 @@ export interface MediaEvidenceExtractor {
   ): Promise<ExtractionManifest>;
 }
 
-export type AcceptedMedia = Omit<StoredLocalMedia, "transitionResourceId"> &
-  Readonly<{
-    manifest: ExtractionManifest;
-    uploadedAt: string;
-    deleteAt: string;
-    /** Required repository handoff for the durable C5 temporary fact. */
-    transition: Readonly<{
-      kind: "upload-transition";
-      resourceId: string;
-      deleteAt: string;
-    }>;
-  }>;
+/**
+ * C5's acceptance result deliberately separates private evidence from its
+ * six-field persistence attachment. `AcceptedMedia` therefore cannot be
+ * structurally passed to `AttemptService.attachValidatedMedia`: only the
+ * explicitly named, canonical `storedMedia` value crosses that boundary.
+ */
+export type AcceptedMedia = Readonly<{
+  storedMedia: StoredMediaAttachment;
+  sha256: string;
+  probe: StoredLocalMedia["probe"];
+  manifest: ExtractionManifest;
+}>;
 
 /** The public acceptance capability cannot publish a probe-only upload. */
 export class MediaPipeline {
@@ -90,12 +94,10 @@ export class MediaPipeline {
         source: "staged",
       });
       const stored = await session.publish();
-      const { transitionResourceId: ignoredTransitionResourceId, ...media } =
-        stored;
-      void ignoredTransitionResourceId;
-      return Object.freeze({
-        ...media,
-        manifest,
+      const storedMedia = createStoredMediaAttachment({
+        id: stored.id,
+        contentType: stored.contentType,
+        bytes: stored.bytes,
         uploadedAt: input.retention.uploadedAt,
         deleteAt: originalOrFrameDeleteAt(input.retention.uploadedAt),
         transition: Object.freeze({
@@ -103,6 +105,12 @@ export class MediaPipeline {
           resourceId: stored.id,
           deleteAt: temporaryDeleteAt(input.retention.uploadedAt),
         }),
+      });
+      return Object.freeze({
+        storedMedia,
+        sha256: stored.sha256,
+        probe: stored.probe,
+        manifest,
       });
     } catch (error) {
       await session.abort();
