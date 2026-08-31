@@ -17,7 +17,6 @@ import {
   attestVerifiedExtractionContinuity,
   createExtractionManifest,
   createStorageExtractionReceipt,
-  issueStorageExtractionReceipt,
   type ExtractedFrame,
   type ExtractionManifest,
   type StorageReceiptAuthority,
@@ -89,6 +88,7 @@ const MAX_SHOWINFO_BYTES =
 /** Private stored-media capability: callers see only opaque IDs and manifests. */
 export class LocalFrameExtraction {
   private readonly root: string;
+  private readonly originals: string;
   private readonly frames: string;
   private readonly temporary: string;
   private readonly ids: OpaqueMediaIdGenerator;
@@ -97,6 +97,10 @@ export class LocalFrameExtraction {
   private readonly executable: string;
   private readonly timeoutMilliseconds: number;
   private readonly maxFrameBytes: number;
+  private readonly publishedReceiptReferences = new WeakMap<
+    ExtractionManifest,
+    Readonly<{ frameBatchId: string; mediaId: string; sha256: string }>
+  >();
 
   public constructor(
     input: Readonly<{
@@ -110,6 +114,7 @@ export class LocalFrameExtraction {
     }>,
   ) {
     this.root = resolve(input.root);
+    this.originals = join(this.root, "originals");
     this.frames = join(this.root, "frames");
     this.temporary = join(this.root, "temporary");
     this.ids = input.ids;
@@ -202,6 +207,7 @@ export class LocalFrameExtraction {
         attestVerifiedExtractionContinuity(manifest, evidence.scenes);
       let receiptSha256: string | null = null;
       const receipt = createStorageExtractionReceipt({
+        frameBatchId: batchId,
         authority: Object.freeze({
           attemptId: input.attemptId,
           athleteId: input.authority.athleteId,
@@ -209,6 +215,7 @@ export class LocalFrameExtraction {
           mode: input.mode,
           mediaId: input.mediaId,
           sourceSha256: input.mediaSha256,
+          uploadedAt: input.uploadedAt,
           calibrationSessionId: input.authority.calibrationSessionId,
           calibrationNonce: input.authority.calibrationNonce,
         }),
@@ -224,10 +231,14 @@ export class LocalFrameExtraction {
       });
       await chmod(safeChild(staging, ".receipt.json"), 0o600);
       await publishFrameSet(staging, published);
-      issueStorageExtractionReceipt(manifest, {
-        frameBatchId: batchId,
-        sha256: receiptSha256,
-      });
+      this.publishedReceiptReferences.set(
+        manifest,
+        Object.freeze({
+          frameBatchId: batchId,
+          mediaId: input.mediaId,
+          sha256: receiptSha256,
+        }),
+      );
       return manifest;
     } catch (error) {
       // The retention record intentionally remains due: it can clean either
@@ -239,6 +250,15 @@ export class LocalFrameExtraction {
       if (error instanceof MediaPipelineError) throw error;
       throw new MediaPipelineError("media_probe_failed");
     }
+  }
+
+  /** C5 returns a reference only for the exact manifest it published. */
+  public durableReceiptFor(
+    manifest: ExtractionManifest,
+  ): Readonly<{ frameBatchId: string; mediaId: string; sha256: string }> {
+    const receipt = this.publishedReceiptReferences.get(manifest);
+    if (!receipt) throw new MediaPipelineError("media_probe_failed");
+    return receipt;
   }
 
   /** Opaque C6-facing byte reader; no path or layout becomes public. */
@@ -311,6 +331,24 @@ export class LocalFrameExtraction {
           await handle.readFile().finally(() => handle.close()),
         ),
       });
+    } catch {
+      throw new MediaPipelineError("media_probe_failed");
+    }
+  }
+
+  /** Streams a complete C5-owned original without revealing its path. */
+  public async sourceSha256ForOriginal(
+    input: Readonly<{ mediaId: string }>,
+  ): Promise<string> {
+    if (!isOpaqueUuid(input.mediaId))
+      throw new MediaPipelineError("media_probe_failed");
+    try {
+      const original = safeChild(
+        safeChild(this.originals, input.mediaId),
+        "payload",
+      );
+      await assertPrivateRegularFile(original);
+      return await sha256PrivateFile(original);
     } catch {
       throw new MediaPipelineError("media_probe_failed");
     }

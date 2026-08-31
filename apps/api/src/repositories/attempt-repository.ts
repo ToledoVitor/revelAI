@@ -184,6 +184,15 @@ export type ProcessingFailureRecordOutcome =
   | Readonly<{ kind: "tombstoned" }>
   | Readonly<{ kind: "lost-claim" }>;
 
+/** Internal C4 delivery/cleanup fact; it is never a public attempt field. */
+export type MediaDeliveryRecovery = Readonly<{
+  attemptId: string;
+  generation: number;
+  mediaId: string;
+  state: "pending-delivery" | "queued" | "cleanup-recoverable" | "resolved";
+  requiresRollback: boolean;
+}>;
+
 /** A durable non-terminal recovery state after bounded terminalization fails. */
 export type DeadLetterProcessingClaimOutcome =
   | Readonly<{ kind: "dead-lettered" }>
@@ -279,6 +288,26 @@ export interface AttemptRepository {
       generation: number;
     }>,
   ): Promise<void>;
+  markMediaDeliveryQueued(
+    input: Readonly<{ attemptId: string; generation: number }>,
+  ): Promise<void>;
+  beginMediaAttachmentRecovery(
+    input: Readonly<{
+      attemptId: string;
+      generation: number;
+      mediaId: string;
+    }>,
+  ): Promise<void>;
+  acknowledgeMediaAttachmentCleanup(
+    input: Readonly<{
+      attemptId: string;
+      generation: number;
+      mediaId: string;
+    }>,
+  ): Promise<void>;
+  getMediaDeliveryRecovery(
+    input: Readonly<{ attemptId: string; generation: number }>,
+  ): Promise<MediaDeliveryRecovery | null>;
   claimProcessing(job: AnalysisJob): Promise<ProcessingClaim | null>;
   getProcessingContext(
     input: Readonly<{

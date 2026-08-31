@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import {
   attestVerifiedExtractionContinuity,
   createDurableProcessingContext,
-  createStorageBackedDurableProcessingContext,
   createStorageExtractionReceipt,
   createExtractionManifest,
   parseExtractionManifest,
@@ -231,11 +230,80 @@ describe("extraction manifest", () => {
     ).rejects.toThrow("durable extraction authority mismatch");
   });
 
+  it("rejects a receipt returned for a different durable frame batch", async () => {
+    const receiptBatchId = IDs[2];
+    const frames = Array.from({ length: 12 }, (_, index) => ({
+      timestampSeconds: (3 * index) / 11,
+      reference: `${receiptBatchId}_${String(index).padStart(4, "0")}`,
+      rawBytes: Uint8Array.of(index),
+    }));
+    const manifest = createExtractionManifest({
+      attemptId: IDs[0],
+      generation: 1,
+      mediaId: IDs[1],
+      mediaSha256: "a".repeat(64),
+      mode: "free",
+      probe: { ...probe, durationSeconds: 3 },
+      frames,
+    });
+    const receipt = createStorageExtractionReceipt({
+      frameBatchId: receiptBatchId,
+      authority: {
+        attemptId: IDs[0],
+        athleteId: "44444444-4444-4444-8444-444444444444",
+        generation: 1,
+        mode: "free",
+        mediaId: IDs[1],
+        sourceSha256: "a".repeat(64),
+        uploadedAt: "2030-01-15T12:00:00.000Z",
+        calibrationSessionId: null,
+        calibrationNonce: null,
+      },
+      manifest,
+      frames: frames.map((frame) => frame.rawBytes),
+      activeScenes: null,
+    });
+    const bytes = Buffer.from(JSON.stringify(receipt));
+    const context = storageContext({
+      frameBatchId: "55555555-5555-4555-8555-555555555555",
+      mediaId: IDs[1],
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+    const reader = {
+      readReceipt: async () => ({ bytes }),
+      readFrame: async (reference: string) =>
+        frames.find((frame) => frame.reference === reference)!.rawBytes,
+      sourceSha256ForOriginal: async () => "a".repeat(64),
+    };
+
+    await expect(
+      reconstructDurableProcessingContext({
+        context,
+        frames: reader,
+        receipts: reader,
+        authority: {
+          upload: {
+            attemptId: IDs[0],
+            athleteId: "44444444-4444-4444-8444-444444444444",
+            generation: 1,
+            mode: "free",
+            mediaId: IDs[1],
+            sourceSha256: "a".repeat(64),
+            uploadedAt: "2030-01-15T12:00:00.000Z",
+            calibrationSessionId: null,
+            calibrationNonce: null,
+          },
+        },
+      }),
+    ).rejects.toThrow("durable extraction authority mismatch");
+  });
+
   it("rejects an A-identity/B-byte receipt even when B was completely rehashed", async () => {
+    const substitutedBatchId = "66666666-6666-4666-8666-666666666666";
     const acceptedFrames = verifiedFrames();
     const substitutedFrames = verifiedFrames().map((frame, index) => ({
       ...frame,
-      reference: `rehashed-${String(index).padStart(4, "0")}`,
+      reference: `${substitutedBatchId}_${String(index).padStart(4, "0")}`,
       rawBytes: Uint8Array.of((index + 17) % 256),
     }));
     const accepted = createExtractionManifest({
@@ -271,6 +339,7 @@ describe("extraction manifest", () => {
     );
     attestVerifiedExtractionContinuity(substituted, scenes);
     const receipt = createStorageExtractionReceipt({
+      frameBatchId: substitutedBatchId,
       authority: {
         attemptId: IDs[2],
         athleteId: IDs[2],
@@ -278,6 +347,7 @@ describe("extraction manifest", () => {
         mode: "verified",
         mediaId: IDs[2],
         sourceSha256: "b".repeat(64),
+        uploadedAt: "2030-01-15T12:00:00.000Z",
         calibrationSessionId: IDs[1],
         calibrationNonce: "nonce-b",
       },
@@ -286,8 +356,8 @@ describe("extraction manifest", () => {
       activeScenes: scenes,
     });
     const receiptBytes = Buffer.from(JSON.stringify(receipt));
-    const context = createStorageBackedDurableProcessingContext({
-      frameBatchId: IDs[1],
+    const context = storageContext({
+      frameBatchId: substitutedBatchId,
       mediaId: IDs[2],
       sha256: createHash("sha256").update(receiptBytes).digest("hex"),
     });
@@ -303,6 +373,7 @@ describe("extraction manifest", () => {
         receipts: {
           readReceipt: async () => ({ bytes: receiptBytes }),
           readFrame: async () => Uint8Array.of(),
+          sourceSha256ForOriginal: async () => "b".repeat(64),
         },
         authority: {
           upload: {
@@ -312,6 +383,7 @@ describe("extraction manifest", () => {
             mode: accepted.mode,
             mediaId: accepted.mediaId,
             sourceSha256: accepted.mediaSha256,
+            uploadedAt: "2030-01-15T12:00:00.000Z",
             calibrationSessionId: IDs[1],
             calibrationNonce: "nonce-a",
           },
@@ -319,7 +391,87 @@ describe("extraction manifest", () => {
       }),
     ).rejects.toThrow("durable extraction authority mismatch");
   });
+
+  it("rejects an original substituted after the complete receipt batch was published", async () => {
+    const frameBatchId = IDs[2];
+    const frames = Array.from({ length: 12 }, (_, index) => ({
+      timestampSeconds: (3 * index) / 11,
+      reference: `${frameBatchId}_${String(index).padStart(4, "0")}`,
+      rawBytes: Uint8Array.of(index),
+    }));
+    const manifest = createExtractionManifest({
+      attemptId: IDs[0],
+      generation: 1,
+      mediaId: IDs[1],
+      mediaSha256: "a".repeat(64),
+      mode: "free",
+      probe: { ...probe, durationSeconds: 3 },
+      frames,
+    });
+    const receipt = createStorageExtractionReceipt({
+      frameBatchId,
+      authority: {
+        attemptId: IDs[0],
+        athleteId: "44444444-4444-4444-8444-444444444444",
+        generation: 1,
+        mode: "free",
+        mediaId: IDs[1],
+        sourceSha256: "a".repeat(64),
+        uploadedAt: "2030-01-15T12:00:00.000Z",
+        calibrationSessionId: null,
+        calibrationNonce: null,
+      },
+      manifest,
+      frames: frames.map((frame) => frame.rawBytes),
+      activeScenes: null,
+    });
+    const bytes = Buffer.from(JSON.stringify(receipt));
+    const reader = {
+      readReceipt: async () => ({ bytes }),
+      readFrame: async (reference: string) =>
+        frames.find((frame) => frame.reference === reference)!.rawBytes,
+      sourceSha256ForOriginal: async () => "b".repeat(64),
+    };
+
+    await expect(
+      reconstructDurableProcessingContext({
+        context: storageContext({
+          frameBatchId,
+          mediaId: IDs[1],
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+        }),
+        frames: reader,
+        receipts: reader,
+        authority: {
+          upload: {
+            attemptId: IDs[0],
+            athleteId: "44444444-4444-4444-8444-444444444444",
+            generation: 1,
+            mode: "free",
+            mediaId: IDs[1],
+            sourceSha256: "a".repeat(64),
+            uploadedAt: "2030-01-15T12:00:00.000Z",
+            calibrationSessionId: null,
+            calibrationNonce: null,
+          },
+        },
+      }),
+    ).rejects.toThrow("durable extraction authority mismatch");
+  });
 });
+
+function storageContext(
+  input: Readonly<{
+    frameBatchId: string;
+    mediaId: string;
+    sha256: string;
+  }>,
+) {
+  return Object.freeze({
+    kind: "c5-durable-processing-context-v2" as const,
+    receipt: Object.freeze({ ...input }),
+  });
+}
 
 function verifiedFrames() {
   return Array.from({ length: 640 }, (_, index) => ({

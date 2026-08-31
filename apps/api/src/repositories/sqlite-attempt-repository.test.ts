@@ -22,15 +22,17 @@ import {
   AnalysisWorker,
   ExpectedProcessingFailure,
 } from "../workers/analysis-worker.js";
-import { createStorageBackedDurableProcessingContext } from "../media/extraction-manifest.js";
-import { createAcceptedMediaHandoff } from "../media/accepted-media-handoff.js";
+import { type ExtractionManifest } from "../media/extraction-manifest.js";
+import { MediaPipeline } from "../media/media-pipeline.js";
 import {
   SQLiteAttemptRepository,
+  createLiveLeaderboardCursorCodec,
   type Clock,
   type IdGenerator,
 } from "./sqlite-attempt-repository.js";
 import {
   createStoredMediaAttachment,
+  type MediaUploadContext,
   type StoredMedia,
   type StoredMediaAttachment,
   type TerminalCandidate,
@@ -178,7 +180,7 @@ function startRepositoryActor(input: RepositoryActorInput): Readonly<{
         }
       }
       const database = openSqliteDatabase(workerData.filename);
-      const repository = new SQLiteAttemptRepository({
+      const repository = SQLiteAttemptRepository.forReadOnlyTest({
         database,
         clock: new ActorClock(),
         ids: new ActorIds(workerData.ids),
@@ -462,10 +464,17 @@ async function makeRepository(
   const database = openSqliteDatabase(join(directory, "api.sqlite"));
   const secondaryDatabases: ReturnType<typeof openSqliteDatabase>[] = [];
   const clock = new TestClock();
-  const repository = new SQLiteAttemptRepository({ database, clock, ids });
+  const c5 = createTestPipelineIssuer();
+  const repository = new SQLiteAttemptRepository({
+    database,
+    clock,
+    ids,
+    handoffVerifier: c5.handoffVerifier,
+  });
   const policy = new SQLiteCompetitivePolicyRepository({ database, clock });
   return {
     clock,
+    c5,
     database,
     directory,
     ids,
@@ -520,7 +529,10 @@ async function attachMedia(
     )
     .run(media.id, input.attemptId, media.transition.deleteAt, uploadedAt);
   return fixture.repository.attachPreparedMedia({
-    accepted: preparedAccepted(context, createStoredMediaAttachment(media)),
+    accepted: await fixture.c5.accept(
+      context,
+      createStoredMediaAttachment(media),
+    ),
   });
 }
 
@@ -560,29 +572,118 @@ async function scheduleTemporaryRetention(
 function freeProcessingContext(
   input: Readonly<{ attemptId: string; generation: number; mediaId: string }>,
 ) {
-  return createStorageBackedDurableProcessingContext({
-    frameBatchId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-    mediaId: input.mediaId,
-    sha256: "d".repeat(64),
+  return Object.freeze({
+    kind: "c5-durable-processing-context-v2" as const,
+    receipt: Object.freeze({
+      frameBatchId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      mediaId: input.mediaId,
+      sha256: "d".repeat(64),
+    }),
   });
 }
 
-function preparedAccepted(
-  context: Awaited<ReturnType<SQLiteAttemptRepository["prepareMediaUpload"]>>,
-  media: StoredMediaAttachment,
-  processingContext = freeProcessingContext({
-    attemptId: context.attemptId,
-    generation: context.generation,
-    mediaId: media.id,
-  }),
-) {
-  return createAcceptedMediaHandoff({
-    context,
-    storedMedia: media,
-    sourceSha256: "e".repeat(64),
-    processingContext,
-    cleanup: { cleanup: async () => undefined },
+type TestPipelineIssuer = Readonly<{
+  handoffVerifier: ReturnType<MediaPipeline["handoffVerifier"]>;
+  accept(
+    context: MediaUploadContext,
+    media: StoredMediaAttachment,
+  ): ReturnType<MediaPipeline["accept"]>;
+}>;
+
+/** A fixture models one composed C5 pipeline and its exact C4 verifier. */
+function createTestPipelineIssuer(): TestPipelineIssuer {
+  let staged:
+    | Readonly<{
+        id: string;
+        bytes: number;
+        contentType: "video/mp4";
+        sha256: string;
+        probe: never;
+        transitionResourceId: string;
+      }>
+    | undefined;
+  let processingContext: ReturnType<typeof freeProcessingContext> | undefined;
+  const pipeline = new MediaPipeline({
+    storage: {
+      createUploadSession: async () => {
+        if (!staged) throw new Error("test media is required");
+        return {
+          write: async () => undefined,
+          inspect: async () => staged,
+          publish: async () => staged,
+          commit: async () => staged,
+          abort: async () => undefined,
+        };
+      },
+      delete: async () => undefined,
+      deleteFrame: async () => undefined,
+    } as never,
+    extractor: {
+      extract: async (input) => {
+        if (!processingContext) throw new Error("test receipt is required");
+        if (processingContext.kind !== "c5-durable-processing-context-v2")
+          throw new Error("test receipt must be storage-backed");
+        const manifest = Object.freeze({
+          attemptId: input.attemptId,
+          generation: input.generation,
+          mediaId: input.mediaId,
+          mediaSha256: input.mediaSha256,
+          mode: input.mode,
+        }) as ExtractionManifest;
+        return manifest;
+      },
+      durableReceiptFor: () => {
+        if (
+          !processingContext ||
+          processingContext.kind !== "c5-durable-processing-context-v2"
+        )
+          throw new Error("test receipt is required");
+        return processingContext.receipt;
+      },
+    },
   });
+  return Object.freeze({
+    handoffVerifier: pipeline.handoffVerifier(),
+    accept: async (context, media) => {
+      staged = {
+        id: media.id,
+        bytes: media.bytes,
+        contentType: media.contentType as "video/mp4",
+        sha256: "e".repeat(64),
+        probe: {} as never,
+        transitionResourceId: media.transition.resourceId,
+      };
+      processingContext = freeProcessingContext({
+        attemptId: context.attemptId,
+        generation: context.generation,
+        mediaId: media.id,
+      });
+      try {
+        return await pipeline.accept({
+          mode: context.mode,
+          source: oneByteSource(),
+          maxBytes: 1,
+          retention: {
+            repository: {
+              schedule: async () => ({ kind: "created" as const }),
+              acknowledge: async () => undefined,
+            },
+            attemptId: context.attemptId,
+            generation: context.generation,
+            uploadedAt: context.uploadedAt,
+            authority: context,
+          },
+        });
+      } finally {
+        staged = undefined;
+        processingContext = undefined;
+      }
+    },
+  });
+}
+
+async function* oneByteSource(): AsyncIterable<Uint8Array> {
+  yield Uint8Array.of(1);
 }
 
 describe("SQLiteAttemptRepository", () => {
@@ -596,6 +697,48 @@ describe("SQLiteAttemptRepository", () => {
     for (const database of fixture.secondaryDatabases) database.close();
     fixture.database.close();
     await rm(fixture.directory, { recursive: true, force: true });
+  });
+
+  it("rejects a structural handoff verifier outside the C5 topology", () => {
+    expect(
+      () =>
+        new SQLiteAttemptRepository({
+          database: fixture.database,
+          clock: fixture.clock,
+          ids: fixture.ids,
+          handoffVerifier: { accepts: () => true },
+        } as never),
+    ).toThrow("C5 handoff verifier");
+  });
+
+  it("accepts only the handoff issuer composed with this C4 repository", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const context = await fixture.repository.prepareMediaUpload({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+    });
+    const media = createStoredMediaAttachment(
+      preparedStoredMedia({
+        id: "media-c5-topology",
+        uploadedAt: context.uploadedAt,
+      }),
+    );
+    await scheduleTemporaryRetention(fixture, ATTEMPT_A, media);
+    const foreignC5 = createTestPipelineIssuer();
+    await expect(
+      fixture.repository.attachPreparedMedia({
+        accepted: await foreignC5.accept(context, media),
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(
+      fixture.repository.attachPreparedMedia({
+        accepted: await fixture.c5.accept(context, media),
+      }),
+    ).resolves.toEqual({ attemptId: ATTEMPT_A, generation: 1 });
   });
 
   it("creates a first-use athlete and scopes reads and tombstones to that exact identity", async () => {
@@ -742,23 +885,21 @@ describe("SQLiteAttemptRepository", () => {
     });
     await expect(
       fixture.repository.attachPreparedMedia({
-        accepted: preparedAccepted(
+        accepted: await fixture.c5.accept(
           poisonedContext as typeof first,
           createStoredMediaAttachment(media),
-          processingContext,
         ),
       }),
     ).rejects.toMatchObject({ code: "invalid_input" });
     const job = await fixture.repository.attachPreparedMedia({
-      accepted: preparedAccepted(
+      accepted: await fixture.c5.accept(
         first,
         createStoredMediaAttachment(media),
-        processingContext,
       ),
     });
     await expect(
       fixture.repository.attachPreparedMedia({
-        accepted: preparedAccepted(
+        accepted: await fixture.c5.accept(
           stale,
           createStoredMediaAttachment(
             preparedStoredMedia({
@@ -770,7 +911,7 @@ describe("SQLiteAttemptRepository", () => {
       }),
     ).rejects.toMatchObject({ code: "invalid_attempt_transition" });
 
-    const reopened = new SQLiteAttemptRepository({
+    const reopened = SQLiteAttemptRepository.forReadOnlyTest({
       database: fixture.openSecondaryDatabase(),
       clock: fixture.clock,
       ids: fixture.ids,
@@ -895,6 +1036,57 @@ describe("SQLiteAttemptRepository", () => {
         "UPDATE attempts SET processing_context_json = json_set(processing_context_json, '$.upload.generation', ?) WHERE id = ?",
       )
       .run(job.generation, ATTEMPT_A);
+    const changedUploadedAt = "2030-01-15T12:00:01.000Z";
+    fixture.database.raw
+      .prepare(
+        "UPDATE attempts SET media_json = json_set(media_json, '$.uploadedAt', ?, '$.deleteAt', ?, '$.transition.deleteAt', ?) WHERE id = ?",
+      )
+      .run(
+        changedUploadedAt,
+        "2030-01-16T11:00:01.000Z",
+        "2030-01-15T13:00:01.000Z",
+        ATTEMPT_A,
+      );
+    await expect(fixture.repository.claimProcessing(job)).rejects.toMatchObject(
+      {
+        code: "persisted_data_corrupt",
+      },
+    );
+    fixture.database.raw
+      .prepare(
+        "UPDATE attempts SET media_json = json_set(media_json, '$.uploadedAt', ?, '$.deleteAt', ?, '$.transition.deleteAt', ?) WHERE id = ?",
+      )
+      .run(
+        fixture.clock.now(),
+        "2030-01-16T11:00:00.000Z",
+        "2030-01-15T13:00:00.000Z",
+        ATTEMPT_A,
+      );
+    fixture.database.raw
+      .prepare(
+        "UPDATE attempts SET processing_context_json = json_set(processing_context_json, '$.upload.uploadedAt', ?) WHERE id = ?",
+      )
+      .run(changedUploadedAt, ATTEMPT_A);
+    await expect(fixture.repository.claimProcessing(job)).rejects.toMatchObject(
+      {
+        code: "persisted_data_corrupt",
+      },
+    );
+    fixture.database.raw
+      .prepare(
+        "UPDATE attempts SET processing_context_json = json_set(processing_context_json, '$.upload.uploadedAt', ?) WHERE id = ?",
+      )
+      .run(fixture.clock.now(), ATTEMPT_A);
+    await expect(
+      fixture.repository.claimProcessing(job),
+    ).resolves.toMatchObject({
+      generation: job.generation,
+    });
+    await fixture.repository.releaseProcessingClaim({
+      attemptId: job.attemptId,
+      generation: job.generation,
+      leaseId: LEASE_A,
+    });
     fixture.database.raw
       .prepare("UPDATE attempts SET media_sha256 = ? WHERE id = ?")
       .run("f".repeat(64), ATTEMPT_A);
@@ -1053,7 +1245,7 @@ describe("SQLiteAttemptRepository", () => {
     expect(second.nextCursor).toBeNull();
   });
 
-  it("rolls back a just-attached media record when queue delivery cannot be enqueued", async () => {
+  it("persists delivery recovery before exact rollback and resolves it after cleanup acknowledgement", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
       athleteId: ATHLETE_A,
@@ -1071,6 +1263,31 @@ describe("SQLiteAttemptRepository", () => {
     });
     expect(job).toEqual({ attemptId: ATTEMPT_A, generation: 1 });
 
+    await expect(
+      fixture.repository.getMediaDeliveryRecovery(job),
+    ).resolves.toEqual({
+      attemptId: ATTEMPT_A,
+      generation: 1,
+      mediaId: "media-a",
+      state: "pending-delivery",
+      requiresRollback: true,
+    });
+    await fixture.repository.beginMediaAttachmentRecovery({
+      ...job,
+      mediaId: "media-a",
+    });
+    const reopened = SQLiteAttemptRepository.forReadOnlyTest({
+      database: fixture.openSecondaryDatabase(),
+      clock: fixture.clock,
+      ids: fixture.ids,
+    });
+    await expect(reopened.getMediaDeliveryRecovery(job)).resolves.toMatchObject(
+      {
+        state: "cleanup-recoverable",
+        requiresRollback: true,
+      },
+    );
+
     await fixture.repository.rollbackMediaAttachment({
       attemptId: ATTEMPT_A,
       generation: job.generation,
@@ -1084,6 +1301,16 @@ describe("SQLiteAttemptRepository", () => {
       status: "awaiting-upload",
       media: null,
     });
+    await fixture.repository.acknowledgeMediaAttachmentCleanup({
+      ...job,
+      mediaId: "media-a",
+    });
+    await expect(reopened.getMediaDeliveryRecovery(job)).resolves.toMatchObject(
+      {
+        state: "resolved",
+        mediaId: "media-a",
+      },
+    );
   });
 
   it("rejects an attachment without its mandatory C5 upload-transition metadata before SQL", async () => {
@@ -1200,7 +1427,7 @@ describe("SQLiteAttemptRepository", () => {
 
   it("serializes independently-run ranked completions into frozen cohorts while preserving live ties", async () => {
     const secondDatabase = fixture.openSecondaryDatabase();
-    const second = new SQLiteAttemptRepository({
+    const second = SQLiteAttemptRepository.forReadOnlyTest({
       database: secondDatabase,
       clock: fixture.clock,
       ids: new TestIds(
@@ -1424,6 +1651,145 @@ describe("SQLiteAttemptRepository", () => {
         )
         .run(ENTRY_B),
     ).toThrow(/rule_version/);
+  });
+
+  it("uses repository commit membership for a snapshot even when a later result backdates completion", async () => {
+    const local = await makeRepository(
+      new TestIds(
+        LEASE_A,
+        LEASE_B,
+        ENTRY_A,
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        ENTRY_B,
+        "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      ),
+    );
+    try {
+      for (const [attemptId, athleteId, sessionId, nonce] of [
+        [ATTEMPT_A, ATHLETE_A, SESSION_A, "a".repeat(43)],
+        [ATTEMPT_B, ATHLETE_B, SESSION_B, "b".repeat(43)],
+      ] as const) {
+        await local.repository.issueCalibrationSession({
+          id: sessionId,
+          athleteId,
+          nonce,
+          challengeId: "wall-pass",
+          challengeVersion: 1,
+        });
+        await local.repository.readyCalibrationSession({
+          id: sessionId,
+          athleteId,
+          requiredGates: ["device", "space", "athlete", "rehearsal", "record"],
+        });
+        await local.repository.createAttempt({
+          id: attemptId,
+          athleteId,
+          input: {
+            mode: "verified",
+            challengeId: "wall-pass",
+            challengeVersion: 1,
+            calibrationSessionId: sessionId,
+          },
+        });
+        await attachMedia(local, {
+          attemptId,
+          athleteId,
+          media: {
+            id: `media-${attemptId}`,
+            contentType: "video/mp4",
+            bytes: 10,
+            deleteAt: "2030-01-16T12:00:00.000Z",
+          },
+        });
+      }
+      const cutoff = local.clock.now();
+      const firstClaim = (await local.repository.claimProcessing({
+        attemptId: ATTEMPT_A,
+        generation: 1,
+      }))!;
+      await local.repository.finalizeTerminalResult({
+        attemptId: ATTEMPT_A,
+        generation: 1,
+        leaseId: firstClaim.leaseId,
+        candidate: rankedOutcome(ATTEMPT_A, cutoff, 80),
+      });
+      local.clock.advance(1);
+      const secondClaim = (await local.repository.claimProcessing({
+        attemptId: ATTEMPT_B,
+        generation: 1,
+      }))!;
+      await local.repository.finalizeTerminalResult({
+        attemptId: ATTEMPT_B,
+        generation: 1,
+        leaseId: secondClaim.leaseId,
+        candidate: rankedOutcome(ATTEMPT_B, cutoff, 80),
+      });
+
+      const oldSnapshot = await local.repository.listLiveLeaderboard({
+        challenge: {
+          id: "wall-pass",
+          version: 1,
+          ruleVersion: "wall-pass-v1-score-1",
+        },
+        limit: 10,
+        calculatedAt: cutoff,
+      });
+      expect(oldSnapshot.entries).toHaveLength(1);
+      const currentSnapshot = await local.repository.listLiveLeaderboard({
+        challenge: {
+          id: "wall-pass",
+          version: 1,
+          ruleVersion: "wall-pass-v1-score-1",
+        },
+        limit: 10,
+        calculatedAt: local.clock.now(),
+      });
+      expect(currentSnapshot.entries).toHaveLength(2);
+      expect(currentSnapshot.entries).toContainEqual(oldSnapshot.entries[0]);
+    } finally {
+      for (const secondary of local.secondaryDatabases) secondary.close();
+      local.database.close();
+      await rm(local.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("authenticates opaque live cursors with an injected AES key and unique nonce source", () => {
+    let nonce = 0;
+    const codec = createLiveLeaderboardCursorCodec({
+      key: Uint8Array.from({ length: 32 }, (_, index) => index),
+      nonceSource: {
+        next: () => Uint8Array.from({ length: 12 }, () => nonce++),
+      },
+    });
+    const payload = {
+      version: 2 as const,
+      challengeId: "wall-pass" as const,
+      challengeVersion: 1 as const,
+      ruleVersion: "wall-pass-v1-score-1" as const,
+      calculatedAt: "2030-01-15T12:00:00.000Z",
+      score: 80,
+      completedAt: "2030-01-15T12:00:00.000Z",
+      attemptId: ATTEMPT_A,
+    };
+    const cursor = codec.encode(payload);
+    expect(cursor).not.toContain(ATTEMPT_A);
+    expect(codec.decode(cursor)).toEqual(payload);
+    let tamperError: unknown;
+    try {
+      codec.decode(`${cursor.slice(0, -1)}A`);
+    } catch (error) {
+      tamperError = error;
+    }
+    expect(tamperError).toMatchObject({ code: "invalid_input" });
+    for (const nonCanonical of [`${cursor}!`, `${cursor}=`]) {
+      expect(() => codec.decode(nonCanonical)).toThrow(
+        expect.objectContaining({ code: "invalid_input" }),
+      );
+    }
+    expect(() =>
+      createLiveLeaderboardCursorCodec({ key: new Uint8Array(31) }),
+    ).toThrow("32 bytes");
+    expect(() => codec.encode(payload)).not.toThrow();
   });
 
   it("never projects demo or experimental verified candidates onto the leaderboard", async () => {
@@ -2704,7 +3070,7 @@ describe("SQLiteAttemptRepository", () => {
     ).toEqual({ status: "failed", leaseId: null });
 
     const reopened = fixture.openSecondaryDatabase();
-    const resumed = new SQLiteAttemptRepository({
+    const resumed = SQLiteAttemptRepository.forReadOnlyTest({
       database: reopened,
       clock: fixture.clock,
       ids: new TestIds(LEASE_B),
@@ -2811,7 +3177,7 @@ describe("SQLiteAttemptRepository", () => {
     });
 
     const reopened = fixture.openSecondaryDatabase();
-    const resumed = new SQLiteAttemptRepository({
+    const resumed = SQLiteAttemptRepository.forReadOnlyTest({
       database: reopened,
       clock: fixture.clock,
       ids: new TestIds(LEASE_B),
@@ -2978,7 +3344,7 @@ describe("SQLiteAttemptRepository", () => {
       input: { mode: "free" },
     });
     const reopened = fixture.openSecondaryDatabase();
-    const repository = new SQLiteAttemptRepository({
+    const repository = SQLiteAttemptRepository.forReadOnlyTest({
       database: reopened,
       clock: fixture.clock,
       ids: new TestIds(LEASE_B, ENTRY_B),
@@ -2990,6 +3356,37 @@ describe("SQLiteAttemptRepository", () => {
         athleteId: ATHLETE_A,
       }),
     ).toMatchObject({ id: ATTEMPT_A });
+  });
+
+  it("upgrades the exact v16 predecessor with a reopen-safe delivery recovery outbox", () => {
+    const filename = join(fixture.directory, "delivery-recovery-v16.sqlite");
+    const predecessor = openSqliteDatabaseAtVersionForTest(filename, 16);
+    expect(
+      predecessor.raw
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'media_delivery_recovery_records'",
+        )
+        .get(),
+    ).toBeUndefined();
+    predecessor.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_delivery_recovery_records'",
+        )
+        .get(),
+    ).toMatchObject({ sql: expect.stringContaining("pending-delivery") });
+    upgraded.close();
+
+    const reopened = openSqliteDatabase(filename);
+    expect(
+      reopened.raw
+        .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+        .get(),
+    ).toEqual({ count: 17 });
+    reopened.close();
   });
 
   it("resets contextless legacy uploads for a fresh generation during repeated reopen", async () => {
@@ -3063,7 +3460,7 @@ describe("SQLiteAttemptRepository", () => {
     legacy.close();
 
     const upgraded = openSqliteDatabase(filename);
-    const repository = new SQLiteAttemptRepository({
+    const repository = SQLiteAttemptRepository.forReadOnlyTest({
       database: upgraded,
       clock: fixture.clock,
       ids: new TestIds(LEASE_A),
@@ -3099,7 +3496,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 16 });
+    ).toMatchObject({ count: 17 });
     reopened.close();
     upgraded.close();
 
@@ -3124,7 +3521,7 @@ describe("SQLiteAttemptRepository", () => {
       .run(ATTEMPT_A, ATHLETE_A, "{not-json", uploadedAt, uploadedAt);
     malformed.close();
     const malformedUpgraded = openSqliteDatabase(malformedFilename);
-    const malformedRepository = new SQLiteAttemptRepository({
+    const malformedRepository = SQLiteAttemptRepository.forReadOnlyTest({
       database: malformedUpgraded,
       clock: fixture.clock,
       ids: new TestIds(LEASE_A),
@@ -3417,7 +3814,7 @@ describe("SQLiteAttemptRepository", () => {
     legacy.close();
 
     const upgraded = openSqliteDatabase(filename);
-    const repository = new SQLiteAttemptRepository({
+    const repository = SQLiteAttemptRepository.forReadOnlyTest({
       database: upgraded,
       clock: fixture.clock,
       ids: new TestIds(ENTRY_A),
@@ -3509,7 +3906,7 @@ describe("SQLiteAttemptRepository", () => {
     legacy.close();
 
     const upgraded = openSqliteDatabase(filename);
-    const repository = new SQLiteAttemptRepository({
+    const repository = SQLiteAttemptRepository.forReadOnlyTest({
       database: upgraded,
       clock: fixture.clock,
       ids: new TestIds(ENTRY_A),
@@ -3548,7 +3945,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 16 });
+    ).toMatchObject({ count: 17 });
     reopened.close();
     upgraded.close();
   });
@@ -3629,7 +4026,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 16 });
+    ).toMatchObject({ count: 17 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -3781,7 +4178,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 16 });
+    ).toMatchObject({ count: 17 });
     reopened.close();
   });
 
@@ -4054,7 +4451,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 16 });
+    ).toMatchObject({ count: 17 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);

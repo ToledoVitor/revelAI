@@ -49,11 +49,6 @@ const verifiedExtractionData = new WeakMap<
   VerifiedExtractionCapability,
   VerifiedExtractionData
 >();
-const storageReceiptReferences = new WeakMap<
-  ExtractionManifest,
-  Readonly<{ frameBatchId: string; mediaId: string; sha256: string }>
->();
-
 type ManifestBase = Readonly<{
   kind: "extraction-manifest";
   extractionVersion: "c5-frame-manifest-v1";
@@ -126,12 +121,15 @@ export type StorageReceiptAuthority = Readonly<{
   mode: "free" | "verified";
   mediaId: string;
   sourceSha256: string;
+  /** C4's authoritative stored-media timestamp must match this receipt fact. */
+  uploadedAt: string;
   calibrationSessionId: string | null;
   calibrationNonce: string | null;
 }>;
 
 export type StorageExtractionReceipt = Readonly<{
   kind: "c5-storage-extraction-receipt-v1";
+  frameBatchId: string;
   authority: StorageReceiptAuthority;
   manifest: ExtractionManifest;
   frameSha256: readonly string[];
@@ -143,6 +141,9 @@ export type DurableReceiptReader = DurableFrameReader &
     readReceipt(input: Readonly<{ frameBatchId: string }>): Promise<{
       bytes: Uint8Array;
     }>;
+    sourceSha256ForOriginal(
+      input: Readonly<{ mediaId: string }>,
+    ): Promise<string>;
   }>;
 
 export type DurableReconstructionAuthority = Readonly<{
@@ -234,8 +235,6 @@ export function createExtractionManifest(
 export function createDurableProcessingContext(
   manifest: ExtractionManifest,
 ): DurableProcessingContext {
-  const receipt = storageReceiptReferences.get(manifest);
-  if (receipt) return createStorageBackedDurableProcessingContext(receipt);
   const parsed = parseExtractionManifest(manifest);
   if (parsed.mode === "free")
     return Object.freeze({
@@ -256,41 +255,6 @@ export function createDurableProcessingContext(
       data.activeScenes.map((scene) => Object.freeze({ ...scene })),
     ),
     sourceSha256: Object.freeze(data.frames.map((frame) => frame.sourceSha256)),
-  });
-}
-
-/** Records the receipt only after its frame batch is atomically published. */
-export function issueStorageExtractionReceipt(
-  manifest: ExtractionManifest,
-  input: Readonly<{ frameBatchId: string; sha256: string }>,
-): void {
-  assertUuid(input.frameBatchId);
-  assertDigest(input.sha256);
-  storageReceiptReferences.set(
-    manifest,
-    Object.freeze({
-      frameBatchId: input.frameBatchId,
-      mediaId: manifest.mediaId,
-      sha256: input.sha256,
-    }),
-  );
-}
-
-/** C5 only calls this after atomically publishing the owned receipt. */
-export function createStorageBackedDurableProcessingContext(
-  input: Readonly<{ frameBatchId: string; mediaId: string; sha256: string }>,
-): DurableProcessingContext {
-  assertUuid(input.frameBatchId);
-  if (input.mediaId.length < 1 || input.mediaId.length > 80)
-    throw new Error("Invalid extraction identifier.");
-  assertDigest(input.sha256);
-  return Object.freeze({
-    kind: "c5-durable-processing-context-v2" as const,
-    receipt: Object.freeze({
-      frameBatchId: input.frameBatchId,
-      mediaId: input.mediaId,
-      sha256: input.sha256,
-    }),
   });
 }
 
@@ -377,7 +341,15 @@ async function reconstructStorageBackedContext(
   if (actualReceiptSha256 !== context.receipt.sha256)
     throw new Error("durable extraction authority mismatch");
   const receipt = parseStorageExtractionReceipt(stored.bytes);
+  if (receipt.frameBatchId !== context.receipt.frameBatchId)
+    throw new Error("durable extraction authority mismatch");
   if (!sameReceiptAuthority(receipt.authority, input.authority.upload))
+    throw new Error("durable extraction authority mismatch");
+  if (
+    (await input.receipts.sourceSha256ForOriginal({
+      mediaId: receipt.authority.mediaId,
+    })) !== receipt.authority.sourceSha256
+  )
     throw new Error("durable extraction authority mismatch");
   const frames = await Promise.all(
     receipt.manifest.frames.items.map(async (frame) =>
@@ -423,6 +395,7 @@ async function reconstructStorageBackedContext(
 
 export function createStorageExtractionReceipt(
   input: Readonly<{
+    frameBatchId: string;
     authority: StorageExtractionReceipt["authority"];
     manifest: ExtractionManifest;
     frames: readonly Uint8Array[];
@@ -430,12 +403,14 @@ export function createStorageExtractionReceipt(
   }>,
 ): StorageExtractionReceipt {
   const manifest = parseExtractionManifest(input.manifest);
+  assertUuid(input.frameBatchId);
   if (
     input.authority.attemptId !== manifest.attemptId ||
     input.authority.generation !== manifest.generation ||
     input.authority.mode !== manifest.mode ||
     input.authority.mediaId !== manifest.mediaId ||
     input.authority.sourceSha256 !== manifest.mediaSha256 ||
+    !isUtcIsoTimestamp(input.authority.uploadedAt) ||
     (manifest.mode === "free" &&
       (input.authority.calibrationSessionId !== null ||
         input.authority.calibrationNonce !== null)) ||
@@ -446,6 +421,14 @@ export function createStorageExtractionReceipt(
     throw new Error("invalid storage extraction receipt");
   assertUuid(input.authority.athleteId);
   assertDigest(input.authority.sourceSha256);
+  if (
+    manifest.frames.items.some(
+      (frame) =>
+        frame.reference !==
+        `${input.frameBatchId}_${String(frame.ordinal).padStart(4, "0")}`,
+    )
+  )
+    throw new Error("invalid storage extraction receipt");
   const activeScenes = input.activeScenes
     ? Object.freeze(
         input.activeScenes.map((scene) => Object.freeze({ ...scene })),
@@ -461,6 +444,7 @@ export function createStorageExtractionReceipt(
   }
   return Object.freeze({
     kind: "c5-storage-extraction-receipt-v1",
+    frameBatchId: input.frameBatchId,
     authority: Object.freeze({ ...input.authority }),
     manifest,
     frameSha256: Object.freeze(
@@ -481,7 +465,19 @@ export function parseStorageExtractionReceipt(
   } catch {
     throw new Error("invalid storage extraction receipt");
   }
-  if (!isRecord(value) || value.kind !== "c5-storage-extraction-receipt-v1")
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      "kind",
+      "frameBatchId",
+      "authority",
+      "manifest",
+      "frameSha256",
+      "activeScenes",
+    ]) ||
+    value.kind !== "c5-storage-extraction-receipt-v1" ||
+    !isUuid(value.frameBatchId)
+  )
     throw new Error("invalid storage extraction receipt");
   const authority = value.authority;
   if (
@@ -493,6 +489,7 @@ export function parseStorageExtractionReceipt(
       "mode",
       "mediaId",
       "sourceSha256",
+      "uploadedAt",
       "calibrationSessionId",
       "calibrationNonce",
     ]) ||
@@ -505,6 +502,8 @@ export function parseStorageExtractionReceipt(
     !isUuid(authority.mediaId) ||
     typeof authority.sourceSha256 !== "string" ||
     !isDigest(authority.sourceSha256) ||
+    typeof authority.uploadedAt !== "string" ||
+    !isUtcIsoTimestamp(authority.uploadedAt) ||
     (authority.calibrationSessionId !== null &&
       !isUuid(authority.calibrationSessionId)) ||
     (authority.calibrationNonce !== null &&
@@ -512,6 +511,14 @@ export function parseStorageExtractionReceipt(
   )
     throw new Error("invalid storage extraction receipt");
   const manifest = parseExtractionManifest(value.manifest);
+  if (
+    manifest.frames.items.some(
+      (frame) =>
+        frame.reference !==
+        `${value.frameBatchId}_${String(frame.ordinal).padStart(4, "0")}`,
+    )
+  )
+    throw new Error("invalid storage extraction receipt");
   if (!Array.isArray(value.frameSha256))
     throw new Error("invalid storage extraction receipt");
   const frameSha256 = value.frameSha256.map((digest) => {
@@ -531,6 +538,7 @@ export function parseStorageExtractionReceipt(
     mode: authority.mode,
     mediaId: authority.mediaId,
     sourceSha256: authority.sourceSha256,
+    uploadedAt: authority.uploadedAt,
     calibrationSessionId: authority.calibrationSessionId,
     calibrationNonce: authority.calibrationNonce,
   }) as StorageExtractionReceipt["authority"];
@@ -557,6 +565,7 @@ export function parseStorageExtractionReceipt(
   }
   return Object.freeze({
     kind: "c5-storage-extraction-receipt-v1" as const,
+    frameBatchId: value.frameBatchId,
     authority: parsedAuthority,
     manifest,
     frameSha256: Object.freeze(frameSha256),
@@ -607,6 +616,7 @@ function sameReceiptAuthority(
     left.mode === right.mode &&
     left.mediaId === right.mediaId &&
     left.sourceSha256 === right.sourceSha256 &&
+    left.uploadedAt === right.uploadedAt &&
     left.calibrationSessionId === right.calibrationSessionId &&
     left.calibrationNonce === right.calibrationNonce
   );
@@ -644,10 +654,13 @@ export function parseDurableProcessingContext(
       !isDigest(receipt.sha256)
     )
       throw new Error("Invalid durable processing context.");
-    return createStorageBackedDurableProcessingContext({
-      frameBatchId: receipt.frameBatchId,
-      mediaId: receipt.mediaId,
-      sha256: receipt.sha256,
+    return Object.freeze({
+      kind: "c5-durable-processing-context-v2" as const,
+      receipt: Object.freeze({
+        frameBatchId: receipt.frameBatchId,
+        mediaId: receipt.mediaId,
+        sha256: receipt.sha256,
+      }),
     });
   }
   if (value.kind !== "c5-durable-processing-context-v1")
@@ -1179,6 +1192,14 @@ function assertDigest(value: string): void {
 
 function isDigest(value: string): boolean {
   return /^[a-f0-9]{64}$/i.test(value);
+}
+
+function isUtcIsoTimestamp(value: string): boolean {
+  return (
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
+    !Number.isNaN(Date.parse(value)) &&
+    new Date(value).toISOString() === value
+  );
 }
 
 function assertFrameReference(value: string): void {

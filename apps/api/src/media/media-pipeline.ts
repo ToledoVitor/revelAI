@@ -1,13 +1,10 @@
 import { isMediaProbeAdmissible, type MediaMode } from "./eligibility.js";
 import { MediaPipelineError } from "./probe.js";
+import type { ExtractionManifest } from "./extraction-manifest.js";
 import {
-  createDurableProcessingContext,
-  type ExtractionManifest,
-} from "./extraction-manifest.js";
-import {
-  createAcceptedMediaHandoff,
   type AcceptedMediaCleanup,
   type AcceptedMediaHandoff,
+  type AcceptedMediaHandoffVerifier,
 } from "./accepted-media-handoff.js";
 import {
   acceptSingleMediaPart,
@@ -45,6 +42,13 @@ export interface MediaEvidenceExtractor {
       }>;
     }>,
   ): Promise<ExtractionManifest>;
+  /**
+   * The extractor owns this reference and returns it only for its exact
+   * published manifest. C8 gets neither an issuer nor receipt bytes here.
+   */
+  durableReceiptFor(
+    manifest: ExtractionManifest,
+  ): Readonly<{ frameBatchId: string; mediaId: string; sha256: string }>;
 }
 
 /**
@@ -61,10 +65,23 @@ export type AcceptedMedia = AcceptedMediaHandoff &
 
 export type { AcceptedMediaCleanup } from "./accepted-media-handoff.js";
 
+const c5HandoffVerifiers = new WeakSet<object>();
+
+/** Only a real MediaPipeline can register a verifier in this private registry. */
+export function isC5AcceptedMediaHandoffVerifier(
+  value: unknown,
+): value is AcceptedMediaHandoffVerifier {
+  return (
+    typeof value === "object" && value !== null && c5HandoffVerifiers.has(value)
+  );
+}
+
 /** The public acceptance capability cannot publish a probe-only upload. */
 export class MediaPipeline {
   private readonly storage: LocalMediaStorage;
   private readonly extractor: MediaEvidenceExtractor;
+  private readonly issuedHandoffs = new WeakSet<object>();
+  private readonly verifier: AcceptedMediaHandoffVerifier;
 
   public constructor(
     input: Readonly<{
@@ -74,6 +91,18 @@ export class MediaPipeline {
   ) {
     this.storage = input.storage;
     this.extractor = input.extractor;
+    this.verifier = Object.freeze({
+      accepts: (value: unknown): value is AcceptedMediaHandoff =>
+        typeof value === "object" &&
+        value !== null &&
+        this.issuedHandoffs.has(value),
+    });
+    c5HandoffVerifiers.add(this.verifier);
+  }
+
+  /** Composition gives C4 this verifier; no caller receives an issuer. */
+  public handoffVerifier(): AcceptedMediaHandoffVerifier {
+    return this.verifier;
   }
 
   public async accept(
@@ -222,9 +251,8 @@ export class MediaPipeline {
         manifest.mediaSha256 !== staged.sha256
       )
         throw new MediaPipelineError("media_probe_failed");
-      const processingContext = createDurableProcessingContext(manifest);
-      if (processingContext.kind !== "c5-durable-processing-context-v2")
-        throw new MediaPipelineError("media_probe_failed");
+      const receipt = this.extractor.durableReceiptFor(manifest);
+      const processingContext = durableStorageContext(receipt);
       // Derive cleanup identifiers before the original can be published.
       cleanup = this.cleanupCapability(
         staged.id,
@@ -243,7 +271,7 @@ export class MediaPipeline {
           deleteAt: temporaryDeleteAt(input.retention.uploadedAt),
         }),
       });
-      return createAcceptedMediaHandoff({
+      return this.issueAcceptedMedia({
         context: authority,
         storedMedia,
         sourceSha256: stored.sha256,
@@ -274,4 +302,32 @@ export class MediaPipeline {
       },
     });
   }
+
+  private issueAcceptedMedia<T extends AcceptedMediaHandoff>(input: T): T {
+    const handoff = Object.freeze({ ...input });
+    this.issuedHandoffs.add(handoff);
+    return handoff;
+  }
+}
+
+function durableStorageContext(
+  input: Readonly<{
+    frameBatchId: string;
+    mediaId: string;
+    sha256: string;
+  }>,
+) {
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      input.frameBatchId,
+    ) ||
+    input.mediaId.length < 1 ||
+    input.mediaId.length > 80 ||
+    !/^[a-f0-9]{64}$/i.test(input.sha256)
+  )
+    throw new MediaPipelineError("media_probe_failed");
+  return Object.freeze({
+    kind: "c5-durable-processing-context-v2" as const,
+    receipt: Object.freeze({ ...input }),
+  });
 }

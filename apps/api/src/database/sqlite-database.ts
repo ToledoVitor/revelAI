@@ -664,6 +664,34 @@ const migrations: readonly Migration[] = [
     `,
     afterApply: resetLegacyProcessingRowsV16,
   },
+  {
+    // C8 records delivery intent in the same transaction as C4's accepted
+    // attachment. Queue failures can then retire the exact generation and
+    // leave a durable cleanup/retry fact without retaining any storage path.
+    version: 17,
+    sql: `
+      CREATE TABLE media_delivery_recovery_records (
+        attempt_id TEXT NOT NULL REFERENCES attempts(id),
+        generation INTEGER NOT NULL CHECK (
+          typeof(generation) = 'integer'
+          AND generation BETWEEN 1 AND 9007199254740991
+        ),
+        media_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (
+          state IN ('pending-delivery', 'queued', 'cleanup-recoverable', 'resolved')
+        ),
+        requires_rollback INTEGER NOT NULL CHECK (requires_rollback IN (0, 1)),
+        queued_at TEXT,
+        rollback_completed_at TEXT,
+        cleanup_completed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (attempt_id, generation)
+      );
+      CREATE INDEX media_delivery_recovery_pending
+        ON media_delivery_recovery_records(state, updated_at, attempt_id);
+    `,
+  },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {

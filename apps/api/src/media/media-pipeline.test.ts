@@ -7,6 +7,7 @@ import { LocalFrameExtraction } from "../storage/local-frame-extraction.js";
 import { RawMultipartByteCounter } from "./multipart-intake.js";
 import { MediaPipeline } from "./media-pipeline.js";
 import { MediaPipelineError } from "./probe.js";
+import { isC5AcceptedMediaHandoffVerifier } from "./media-pipeline.js";
 import {
   reconstructDurableProcessingContext,
   type ExtractionManifest,
@@ -34,7 +35,14 @@ const retention = {
     verified: null,
   },
 };
-const extractor = { extract: async () => ({}) as ExtractionManifest };
+const extractor = {
+  extract: async () => ({}) as ExtractionManifest,
+  durableReceiptFor: () => ({
+    frameBatchId,
+    mediaId,
+    sha256: "a".repeat(64),
+  }),
+};
 
 describe("MediaPipeline", () => {
   const roots: string[] = [];
@@ -118,6 +126,7 @@ describe("MediaPipeline", () => {
             mode: retention.authority.mode,
             mediaId,
             sourceSha256: accepted.sha256,
+            uploadedAt: retention.uploadedAt,
             calibrationSessionId: null,
             calibrationNonce: null,
           },
@@ -128,6 +137,25 @@ describe("MediaPipeline", () => {
     await expect(accepted.cleanup.cleanup()).resolves.toBeUndefined();
     expect(await readdir(join(root, "originals"))).toEqual([]);
     expect(await readdir(join(root, "frames"))).toEqual([]);
+
+    const reflectedClone = Object.defineProperties(
+      { ...accepted },
+      Object.getOwnPropertyDescriptors(accepted),
+    );
+    const spreadClone = { ...accepted };
+    const structuralForge = Object.freeze({
+      ...accepted,
+      cleanup: { cleanup: async () => undefined },
+    });
+    const verifier = pipeline.handoffVerifier();
+    expect(isC5AcceptedMediaHandoffVerifier(verifier)).toBe(true);
+    expect(verifier.accepts(accepted)).toBe(true);
+    expect(verifier.accepts(reflectedClone)).toBe(false);
+    expect(verifier.accepts(spreadClone)).toBe(false);
+    expect(verifier.accepts(structuralForge)).toBe(false);
+    await expect(
+      import("./accepted-media-handoff.js"),
+    ).resolves.not.toHaveProperty("createAcceptedMediaHandoff");
   });
 
   it("rejects verified ineligible media before an original becomes visible", async () => {
@@ -186,6 +214,11 @@ describe("MediaPipeline", () => {
         extract: async () => {
           throw new MediaPipelineError("media_requirements_not_met");
         },
+        durableReceiptFor: () => ({
+          frameBatchId,
+          mediaId,
+          sha256: "a".repeat(64),
+        }),
       },
     });
 
