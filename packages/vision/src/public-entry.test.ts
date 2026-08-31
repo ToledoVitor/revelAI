@@ -24,7 +24,7 @@ describe("vision public boundary", () => {
     ).toEqual([]);
   });
 
-  it("rejects namespace, default, neutral-barrel, and transitive external aliases", () => {
+  it("rejects signatures, computed namespaces, bindings, diagnostics, and transitive aliases", () => {
     const program = adversarialFixtureProgram();
     const entry = program.getSourceFile("/vision-guard/index.ts");
     expect(entry).toBeDefined();
@@ -37,9 +37,11 @@ describe("vision public boundary", () => {
     ).toEqual(
       expect.arrayContaining([
         expect.stringContaining("VerifiedResultSchema"),
+        expect.stringContaining("retry"),
         expect.stringContaining("score"),
         expect.stringContaining("rank"),
         expect.stringContaining("integrity"),
+        expect.stringContaining("compiler-diagnostic"),
       ]),
     );
   });
@@ -67,6 +69,13 @@ function collectPublicBoundaryViolations(
 ): readonly string[] {
   const checker = program.getTypeChecker();
   const violations = new Set<string>();
+  for (const diagnostic of ts.getPreEmitDiagnostics(program))
+    violations.add(
+      `compiler-diagnostic:${ts.flattenDiagnosticMessageText(
+        diagnostic.messageText,
+        " ",
+      )}`,
+    );
   for (const source of program.getSourceFiles()) {
     if (!isVisionFile(source.fileName)) continue;
     collectModuleSpecifiers(source, violations);
@@ -75,8 +84,8 @@ function collectPublicBoundaryViolations(
 
   const entrySymbol = checker.getSymbolAtLocation(entry);
   if (!entrySymbol) throw new Error("vision entry symbol was not loaded");
-  const seenSymbols = new Set<ts.Symbol>();
-  const seenTypes = new Set<number>();
+  const seenSymbols = new Map<ts.Symbol, Set<boolean>>();
+  const seenTypes = new Map<ts.Type, Set<boolean>>();
   for (const exported of checker.getExportsOfModule(entrySymbol))
     walkPublicSymbol(
       exported,
@@ -129,9 +138,39 @@ function collectResolvedImportsAndUses(
     // that matters. This also catches `namespace.default` aliases.
     if (ts.isPropertyAccessExpression(node))
       reportSymbol(node.name, checker, violations, "property-access");
+    if (ts.isElementAccessExpression(node))
+      reportElementAccess(node, checker, violations);
+    if (ts.isBindingElement(node))
+      reportSymbol(
+        node.propertyName ?? node.name,
+        checker,
+        violations,
+        "binding",
+      );
     ts.forEachChild(node, visit);
   };
   visit(source);
+}
+
+function reportElementAccess(
+  node: ts.ElementAccessExpression,
+  checker: ts.TypeChecker,
+  violations: Set<string>,
+): void {
+  const argument = node.argumentExpression;
+  if (!ts.isStringLiteral(argument)) return;
+  const propertyName = argument.text;
+  const namespaceSymbol = checker.getSymbolAtLocation(node.expression);
+  const namespace = namespaceSymbol && resolveAlias(namespaceSymbol, checker);
+  const property = namespace
+    ? checker
+        .getExportsOfModule(namespace)
+        .find((candidate) => candidate.getName() === propertyName)
+    : undefined;
+  if (property)
+    reportResolvedSymbol(property, checker, violations, "element-access");
+  else if (forbiddenPublicName.test(propertyName))
+    violations.add(`element-access:${propertyName}`);
 }
 
 function reportSymbol(
@@ -142,23 +181,34 @@ function reportSymbol(
 ): void {
   const raw = node.getText();
   const symbol = checker.getSymbolAtLocation(node);
-  const resolved = symbol && resolveAlias(symbol, checker);
-  const name = resolved?.getName() ?? raw;
-  if (forbiddenPublicName.test(raw) || forbiddenPublicName.test(name))
-    violations.add(`${source}:${raw}->${name}`);
+  if (symbol) reportResolvedSymbol(symbol, checker, violations, source, raw);
+  else if (forbiddenPublicName.test(raw)) violations.add(`${source}:${raw}`);
+}
+
+function reportResolvedSymbol(
+  symbol: ts.Symbol,
+  checker: ts.TypeChecker,
+  violations: Set<string>,
+  source: string,
+  fallback = symbol.getName(),
+): void {
+  const resolved = resolveAlias(symbol, checker);
+  const name = resolved.getName();
+  if (forbiddenPublicName.test(fallback) || forbiddenPublicName.test(name))
+    violations.add(`${source}:${fallback}->${name}`);
 }
 
 function walkPublicSymbol(
   symbol: ts.Symbol,
   checker: ts.TypeChecker,
   violations: Set<string>,
-  seenSymbols: Set<ts.Symbol>,
-  seenTypes: Set<number>,
+  seenSymbols: Map<ts.Symbol, Set<boolean>>,
+  seenTypes: Map<ts.Type, Set<boolean>>,
   withinVisionProvider: boolean,
 ): void {
   const resolved = resolveAlias(symbol, checker);
-  if (seenSymbols.has(resolved)) return;
-  seenSymbols.add(resolved);
+  if (!markUnseen(seenSymbols, resolved, withinVisionProvider)) return;
+  if (isStandardLibrarySymbol(resolved)) return;
   const providerSurface =
     withinVisionProvider || resolved.getName() === "VisionProvider";
   reportPublicName(resolved.getName(), violations, providerSurface, "symbol");
@@ -205,17 +255,16 @@ function walkPublicType(
   type: ts.Type,
   checker: ts.TypeChecker,
   violations: Set<string>,
-  seenSymbols: Set<ts.Symbol>,
-  seenTypes: Set<number>,
+  seenSymbols: Map<ts.Symbol, Set<boolean>>,
+  seenTypes: Map<ts.Type, Set<boolean>>,
   withinVisionProvider: boolean,
 ): void {
-  const id = (type as ts.Type & { id?: number }).id;
-  if (id !== undefined) {
-    if (seenTypes.has(id)) return;
-    seenTypes.add(id);
-  }
+  if (!markUnseen(seenTypes, type, withinVisionProvider)) return;
+  if (type.flags & ts.TypeFlags.TypeParameter) return;
   const typeSymbol = type.aliasSymbol ?? type.getSymbol();
-  if (typeSymbol) {
+  const standardLibraryType =
+    typeSymbol !== undefined && isStandardLibrarySymbol(typeSymbol);
+  if (typeSymbol && !standardLibraryType) {
     const resolved = resolveAlias(typeSymbol, checker);
     reportPublicName(
       resolved.getName(),
@@ -223,7 +272,7 @@ function walkPublicType(
       withinVisionProvider,
       "type",
     );
-    if (!seenSymbols.has(resolved))
+    if (!seenSymbols.get(resolved)?.has(withinVisionProvider))
       walkPublicSymbol(
         resolved,
         checker,
@@ -251,6 +300,28 @@ function walkPublicType(
       seenTypes,
       withinVisionProvider,
     );
+  for (const argument of typeReferenceArguments(type, checker))
+    walkPublicType(
+      argument,
+      checker,
+      violations,
+      seenSymbols,
+      seenTypes,
+      withinVisionProvider,
+    );
+  if (standardLibraryType) return;
+  for (const signature of [
+    ...checker.getSignaturesOfType(type, ts.SignatureKind.Call),
+    ...checker.getSignaturesOfType(type, ts.SignatureKind.Construct),
+  ])
+    walkPublicSignature(
+      signature,
+      checker,
+      violations,
+      seenSymbols,
+      seenTypes,
+      withinVisionProvider,
+    );
   for (const property of checker.getPropertiesOfType(type)) {
     const providerSurface =
       withinVisionProvider || typeSymbol?.getName() === "VisionProvider";
@@ -272,6 +343,69 @@ function walkPublicType(
   }
 }
 
+function typeReferenceArguments(
+  type: ts.Type,
+  checker: ts.TypeChecker,
+): readonly ts.Type[] {
+  if (!(type.flags & ts.TypeFlags.Object)) return [];
+  const objectType = type as ts.ObjectType;
+  if (!(objectType.objectFlags & ts.ObjectFlags.Reference)) return [];
+  return checker.getTypeArguments(objectType as ts.TypeReference);
+}
+
+function walkPublicSignature(
+  signature: ts.Signature,
+  checker: ts.TypeChecker,
+  violations: Set<string>,
+  seenSymbols: Map<ts.Symbol, Set<boolean>>,
+  seenTypes: Map<ts.Type, Set<boolean>>,
+  withinVisionProvider: boolean,
+): void {
+  for (const parameter of signature.getParameters()) {
+    reportPublicName(
+      parameter.getName(),
+      violations,
+      withinVisionProvider,
+      "parameter",
+    );
+    const declaration =
+      parameter.valueDeclaration ?? parameter.declarations?.[0];
+    if (!declaration) continue;
+    try {
+      walkPublicType(
+        checker.getTypeOfSymbolAtLocation(parameter, declaration),
+        checker,
+        violations,
+        seenSymbols,
+        seenTypes,
+        withinVisionProvider,
+      );
+    } catch {
+      // Program diagnostics above make a missing synthetic declaration fail closed.
+    }
+  }
+  walkPublicType(
+    checker.getReturnTypeOfSignature(signature),
+    checker,
+    violations,
+    seenSymbols,
+    seenTypes,
+    withinVisionProvider,
+  );
+}
+
+function markUnseen<T>(
+  seen: Map<T, Set<boolean>>,
+  value: T,
+  withinVisionProvider: boolean,
+): boolean {
+  const contexts = seen.get(value);
+  if (contexts?.has(withinVisionProvider)) return false;
+  if (contexts) contexts.add(withinVisionProvider);
+  else seen.set(value, new Set([withinVisionProvider]));
+  return true;
+}
+
 function reportPublicName(
   name: string,
   violations: Set<string>,
@@ -290,6 +424,19 @@ function resolveAlias(symbol: ts.Symbol, checker: ts.TypeChecker): ts.Symbol {
     : symbol;
 }
 
+function isStandardLibrarySymbol(symbol: ts.Symbol): boolean {
+  const declarations = symbol.declarations;
+  return (
+    declarations !== undefined &&
+    declarations.length > 0 &&
+    declarations.every((declaration) =>
+      /\/typescript\/lib\/lib\..*\.d\.ts$/.test(
+        declaration.getSourceFile().fileName,
+      ),
+    )
+  );
+}
+
 function adversarialFixtureProgram(): ts.Program {
   const files = new Map<string, string>([
     [
@@ -298,12 +445,21 @@ function adversarialFixtureProgram(): ts.Program {
         'import * as neutral from "./neutral.js";',
         'import neutralDefault from "./external.js";',
         'import type { NeutralAlias } from "./neutral.js";',
-        "export const leaked = neutral.VerifiedResultSchema;",
+        'export const leaked = neutral["VerifiedResultSchema"];',
+        "const { VerifiedResultSchema: destructuredSchema, default: destructuredDefault } = neutral;",
+        "export { destructuredSchema, destructuredDefault };",
         "export type ProviderSurface = {",
         "  throughNamespace: typeof neutral.VerifiedResultSchema;",
         "  throughDefault: typeof neutralDefault;",
         "  throughAlias: NeutralAlias;",
         "};",
+        "export type SharedProviderReturn = { retry: string };",
+        "export type PublicFirst = SharedProviderReturn;",
+        "export interface VisionProvider {",
+        "  shared(): SharedProviderReturn;",
+        "  analyze(): Promise<Readonly<{ retry: string }>>;",
+        "}",
+        'export const compilerFailure: number = "not-a-number";',
       ].join("\n"),
     ],
     [
@@ -311,6 +467,8 @@ function adversarialFixtureProgram(): ts.Program {
       [
         "export const VerifiedResultSchema = Object.freeze({});",
         "export type NeutralAlias = { score: number; nested: { integrity: boolean } };",
+        "const defaultPayload: { nested: { policy: boolean } } = { nested: { policy: true } };",
+        "export default defaultPayload;",
       ].join("\n"),
     ],
     [
@@ -320,9 +478,11 @@ function adversarialFixtureProgram(): ts.Program {
   ]);
   const host = ts.createCompilerHost(compilerOptions());
   const nativeGetSourceFile = host.getSourceFile.bind(host);
+  const nativeFileExists = host.fileExists.bind(host);
+  const nativeReadFile = host.readFile.bind(host);
   const nativeDirectoryExists = host.directoryExists?.bind(host);
-  host.fileExists = (file) => files.has(file);
-  host.readFile = (file) => files.get(file);
+  host.fileExists = (file) => files.has(file) || nativeFileExists(file);
+  host.readFile = (file) => files.get(file) ?? nativeReadFile(file);
   host.directoryExists = (directory) =>
     directory === "/vision-guard" ||
     nativeDirectoryExists?.(directory) === true;

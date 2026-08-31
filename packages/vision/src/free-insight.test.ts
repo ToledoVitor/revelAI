@@ -192,6 +192,24 @@ describe("assembleFreeInsight", () => {
     ).toThrow(new VisionProviderError("provider_temporary_unavailable"));
   });
 
+  it("fails retryably for an accepted athlete pair with a negative finite delta", () => {
+    expect(() =>
+      assembleFreeInsight({
+        batch: {
+          attemptId,
+          kind: "free-training",
+          provenance: {
+            kind: "demo",
+            fixtureId: "free-well-framed-active-v1",
+            providerVersion: "demo-observations-v1",
+          },
+          frames: [frame(0, 1000, 0), frame(1, 0, 20)],
+        },
+        generatedAt: now,
+      }),
+    ).toThrow(new VisionProviderError("provider_temporary_unavailable"));
+  });
+
   it.each([Number.NaN, Number.POSITIVE_INFINITY])(
     "normalizes a non-finite timestamp Zod failure (%s) to the retryable provider error",
     (timestampMs) => {
@@ -341,6 +359,16 @@ describe("assembleFreeInsight", () => {
       expect.objectContaining({ value: 3, range: "limited" }),
       expect.objectContaining({ value: 3, range: "limited" }),
     ]);
+  });
+
+  it("rounds a genuine one-of-forty activity fraction half up", () => {
+    const frames = Array.from({ length: 41 }, (_, index) =>
+      frame(index, index * 1000, index === 0 ? 0 : 22),
+    );
+    expect(insightFor(frames).observations[2]).toMatchObject({
+      value: 3,
+      range: "low",
+    });
   });
 
   it.each([
