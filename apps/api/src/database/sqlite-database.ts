@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { WorkflowBenchmarkReceiptSchema } from "@revelai/contracts";
 
 type Migration = Readonly<{
   version: number;
@@ -609,6 +610,17 @@ const migrations: readonly Migration[] = [
     `,
     afterApply: canonicalizeStoredMediaV13,
   },
+  {
+    // C7 policy lookup is workspace-scoped. Existing policy rows are repaired
+    // from their immutable, strictly parsed receipt rather than accepting a
+    // caller-provided workspace identity.
+    version: 14,
+    sql: `
+      ALTER TABLE approved_competitive_model_policies
+      ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '';
+    `,
+    afterApply: bindCompetitivePolicyWorkspacesV14,
+  },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {
@@ -738,6 +750,41 @@ function canonicalizeStoredMediaV13(raw: Database.Database): void {
     const canonical = canonicalizeStoredMediaV13Value(row.media_json);
     if (canonical !== row.media_json) update.run(canonical, row.id);
   }
+}
+
+/**
+ * Receipt JSON is the sole durable source of a workflow workspace. Refuse an
+ * upgrade that would otherwise invent or preserve an unverified association.
+ */
+function bindCompetitivePolicyWorkspacesV14(raw: Database.Database): void {
+  const rows = raw
+    .prepare(
+      `SELECT p.id, r.receipt_json
+       FROM approved_competitive_model_policies p
+       INNER JOIN workflow_benchmark_receipts r ON r.id = p.receipt_id`,
+    )
+    .all() as readonly Readonly<{ id: string; receipt_json: string }>[];
+  const update = raw.prepare(
+    "UPDATE approved_competitive_model_policies SET workspace_id = ? WHERE id = ?",
+  );
+  for (const row of rows) {
+    let receipt: unknown;
+    try {
+      receipt = JSON.parse(row.receipt_json);
+    } catch {
+      throw new Error("invalid competitive policy receipt during v14 upgrade");
+    }
+    const parsed = WorkflowBenchmarkReceiptSchema.safeParse(receipt);
+    if (!parsed.success)
+      throw new Error("invalid competitive policy receipt during v14 upgrade");
+    update.run(parsed.data.workflow.workspaceId, row.id);
+  }
+  raw.exec(
+    `DROP INDEX IF EXISTS active_competitive_policy_tuple_v5;
+     CREATE UNIQUE INDEX active_competitive_policy_tuple_v14
+       ON approved_competitive_model_policies(workspace_id, model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, challenge_id, challenge_version, rule_version)
+       WHERE active = 1;`,
+  );
 }
 
 function canonicalizeStoredMediaV13Value(value: string): string {

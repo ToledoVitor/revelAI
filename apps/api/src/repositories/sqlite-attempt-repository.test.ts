@@ -2732,7 +2732,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 13 });
+    ).toMatchObject({ count: 14 });
     reopened.close();
     upgraded.close();
   });
@@ -3147,7 +3147,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 13 });
+    ).toMatchObject({ count: 14 });
     reopened.close();
     upgraded.close();
   });
@@ -3195,6 +3195,8 @@ describe("SQLiteAttemptRepository", () => {
       clock: fixture.clock,
     });
     const tuple = {
+      workspaceId:
+        passingWorkflowBenchmarkReceiptFixture.workflow.workspaceId,
       modelBundleId:
         passingWorkflowBenchmarkReceiptFixture.workflow.modelBundleId,
       workflowId: passingWorkflowBenchmarkReceiptFixture.workflow.workflowId,
@@ -3225,7 +3227,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 13 });
+    ).toMatchObject({ count: 14 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -3298,6 +3300,7 @@ describe("SQLiteAttemptRepository", () => {
       clock: fixture.clock,
     });
     const validTuple = {
+      workspaceId: validReceipt.workflow.workspaceId,
       modelBundleId: validReceipt.workflow.modelBundleId,
       workflowId: validReceipt.workflow.workflowId,
       workflowVersion: validReceipt.workflow.workflowVersion,
@@ -3308,6 +3311,7 @@ describe("SQLiteAttemptRepository", () => {
       ruleVersion: "wall-pass-v1-score-1" as const,
     };
     const invalidTuple = {
+      workspaceId: invalidReceipt.workflow.workspaceId,
       modelBundleId: invalidReceipt.workflow.modelBundleId,
       workflowId: invalidReceipt.workflow.workflowId,
       workflowVersion: invalidReceipt.workflow.workflowVersion,
@@ -3376,7 +3380,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 13 });
+    ).toMatchObject({ count: 14 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -3435,6 +3439,8 @@ describe("SQLiteAttemptRepository", () => {
       receiptSha256: passingWorkflowBenchmarkReceiptFixture.receiptSha256,
       receiptSchemaVersion:
         passingWorkflowBenchmarkReceiptFixture.schemaVersion,
+      workspaceId:
+        passingWorkflowBenchmarkReceiptFixture.workflow.workspaceId,
       modelBundleId:
         passingWorkflowBenchmarkReceiptFixture.workflow.modelBundleId,
       workflowId: passingWorkflowBenchmarkReceiptFixture.workflow.workflowId,
@@ -3581,6 +3587,8 @@ describe("SQLiteAttemptRepository", () => {
       receiptSha256: passingWorkflowBenchmarkReceiptFixture.receiptSha256,
       receiptSchemaVersion:
         passingWorkflowBenchmarkReceiptFixture.schemaVersion,
+      workspaceId:
+        passingWorkflowBenchmarkReceiptFixture.workflow.workspaceId,
       modelBundleId:
         passingWorkflowBenchmarkReceiptFixture.workflow.modelBundleId,
       workflowId: passingWorkflowBenchmarkReceiptFixture.workflow.workflowId,
@@ -3605,6 +3613,46 @@ describe("SQLiteAttemptRepository", () => {
     ).rejects.toMatchObject({
       code: "competitive_policy_persisted_data_corrupt",
     });
+  });
+
+  it("returns a strictly parsed receipt only for the receipt workspace", async () => {
+    await fixture.policy.storeBenchmarkReceipt(
+      passingWorkflowBenchmarkReceiptFixture,
+    );
+    const policy = {
+      id: "abababab-abab-4bab-8bab-abababababab",
+      receiptId: passingWorkflowBenchmarkReceiptFixture.id,
+      receiptSha256: passingWorkflowBenchmarkReceiptFixture.receiptSha256,
+      receiptSchemaVersion:
+        passingWorkflowBenchmarkReceiptFixture.schemaVersion,
+      workspaceId:
+        passingWorkflowBenchmarkReceiptFixture.workflow.workspaceId,
+      modelBundleId:
+        passingWorkflowBenchmarkReceiptFixture.workflow.modelBundleId,
+      workflowId: passingWorkflowBenchmarkReceiptFixture.workflow.workflowId,
+      workflowVersion:
+        passingWorkflowBenchmarkReceiptFixture.workflow.workflowVersion,
+      providerVersion:
+        passingWorkflowBenchmarkReceiptFixture.workflow.providerVersion,
+      calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+      challengeId: "wall-pass" as const,
+      challengeVersion: 1 as const,
+      ruleVersion: "wall-pass-v1-score-1" as const,
+    };
+    await fixture.policy.activateCompetitivePolicy(policy);
+
+    await expect(
+      fixture.policy.getActiveCompetitivePolicy(policy),
+    ).resolves.toMatchObject({
+      workspaceId: policy.workspaceId,
+      receipt: passingWorkflowBenchmarkReceiptFixture,
+    });
+    await expect(
+      fixture.policy.getActiveCompetitivePolicy({
+        ...policy,
+        workspaceId: "wrong-workspace",
+      }),
+    ).resolves.toBeNull();
   });
 
   it("enforces compound ownership, one-use, result linkage, policy provenance, and leaderboard checks in SQLite", async () => {

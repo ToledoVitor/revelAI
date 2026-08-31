@@ -5,6 +5,7 @@ import type {
 } from "@revelai/contracts";
 
 export type CompetitivePolicyTuple = Readonly<{
+  workspaceId: string;
   modelBundleId: string;
   workflowId: "revelai-wall-pass-geometry-v1";
   workflowVersion: "1.0.0";
@@ -15,7 +16,7 @@ export type CompetitivePolicyTuple = Readonly<{
   ruleVersion: "wall-pass-v1-score-1";
 }>;
 
-export type CompetitivePolicyActivation = CompetitivePolicyTuple &
+export type CompetitivePolicyActivationInput = CompetitivePolicyTuple &
   Readonly<{
     id: string;
     receiptId: string;
@@ -23,9 +24,18 @@ export type CompetitivePolicyActivation = CompetitivePolicyTuple &
     receiptSchemaVersion: "workflow-benchmark-receipt-v1";
   }>;
 
+/**
+ * A returned activation is never a loose row: consumers receive the exact
+ * strict receipt from which its workspace and benchmark tuple were derived.
+ */
+export type CompetitivePolicyActivation = CompetitivePolicyActivationInput &
+  Readonly<{ receipt: WorkflowBenchmarkReceipt }>;
+
 export interface CompetitivePolicyRepository {
   storeBenchmarkReceipt(receipt: unknown): Promise<WorkflowBenchmarkReceipt>;
-  activateCompetitivePolicy(input: CompetitivePolicyActivation): Promise<void>;
+  activateCompetitivePolicy(
+    input: CompetitivePolicyActivationInput,
+  ): Promise<void>;
   deactivateCompetitivePolicy(input: Readonly<{ id: string }>): Promise<void>;
   invalidateBenchmarkReceipt(
     input: Readonly<{
