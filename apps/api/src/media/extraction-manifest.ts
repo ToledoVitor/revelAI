@@ -20,6 +20,11 @@ type VerifiedExtractionFrame = Readonly<{
   sourceSha256: string;
 }>;
 
+type ContinuityScene = Readonly<{
+  timestampSeconds: number;
+  score: number;
+}>;
+
 /**
  * Opaque C5 capability. Its associated bytes are never serialized into a
  * manifest; C6 can only prove a read against this exact, locally issued
@@ -33,6 +38,7 @@ type VerifiedExtractionData = Readonly<{
   manifest: Extract<ExtractionManifest, Readonly<{ mode: "verified" }>>;
   frames: readonly VerifiedExtractionFrame[];
   continuityIdentity: string | null;
+  activeScenes: readonly ContinuityScene[] | null;
 }>;
 
 const verifiedExtractionCapabilities = new WeakMap<
@@ -61,18 +67,44 @@ type ManifestBase = Readonly<{
   frames: Readonly<{ count: number; items: readonly ManifestFrame[] }>;
 }>;
 
+type FreeExtractionManifest = ManifestBase &
+  Readonly<{
+    mode: "free";
+  }>;
+
+type VerifiedExtractionManifest = ManifestBase &
+  Readonly<{
+    mode: "verified";
+    preRoll: Readonly<{ count: 40 }>;
+    active: Readonly<{ count: 600 }>;
+    rawPreRollSha256: string;
+  }>;
+
 export type ExtractionManifest =
-  | (ManifestBase &
-      Readonly<{
-        mode: "free";
-      }>)
-  | (ManifestBase &
-      Readonly<{
-        mode: "verified";
-        preRoll: Readonly<{ count: 40 }>;
-        active: Readonly<{ count: 600 }>;
-        rawPreRollSha256: string;
-      }>);
+  | FreeExtractionManifest
+  | VerifiedExtractionManifest;
+
+/**
+ * Safe, durable C5 facts used to recreate an in-process extraction
+ * capability after a queued delivery. It intentionally never contains a
+ * capability, local path, raw frame byte, or provider payload.
+ */
+export type DurableProcessingContext =
+  | Readonly<{
+      kind: "c5-durable-processing-context-v1";
+      manifest: FreeExtractionManifest;
+    }>
+  | Readonly<{
+      kind: "c5-durable-processing-context-v1";
+      manifest: VerifiedExtractionManifest;
+      activeScenes: readonly ContinuityScene[];
+      sourceSha256: readonly string[];
+    }>;
+
+/** C5-owned byte reader. Implementations never disclose a storage path. */
+export type DurableFrameReader = Readonly<{
+  readFrame(reference: string): Promise<Uint8Array>;
+}>;
 
 export function createExtractionManifest(
   input: Readonly<{
@@ -144,6 +176,153 @@ export function createExtractionManifest(
     probe: Object.freeze({ ...input.probe }),
     frames: Object.freeze({ count: items.length, items: Object.freeze(items) }),
   });
+}
+
+/**
+ * Creates the only persistence-safe representation of a materialized C5
+ * extraction. A verified context requires the exact continuity attestation
+ * before it can be queued for later reconstruction.
+ */
+export function createDurableProcessingContext(
+  manifest: ExtractionManifest,
+): DurableProcessingContext {
+  const parsed = parseExtractionManifest(manifest);
+  if (parsed.mode === "free")
+    return Object.freeze({
+      kind: "c5-durable-processing-context-v1" as const,
+      manifest: parsed,
+    });
+
+  if (manifest.mode !== "verified")
+    throw new Error("verified continuity evidence required");
+  const capability = verifiedExtractionCapability(manifest);
+  const data = verifiedExtractionData.get(capability);
+  if (!data?.activeScenes)
+    throw new Error("verified continuity evidence required");
+  return Object.freeze({
+    kind: "c5-durable-processing-context-v1" as const,
+    manifest: parsed,
+    activeScenes: Object.freeze(
+      data.activeScenes.map((scene) => Object.freeze({ ...scene })),
+    ),
+    sourceSha256: Object.freeze(data.frames.map((frame) => frame.sourceSha256)),
+  });
+}
+
+/**
+ * Reissues a new process-local C5 capability from strictly parsed durable
+ * facts and the opaque frame reader. Byte/digest mismatches fail closed.
+ */
+export async function reconstructDurableProcessingContext(
+  input: Readonly<{
+    context: unknown;
+    frames: DurableFrameReader;
+  }>,
+): Promise<ExtractionManifest> {
+  const context = parseDurableProcessingContext(input.context);
+  const frames = await Promise.all(
+    context.manifest.frames.items.map(async (frame) =>
+      Object.freeze({
+        timestampSeconds: frame.timestampSeconds,
+        reference: frame.reference,
+        rawBytes: await input.frames.readFrame(frame.reference),
+      }),
+    ),
+  );
+  const reconstructed = createExtractionManifest({
+    attemptId: context.manifest.attemptId,
+    generation: context.manifest.generation,
+    mediaId: context.manifest.mediaId,
+    mediaSha256: context.manifest.mediaSha256,
+    mode: context.manifest.mode,
+    probe: context.manifest.probe,
+    frames,
+  });
+  if (reconstructed.mode !== context.manifest.mode)
+    throw new Error("durable extraction mode mismatch");
+  if (reconstructed.mode === "free") return reconstructed;
+  if (!isVerifiedDurableProcessingContext(context))
+    throw new Error("durable extraction frame mismatch");
+
+  if (
+    context.sourceSha256.some(
+      (digest, index) =>
+        createHash("sha256").update(frames[index]!.rawBytes).digest("hex") !==
+        digest,
+    ) ||
+    reconstructed.rawPreRollSha256 !== context.manifest.rawPreRollSha256
+  )
+    throw new Error("durable extraction frame mismatch");
+  attestVerifiedExtractionContinuity(reconstructed, context.activeScenes);
+  return reconstructed;
+}
+
+export function parseDurableProcessingContext(
+  value: unknown,
+): DurableProcessingContext {
+  if (!isRecord(value) || value.kind !== "c5-durable-processing-context-v1")
+    throw new Error("Invalid durable processing context.");
+  const manifest = parseExtractionManifest(value.manifest);
+  if (manifest.mode === "free") {
+    if (!hasOnlyKeys(value, ["kind", "manifest"]))
+      throw new Error("Invalid durable processing context.");
+    return Object.freeze({
+      kind: "c5-durable-processing-context-v1" as const,
+      manifest,
+    });
+  }
+  if (
+    !hasOnlyKeys(value, ["kind", "manifest", "activeScenes", "sourceSha256"]) ||
+    !Array.isArray(value.activeScenes) ||
+    !Array.isArray(value.sourceSha256) ||
+    value.activeScenes.length !== 600 ||
+    value.sourceSha256.length !== 640
+  )
+    throw new Error("Invalid durable processing context.");
+  const activeScenes: ContinuityScene[] = [];
+  for (const [index, scene] of value.activeScenes.entries()) {
+    if (
+      !isRecord(scene) ||
+      !hasOnlyKeys(scene, ["timestampSeconds", "score"]) ||
+      typeof scene.timestampSeconds !== "number" ||
+      typeof scene.score !== "number" ||
+      scene.timestampSeconds !==
+        manifest.frames.items[index + 40]!.timestampSeconds ||
+      !Number.isFinite(scene.score) ||
+      scene.score < 0 ||
+      scene.score >= 0.42 ||
+      (index > 0 &&
+        scene.timestampSeconds <= activeScenes[index - 1]!.timestampSeconds)
+    )
+      throw new Error("Invalid durable processing context.");
+    activeScenes.push(
+      Object.freeze({
+        timestampSeconds: scene.timestampSeconds,
+        score: scene.score,
+      }),
+    );
+  }
+  const sourceSha256 = value.sourceSha256.map((digest) => {
+    if (typeof digest !== "string")
+      throw new Error("Invalid durable processing context.");
+    assertDigest(digest);
+    return digest;
+  });
+  return Object.freeze({
+    kind: "c5-durable-processing-context-v1" as const,
+    manifest,
+    activeScenes: Object.freeze(activeScenes),
+    sourceSha256: Object.freeze(sourceSha256),
+  });
+}
+
+function isVerifiedDurableProcessingContext(
+  context: DurableProcessingContext,
+): context is Extract<
+  DurableProcessingContext,
+  { manifest: VerifiedExtractionManifest }
+> {
+  return context.manifest.mode === "verified";
 }
 
 /**
@@ -219,6 +398,14 @@ export function attestVerifiedExtractionContinuity(
     capability,
     Object.freeze({
       ...data,
+      activeScenes: Object.freeze(
+        active.map((scene) =>
+          Object.freeze({
+            timestampSeconds: scene.timestampSeconds,
+            score: scene.score,
+          }),
+        ),
+      ),
       continuityIdentity: createHash("sha256")
         .update(
           JSON.stringify(
@@ -282,6 +469,7 @@ function issueVerifiedExtractionCapability(
       ),
     ),
     continuityIdentity: null,
+    activeScenes: null,
   });
   verifiedExtractionCapabilities.set(manifest, capability);
   verifiedExtractionData.set(capability, data);

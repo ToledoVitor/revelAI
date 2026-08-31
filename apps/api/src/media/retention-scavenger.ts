@@ -20,11 +20,15 @@ export interface RetentionObjectStore {
 
 export interface RetentionLog {
   event(
-    event: Readonly<{
-      category: "retention_cleanup_failed";
-      attempt: string;
-      resource: string;
-    }>,
+    event:
+      | Readonly<{
+          category: "retention_cleanup_failed";
+          attempt: string;
+          resource: string;
+        }>
+      | Readonly<{
+          category: "retention_cleanup_run_failed";
+        }>,
   ): void;
 }
 
@@ -63,13 +67,35 @@ export class RetentionScavenger {
   }
 
   public start(now = this.now()): () => void {
-    void this.run(now);
+    void this.runSafely(now);
     const handle = this.scheduler?.everyHour(() => {
-      void this.run(this.now());
+      try {
+        void this.runSafely(this.now());
+      } catch {
+        this.logRunFailure();
+      }
     });
     return () => {
       if (handle !== undefined) this.scheduler?.cancel(handle);
     };
+  }
+
+  private async runSafely(now: string): Promise<void> {
+    try {
+      await this.run(now);
+    } catch {
+      this.logRunFailure();
+    }
+  }
+
+  private logRunFailure(): void {
+    try {
+      this.log.event(
+        Object.freeze({ category: "retention_cleanup_run_failed" as const }),
+      );
+    } catch {
+      // Logging must not make a startup/timer fire-and-forget chain reject.
+    }
   }
 
   public async run(

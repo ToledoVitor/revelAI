@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  attestVerifiedExtractionContinuity,
+  createDurableProcessingContext,
   createExtractionManifest,
   parseExtractionManifest,
+  reconstructDurableProcessingContext,
+  verifiedExtractionCapability,
 } from "./extraction-manifest.js";
 
 const IDs = [
@@ -124,6 +128,51 @@ describe("extraction manifest", () => {
         unknown: true,
       }),
     ).toThrow();
+  });
+
+  it("reconstructs a fresh verified extraction capability from durable path-free evidence", async () => {
+    const frames = verifiedFrames();
+    const manifest = createExtractionManifest({
+      attemptId: IDs[0],
+      generation: 1,
+      mediaId: IDs[1],
+      mediaSha256: "a".repeat(64),
+      mode: "verified",
+      probe,
+      frames,
+    });
+    if (manifest.mode !== "verified") throw new Error("verified required");
+    attestVerifiedExtractionContinuity(
+      manifest,
+      manifest.frames.items.slice(40).map((frame) => ({
+        timestampSeconds: frame.timestampSeconds,
+        score: 0.1,
+      })),
+    );
+    const context = createDurableProcessingContext(manifest);
+    const serialized = JSON.stringify(context);
+    expect(serialized).not.toContain("capability");
+    expect(serialized).not.toContain("provider");
+    expect(serialized).not.toContain("/");
+    const reconstructed = await reconstructDurableProcessingContext({
+      context: JSON.parse(serialized),
+      frames: {
+        readFrame: async (reference) =>
+          frames.find((frame) => frame.reference === reference)!.rawBytes,
+      },
+    });
+
+    expect(reconstructed).not.toBe(manifest);
+    expect(reconstructed).toEqual(manifest);
+    if (reconstructed.mode !== "verified")
+      throw new Error("verified reconstruction required");
+    expect(() => verifiedExtractionCapability(reconstructed)).not.toThrow();
+    await expect(
+      reconstructDurableProcessingContext({
+        context,
+        frames: { readFrame: async () => Uint8Array.of(0) },
+      }),
+    ).rejects.toThrow("durable extraction frame mismatch");
   });
 });
 

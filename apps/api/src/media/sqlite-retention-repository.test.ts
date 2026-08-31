@@ -16,7 +16,7 @@ import { LocalMediaStorage } from "../storage/local-media-storage.js";
 import { LocalRetentionObjectStore } from "../storage/local-retention-object-store.js";
 import { SQLiteRetentionRepository } from "./sqlite-retention-repository.js";
 import { MediaPipeline } from "./media-pipeline.js";
-import type { ExtractionManifest } from "./extraction-manifest.js";
+import { createExtractionManifest } from "./extraction-manifest.js";
 
 const ATHLETE = "11111111-1111-4111-8111-111111111111";
 const ATTEMPT = "22222222-2222-4222-8222-222222222222";
@@ -500,7 +500,20 @@ describe("SQLiteRetentionRepository", () => {
     const pipeline = new MediaPipeline({
       storage,
       extractor: {
-        extract: async () => ({}) as ExtractionManifest,
+        extract: async (input) =>
+          createExtractionManifest({
+            attemptId: input.attemptId,
+            generation: input.generation,
+            mediaId: input.mediaId,
+            mediaSha256: input.mediaSha256,
+            mode: input.mode,
+            probe: input.probe,
+            frames: Array.from({ length: 12 }, (_, ordinal) => ({
+              timestampSeconds: (input.probe.durationSeconds * ordinal) / 11,
+              reference: `${input.mediaId}_${String(ordinal).padStart(4, "0")}`,
+              rawBytes: Uint8Array.of(ordinal),
+            })),
+          }),
       },
     });
     const attempts = new SQLiteAttemptRepository({
@@ -528,8 +541,10 @@ describe("SQLiteRetentionRepository", () => {
 
     const accepted = await accept(1);
     expect(Object.keys(accepted).sort()).toEqual([
+      "cleanup",
       "manifest",
       "probe",
+      "processingContext",
       "sha256",
       "storedMedia",
     ]);
@@ -589,7 +604,22 @@ describe("SQLiteRetentionRepository", () => {
     });
     const rejectPipeline = new MediaPipeline({
       storage,
-      extractor: { extract: async () => ({}) as ExtractionManifest },
+      extractor: {
+        extract: async (input) =>
+          createExtractionManifest({
+            attemptId: input.attemptId,
+            generation: input.generation,
+            mediaId: input.mediaId,
+            mediaSha256: input.mediaSha256,
+            mode: input.mode,
+            probe: input.probe,
+            frames: Array.from({ length: 12 }, (_, ordinal) => ({
+              timestampSeconds: (input.probe.durationSeconds * ordinal) / 11,
+              reference: `${input.mediaId}_${String(ordinal).padStart(4, "0")}`,
+              rawBytes: Uint8Array.of(ordinal),
+            })),
+          }),
+      },
     });
     const rejected = await rejectPipeline.accept({
       mode: "free",

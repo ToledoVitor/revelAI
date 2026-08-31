@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { LocalMediaStorage } from "../storage/local-media-storage.js";
 import { LocalFrameExtraction } from "../storage/local-frame-extraction.js";
+import { RawMultipartByteCounter } from "./multipart-intake.js";
 import { MediaPipeline } from "./media-pipeline.js";
 import { MediaPipelineError } from "./probe.js";
 import type { ExtractionManifest } from "./extraction-manifest.js";
@@ -76,20 +77,25 @@ describe("MediaPipeline", () => {
         retention: { schedule: async () => ({ kind: "created" as const }) },
       }),
     });
-    await expect(
-      pipeline.accept({
-        mode: "free",
-        source: chunks(bytes),
-        maxBytes: bytes.length,
-        retention,
-      }),
-    ).resolves.toMatchObject({
+    const accepted = await pipeline.accept({
+      mode: "free",
+      source: chunks(bytes),
+      maxBytes: bytes.length,
+      retention,
+    });
+    expect(accepted).toMatchObject({
       storedMedia: {
         id: mediaId,
         contentType: "video/mp4",
       },
       manifest: { mode: "free" },
     });
+    expect(await readdir(join(root, "originals"))).toEqual([mediaId]);
+    expect(await readdir(join(root, "frames"))).toEqual([frameBatchId]);
+    await expect(accepted.cleanup.cleanup()).resolves.toBeUndefined();
+    await expect(accepted.cleanup.cleanup()).resolves.toBeUndefined();
+    expect(await readdir(join(root, "originals"))).toEqual([]);
+    expect(await readdir(join(root, "frames"))).toEqual([]);
   });
 
   it("rejects verified ineligible media before an original becomes visible", async () => {
@@ -161,10 +167,93 @@ describe("MediaPipeline", () => {
     ).rejects.toThrow(new MediaPipelineError("media_requirements_not_met"));
     expect(await readdir(join(root, "originals"))).toEqual([]);
   });
+
+  it("feeds the sole validated multipart file into the same pipeline session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "revelai-c5-pipeline-"));
+    roots.push(root);
+    const storage = new LocalMediaStorage({
+      root,
+      ids: { next: () => mediaId },
+      prober: {
+        probe: async () => ({
+          container: "mp4",
+          durationSeconds: 3,
+          displayWidth: 480,
+          displayHeight: 853,
+          nominalFps: 12,
+          codec: "h264",
+          sourceRotationDegrees: 0,
+        }),
+      },
+    });
+    const pipeline = new MediaPipeline({
+      storage,
+      extractor: new LocalFrameExtraction({
+        root,
+        ids: { next: () => frameBatchId },
+        runner: {
+          run: async (command) => {
+            const timeline = Array.from(
+              { length: 37 },
+              (_, index) => index / 12,
+            );
+            await Promise.all(
+              timeline.map((timestamp, index) =>
+                writeFile(
+                  `${command.outputDirectory}/decoded-${String(index).padStart(6, "0")}.jpg`,
+                  jpeg(index),
+                  { mode: 0o600 },
+                ),
+              ),
+            );
+            return rawEvidence(timeline, []);
+          },
+        },
+        retention: { schedule: async () => ({ kind: "created" as const }) },
+      }),
+    });
+    const rawBody = new RawMultipartByteCounter(bytes.length + 64);
+    for await (const chunk of rawBody.stream(chunks(bytes))) void chunk;
+
+    await expect(
+      pipeline.acceptMultipart({
+        mode: "free",
+        multipart: {
+          parts: parts({
+            kind: "file",
+            name: "media",
+            filename: "training.mp4",
+            contentType: "video/mp4",
+            body: chunks(bytes),
+          }),
+          maxUploadBytes: bytes.length,
+          maxMultipartBytes: bytes.length + 64,
+          rawBody,
+        },
+        retention,
+      }),
+    ).resolves.toMatchObject({
+      storedMedia: { id: mediaId },
+      manifest: { mode: "free" },
+    });
+    expect(await readdir(join(root, "originals"))).toEqual([mediaId]);
+  });
 });
 
 async function* chunks(value: Uint8Array): AsyncIterable<Uint8Array> {
   yield value;
+}
+
+async function* parts(
+  ...values: readonly {
+    kind: "file";
+    name: string;
+    filename: string;
+    contentType: string;
+    body: AsyncIterable<Uint8Array>;
+  }[]
+) {
+  yield* values;
 }
 
 function jpeg(index: number): Uint8Array {
