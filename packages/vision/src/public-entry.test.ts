@@ -324,7 +324,13 @@ function reportBindingElement(
           ? checker.getTypeAtLocation(initializer).getProperty(literalName)
           : undefined;
     if (property && literalName)
-      reportResolvedSymbol(property, checker, violations, "binding", literalName);
+      reportResolvedSymbol(
+        property,
+        checker,
+        violations,
+        "binding",
+        literalName,
+      );
     else if (literalName && forbiddenPublicName.test(literalName))
       violations.add(`binding:${literalName}`);
     return;
@@ -332,7 +338,9 @@ function reportBindingElement(
   reportSymbol(propertyName ?? node.name, checker, violations, "binding");
 }
 
-function bindingInitializer(node: ts.BindingElement): ts.Expression | undefined {
+function bindingInitializer(
+  node: ts.BindingElement,
+): ts.Expression | undefined {
   const pattern = node.parent;
   const declaration =
     pattern && ts.isObjectBindingPattern(pattern) ? pattern.parent : undefined;
