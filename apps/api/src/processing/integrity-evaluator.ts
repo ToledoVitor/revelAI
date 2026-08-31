@@ -152,6 +152,11 @@ type ExpectedAttempt = Readonly<{
   rawPreRollSha256: string;
 }>;
 
+type VerifiedExtractionManifest = Extract<
+  ExtractionManifest,
+  Readonly<{ mode: "verified" }>
+>;
+
 export type IntegrityDecision =
   | Readonly<{ kind: "integrity-valid" }>
   | Readonly<{
@@ -320,17 +325,19 @@ function isExpectedVerifiedAttempt(value: ExpectedAttempt): boolean {
   );
 }
 
-function parseVerifiedManifest(value: unknown): ExtractionManifest | null {
+function parseVerifiedManifest(
+  value: unknown,
+): VerifiedExtractionManifest | null {
   try {
     const manifest = parseExtractionManifest(value);
-    return manifest.mode === "verified" ? manifest : null;
+    return isVerifiedManifest(manifest) ? manifest : null;
   } catch {
     return null;
   }
 }
 
 function sameManifestBinding(
-  manifest: ExtractionManifest & Readonly<{ mode: "verified" }>,
+  manifest: VerifiedExtractionManifest,
   expected: ExpectedAttempt,
 ): boolean {
   return (
@@ -407,18 +414,23 @@ function parseVerifiedEvidence(value: unknown): VerifiedEvidence | null {
       !isNonNegativeInteger(value.selectedReferenceFrameIndex))
   )
     return null;
+  const parsedPreRoll = preRoll.filter(isNotNull);
+  const parsedActive = active.filter(isNotNull);
+  const parsedContacts = contacts.filter(isNotNull);
+  const parsedWallImpacts = wallImpacts.filter(isNotNull);
+  const parsedPassEvidence = passEvidence.filter(isNotNull);
   return Object.freeze({
     binding,
     provenance,
     selectedReferenceFrameIndex: value.selectedReferenceFrameIndex,
     referenceDistanceSums,
-    preRoll: Object.freeze(preRoll),
-    active: Object.freeze(active),
+    preRoll: Object.freeze(parsedPreRoll),
+    active: Object.freeze(parsedActive),
     activeStableCount: value.activeStableCount,
     longestUnstableRun: value.longestUnstableRun,
-    contacts: Object.freeze(contacts),
-    wallImpacts: Object.freeze(wallImpacts),
-    passEvidence: Object.freeze(passEvidence),
+    contacts: Object.freeze(parsedContacts),
+    wallImpacts: Object.freeze(parsedWallImpacts),
+    passEvidence: Object.freeze(parsedPassEvidence),
   });
 }
 
@@ -673,11 +685,12 @@ function parseReferenceDistanceSums(
     )
   )
     return null;
-  return Object.freeze(
-    Object.fromEntries(
-      entries.map(([key, distance]) => [Number(key), distance]),
-    ),
-  );
+  const result: Record<number, number> = {};
+  for (const [key, distance] of entries) {
+    if (!isFiniteNumber(distance)) return null;
+    result[Number(key)] = distance;
+  }
+  return Object.freeze(result);
 }
 
 function parseContact(
@@ -843,7 +856,7 @@ function hasDeterministicReference(
 
 function hasBoundMappedEvents(
   evidence: VerifiedEvidence,
-  manifest: ExtractionManifest & Readonly<{ mode: "verified" }>,
+  manifest: VerifiedExtractionManifest,
 ): boolean {
   const activeByTimestamp = new Map(
     evidence.active.map((frame) => {
@@ -1059,4 +1072,14 @@ function isFinitePositive(value: unknown): value is number {
 
 function isNull<T>(value: T | null): value is null {
   return value === null;
+}
+
+function isNotNull<T>(value: T | null): value is T {
+  return value !== null;
+}
+
+function isVerifiedManifest(
+  manifest: ExtractionManifest,
+): manifest is VerifiedExtractionManifest {
+  return manifest.mode === "verified";
 }

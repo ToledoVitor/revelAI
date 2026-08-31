@@ -1,4 +1,9 @@
-import { passingWorkflowBenchmarkReceiptFixture } from "@revelai/contracts";
+import {
+  passingWorkflowBenchmarkReceiptFixture,
+  workflowBenchmarkReceiptDigest,
+  WorkflowBenchmarkReceiptSchema,
+  type WorkflowBenchmarkReceipt,
+} from "@revelai/contracts";
 import { describe, expect, it } from "vitest";
 import {
   evaluateCompetitiveEligibility,
@@ -93,13 +98,17 @@ describe("competitive eligibility policy", () => {
   });
 
   it("treats absent, malformed, stale, failed, invalidated, and expiry-boundary policy as experimental", async () => {
-    const expired = structuredClone(approvedPolicy());
-    expired.receipt.validUntil = now;
-    const failed = structuredClone(approvedPolicy());
-    failed.receipt.status = "failed";
-    const invalidated = structuredClone(approvedPolicy());
-    invalidated.receipt.invalidatedAt = now;
-    invalidated.receipt.invalidationReason = "operator_revoked";
+    const expired = approvedPolicy(receiptWith({ validUntil: now }));
+    const failed = approvedPolicy(
+      receiptWith({ pooledDispatchToObservationP95Ms: 901, status: "failed" }),
+    );
+    const invalidated = approvedPolicy(
+      receiptWith({
+        status: "failed",
+        invalidatedAt: now,
+        invalidationReason: "operator_revoked",
+      }),
+    );
 
     for (const returned of [null, {}, expired, failed, invalidated])
       await expect(
@@ -145,7 +154,11 @@ function verifiedInput(repository: { getActivePolicy(): Promise<unknown> }) {
   };
 }
 
-function approvedPolicy() {
+function approvedPolicy(
+  receipt: WorkflowBenchmarkReceipt = WorkflowBenchmarkReceiptSchema.parse(
+    passingWorkflowBenchmarkReceiptFixture,
+  ),
+) {
   return {
     id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     workspaceId: "revelai-workspace",
@@ -157,9 +170,22 @@ function approvedPolicy() {
     challengeId: "wall-pass",
     challengeVersion: 1,
     ruleVersion: "wall-pass-v1-score-1",
-    receiptId: passingWorkflowBenchmarkReceiptFixture.id,
-    receiptSha256: passingWorkflowBenchmarkReceiptFixture.receiptSha256,
-    receiptSchemaVersion: passingWorkflowBenchmarkReceiptFixture.schemaVersion,
-    receipt: structuredClone(passingWorkflowBenchmarkReceiptFixture),
+    receiptId: receipt.id,
+    receiptSha256: receipt.receiptSha256,
+    receiptSchemaVersion: receipt.schemaVersion,
+    receipt,
   };
+}
+
+function receiptWith(
+  patch: Partial<WorkflowBenchmarkReceipt>,
+): WorkflowBenchmarkReceipt {
+  const { receiptSha256: _receiptSha256, ...payload } =
+    passingWorkflowBenchmarkReceiptFixture;
+  void _receiptSha256;
+  const next = { ...payload, ...patch };
+  return {
+    ...next,
+    receiptSha256: workflowBenchmarkReceiptDigest(next),
+  } as WorkflowBenchmarkReceipt;
 }
