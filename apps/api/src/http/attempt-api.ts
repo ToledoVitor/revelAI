@@ -48,6 +48,13 @@ const HOUR_MILLISECONDS = 60 * 60 * 1_000;
 const silentRecoveryLog: MediaAttachmentRecoveryLog = Object.freeze({
   event: () => undefined,
 });
+const badUrlBody = JSON.stringify(
+  RouteErrorSchema.parse({
+    code: "invalid_request",
+    message: RouteErrorMessageByCode.invalid_request,
+    retryable: RouteErrorRetryabilityByCode.invalid_request,
+  }),
+);
 
 const processHourlyRecoveryScheduler: HourlyRecoveryScheduler = Object.freeze({
   everyHour: (task: () => void): NodeJS.Timeout => {
@@ -76,7 +83,17 @@ export function createAttemptApi(
     log?: MediaAttachmentRecoveryLog;
   }>,
 ): FastifyInstance {
-  const app = Fastify({ logger: false });
+  const app = Fastify({
+    logger: false,
+    routerOptions: {
+      onBadUrl: (_path, _request, response) => {
+        response.statusCode = RouteErrorStatusByCode.invalid_request;
+        response.setHeader("content-type", "application/json; charset=utf-8");
+        response.setHeader("content-length", Buffer.byteLength(badUrlBody));
+        response.end(badUrlBody);
+      },
+    },
+  });
   const athleteIds = new WeakMap<FastifyRequest, string>();
   const clock = input.clock ?? { now: () => new Date().toISOString() };
   const ids = input.ids ?? { next: randomUUID };
@@ -131,10 +148,12 @@ export function createAttemptApi(
         request.body,
       );
       const athleteId = requiredAthleteId(athleteIds, request);
+      const sessionId = requiredGeneratedUuid(ids.next());
+      const sessionNonce = requiredGeneratedNonce(nonce());
       const session = await input.repository.issueCalibrationSession({
-        id: ids.next(),
+        id: sessionId,
         athleteId,
-        nonce: nonce(),
+        nonce: sessionNonce,
         challengeId: body.challengeId,
         challengeVersion: body.challengeVersion,
       });
@@ -160,8 +179,9 @@ export function createAttemptApi(
 
     app.post("/v1/attempts", async (request, reply) => {
       const body = parseRequest(CreateAttemptInputSchema, request.body);
+      const attemptId = requiredGeneratedUuid(ids.next());
       const attempt = await input.repository.createAttempt({
-        id: ids.next(),
+        id: attemptId,
         athleteId: requiredAthleteId(athleteIds, request),
         input: body,
       });
@@ -285,6 +305,26 @@ function requiredAthleteId(
   const athleteId = athleteIds.get(request);
   if (!athleteId) throw new AttemptRouteError("invalid_athlete_identity");
   return athleteId;
+}
+
+function requiredGeneratedUuid(value: string): string {
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+  )
+    throw new AttemptRouteError("service_not_ready");
+  return value;
+}
+
+function requiredGeneratedNonce(value: string): string {
+  if (
+    !/^[A-Za-z0-9_-]{43}$/.test(value) ||
+    Buffer.from(value, "base64url").byteLength !== 32 ||
+    Buffer.from(value, "base64url").toString("base64url") !== value
+  )
+    throw new AttemptRouteError("service_not_ready");
+  return value;
 }
 
 function projectAttempt(attempt: AttemptRecord): unknown {

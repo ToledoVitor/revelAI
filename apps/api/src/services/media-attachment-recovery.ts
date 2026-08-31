@@ -225,7 +225,8 @@ export function createC8RecoveryRuntime(
   }>,
 ): C8RecoveryRuntimeHandle {
   const existing = productionRuntimeByRepository.get(input.repository);
-  if (existing) return existing;
+  if (existing)
+    throw new Error("C8 recovery runtime already has an active owner.");
   const runtime = new C8RecoveryRuntime({
     ...input,
     onStopped: () => {
@@ -249,6 +250,7 @@ class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
   private readonly now: () => string;
   private running = false;
   private started = false;
+  private schedulerRegistered = false;
   private stopped = false;
   private scheduledHandle: unknown;
   private inFlight: Promise<void> | undefined;
@@ -294,15 +296,16 @@ class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
     if (this.started || this.stopped) return;
     this.started = true;
     try {
-      this.startRun(this.now());
       this.scheduledHandle = this.scheduler?.everyHour(() => {
-        if (this.stopped) return;
+        if (this.stopped || !this.schedulerRegistered) return;
         try {
           this.startRun(this.now());
         } catch {
           this.logRunFailure();
         }
       });
+      this.schedulerRegistered = true;
+      this.startRun(this.now());
     } catch (error) {
       // Immediate recovery is already contained by runSafely. Begin shutdown
       // without awaiting it so startup still reports the scheduler failure.
@@ -315,6 +318,7 @@ class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
   public stop(): Promise<void> {
     if (this.stopping) return this.stopping;
     this.stopped = true;
+    this.schedulerRegistered = false;
     const handle = this.scheduledHandle;
     this.scheduledHandle = undefined;
     if (handle !== undefined)

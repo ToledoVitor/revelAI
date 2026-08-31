@@ -20,6 +20,19 @@ export type SqliteDatabase = Readonly<{
   close(): void;
 }>;
 
+/** Only this module can issue a database wrapper accepted by C4 composition. */
+const sqliteDatabaseCapabilities = new WeakSet<object>();
+
+export function isFactoryIssuedSqliteDatabase(
+  value: unknown,
+): value is SqliteDatabase {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    sqliteDatabaseCapabilities.has(value)
+  );
+}
+
 const migrations: readonly Migration[] = [
   {
     version: 1,
@@ -779,11 +792,13 @@ function openSqliteDatabaseInternal(
     throw error;
   }
 
-  return Object.freeze({
+  const database = Object.freeze({
     raw,
     reopen: () => openSqliteDatabaseInternal(filename, migrationVersion),
     close: () => raw.close(),
   });
+  sqliteDatabaseCapabilities.add(database);
+  return database;
 }
 
 function applyMigrations(

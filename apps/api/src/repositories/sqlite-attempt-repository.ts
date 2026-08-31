@@ -25,7 +25,10 @@ import type {
   AcceptedMediaHandoffVerifier,
 } from "../media/accepted-media-handoff.js";
 import { isC5AcceptedMediaHandoffVerifier } from "../media/media-pipeline.js";
-import type { SqliteDatabase } from "../database/sqlite-database.js";
+import {
+  isFactoryIssuedSqliteDatabase,
+  type SqliteDatabase,
+} from "../database/sqlite-database.js";
 import {
   isStoredMediaAttachment,
   RepositoryError,
@@ -176,6 +179,8 @@ type SQLiteAttemptRepositoryInput = Readonly<{
   clock: Clock;
   ids: IdGenerator;
   handoffVerifier: AcceptedMediaHandoffVerifier;
+  attemptCursor?: AttemptCursorCodec;
+  attemptCursorCrypto?: AttemptCursorCrypto;
   liveLeaderboardCursor?: LiveLeaderboardCursorCodec;
   liveLeaderboardCursorCrypto?: LiveLeaderboardCursorCrypto;
 }>;
@@ -195,6 +200,24 @@ export interface LiveLeaderboardCursorCodec {
   encode(value: LiveLeaderboardCursorPayload): string;
   decode(cursor: string): LiveLeaderboardCursorPayload;
 }
+
+/** Opaque seek boundary bound to exactly one athlete's attempt page. */
+export interface AttemptCursorCodec {
+  encode(value: AttemptCursorPayload): string;
+  decode(cursor: string): AttemptCursorPayload;
+}
+
+export type AttemptCursorPayload = Readonly<{
+  version: 1;
+  athleteId: string;
+  createdAt: string;
+  attemptId: string;
+}>;
+
+export type AttemptCursorCrypto = Readonly<{
+  key: Uint8Array;
+  nonceSource?: LiveLeaderboardCursorNonceSource;
+}>;
 
 export interface LiveLeaderboardCursorNonceSource {
   next(): Uint8Array;
@@ -226,6 +249,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
   private readonly raw;
   private readonly clock: Clock;
   private readonly ids: IdGenerator;
+  private readonly attemptCursor: AttemptCursorCodec;
   private readonly liveLeaderboardCursor: LiveLeaderboardCursorCodec;
   private readonly handoffVerifier: AcceptedMediaHandoffVerifier;
 
@@ -243,24 +267,36 @@ export class SQLiteAttemptRepository implements AttemptRepository {
   }
 
   public constructor(input: SQLiteAttemptRepositoryInput) {
+    if (!isFactoryIssuedSqliteDatabase(input.database))
+      throw new Error(
+        "C4 requires a factory-issued SQLite database capability.",
+      );
     this.raw = input.database.raw;
     this.clock = input.clock;
     this.ids = input.ids;
+    this.attemptCursor =
+      input.attemptCursor ??
+      createAttemptCursorCodec(
+        input.attemptCursorCrypto ?? processAttemptCursorCrypto,
+      );
     this.liveLeaderboardCursor =
       input.liveLeaderboardCursor ??
       createLiveLeaderboardCursorCodec(
         input.liveLeaderboardCursorCrypto ?? processLiveLeaderboardCursorCrypto,
       );
+    const productionVerifier =
+      input.handoffVerifier !== SQLiteAttemptRepository.readOnlyTestVerifier;
     if (
-      input.handoffVerifier !== SQLiteAttemptRepository.readOnlyTestVerifier &&
+      productionVerifier &&
       !isC5AcceptedMediaHandoffVerifier(input.handoffVerifier)
     )
       throw new Error("C5 handoff verifier is required from MediaPipeline.");
     this.handoffVerifier = input.handoffVerifier;
-    c4AcceptedMediaCleanupAuthorities.set(
-      this,
-      createC4AcceptedMediaCleanupAuthority(this.raw),
-    );
+    if (productionVerifier)
+      c4AcceptedMediaCleanupAuthorities.set(
+        this,
+        createC4AcceptedMediaCleanupAuthority(this.raw),
+      );
   }
 
   public async issueCalibrationSession(
@@ -418,7 +454,18 @@ export class SQLiteAttemptRepository implements AttemptRepository {
   ): Promise<
     Readonly<{ items: readonly AttemptRecord[]; nextCursor: string | null }>
   > {
-    const cursor = input.cursor ? decodeCursor(input.cursor) : undefined;
+    if (
+      !isUuid(input.athleteId) ||
+      !Number.isSafeInteger(input.limit) ||
+      input.limit < 1 ||
+      input.limit > 50
+    )
+      throw new RepositoryError("invalid_input");
+    const cursor = input.cursor
+      ? this.attemptCursor.decode(input.cursor)
+      : undefined;
+    if (cursor && cursor.athleteId !== input.athleteId)
+      throw new RepositoryError("invalid_input");
     const rows = this.raw
       .prepare(
         `SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version, a.status, a.deletion_state, a.media_json, a.processing_generation, a.processing_lease_id, a.processing_lease_expires_at, a.created_at, tr.outcome_json
@@ -433,7 +480,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         cursor?.createdAt ?? null,
         cursor?.createdAt ?? null,
         cursor?.createdAt ?? null,
-        cursor?.id ?? null,
+        cursor?.attemptId ?? null,
         input.limit + 1,
       ) as AttemptRow[];
     const page = rows.slice(0, input.limit).map(parseAttemptRow);
@@ -442,7 +489,14 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       items: Object.freeze(page),
       nextCursor:
         rows.length > input.limit && last
-          ? encodeCursor(last.createdAt, last.id)
+          ? this.attemptCursor.encode(
+              Object.freeze({
+                version: 1,
+                athleteId: input.athleteId,
+                createdAt: last.createdAt,
+                attemptId: last.id,
+              }),
+            )
           : null,
     });
   }
@@ -2552,30 +2606,6 @@ function stableJson(value: unknown): string {
   throw new RepositoryError("invalid_terminal_outcome");
 }
 
-function encodeCursor(createdAt: string, id: string): string {
-  return Buffer.from(stableJson({ createdAt, id })).toString("base64url");
-}
-
-function decodeCursor(
-  cursor: string,
-): Readonly<{ createdAt: string; id: string }> {
-  try {
-    const value = JSON.parse(
-      Buffer.from(cursor, "base64url").toString("utf8"),
-    ) as { createdAt?: unknown; id?: unknown };
-    if (
-      typeof value.createdAt !== "string" ||
-      typeof value.id !== "string" ||
-      value.id.length === 0 ||
-      !UtcIsoTimestampSchema.safeParse(value.createdAt).success
-    )
-      throw new Error();
-    return Object.freeze({ createdAt: value.createdAt, id: value.id });
-  } catch {
-    throw new RepositoryError("invalid_input");
-  }
-}
-
 type LiveLeaderboardCursor = Pick<
   LiveLeaderboardCursorPayload,
   "attemptId" | "score" | "completedAt"
@@ -2593,6 +2623,101 @@ const processLiveLeaderboardCursorCrypto: LiveLeaderboardCursorCrypto =
       next: () => randomBytes(AES_256_GCM_IV_BYTES),
     }),
   });
+const processAttemptCursorCrypto: AttemptCursorCrypto = Object.freeze({
+  key: randomBytes(AES_256_GCM_KEY_BYTES),
+  nonceSource: Object.freeze({
+    next: () => randomBytes(AES_256_GCM_IV_BYTES),
+  }),
+});
+
+/** AES-GCM attempt cursor with one independently-owned server key. */
+export function createAttemptCursorCodec(
+  input: AttemptCursorCrypto,
+): AttemptCursorCodec {
+  if (
+    !(input.key instanceof Uint8Array) ||
+    input.key.byteLength !== AES_256_GCM_KEY_BYTES
+  )
+    throw new Error("Attempt cursor key must be 32 bytes.");
+  const key = Buffer.from(input.key);
+  const nonceSource =
+    input.nonceSource ??
+    Object.freeze({ next: () => randomBytes(AES_256_GCM_IV_BYTES) });
+  const usedNonces = new Set<string>();
+  return Object.freeze({
+    encode(value: AttemptCursorPayload): string {
+      const payload = parseAttemptCursorPayload(value);
+      const iv = nonceSource.next();
+      if (!(iv instanceof Uint8Array) || iv.byteLength !== AES_256_GCM_IV_BYTES)
+        throw new Error("Attempt cursor nonce must be 12 bytes.");
+      const nonce = Buffer.from(iv);
+      const nonceKey = nonce.toString("base64url");
+      if (usedNonces.has(nonceKey))
+        throw new Error("Attempt cursor nonce was reused.");
+      usedNonces.add(nonceKey);
+      const cipher = createCipheriv("aes-256-gcm", key, nonce);
+      const encrypted = Buffer.concat([
+        cipher.update(stableJson(payload), "utf8"),
+        cipher.final(),
+      ]);
+      return Buffer.concat([nonce, cipher.getAuthTag(), encrypted]).toString(
+        "base64url",
+      );
+    },
+    decode(cursor: string): AttemptCursorPayload {
+      try {
+        if (!/^[A-Za-z0-9_-]+$/.test(cursor)) throw new Error("invalid cursor");
+        const encoded = Buffer.from(cursor, "base64url");
+        if (encoded.toString("base64url") !== cursor)
+          throw new Error("invalid cursor");
+        if (encoded.length <= AES_256_GCM_MINIMUM_PAYLOAD_BYTES)
+          throw new Error("invalid cursor");
+        const decipher = createDecipheriv(
+          "aes-256-gcm",
+          key,
+          encoded.subarray(0, AES_256_GCM_IV_BYTES),
+        );
+        decipher.setAuthTag(
+          encoded.subarray(
+            AES_256_GCM_IV_BYTES,
+            AES_256_GCM_MINIMUM_PAYLOAD_BYTES,
+          ),
+        );
+        return parseAttemptCursorPayload(
+          JSON.parse(
+            Buffer.concat([
+              decipher.update(
+                encoded.subarray(AES_256_GCM_MINIMUM_PAYLOAD_BYTES),
+              ),
+              decipher.final(),
+            ]).toString("utf8"),
+          ),
+        );
+      } catch {
+        throw new RepositoryError("invalid_input");
+      }
+    },
+  });
+}
+
+function parseAttemptCursorPayload(value: unknown): AttemptCursorPayload {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["version", "athleteId", "createdAt", "attemptId"]) ||
+    value.version !== 1 ||
+    !isUuid(value.athleteId) ||
+    !isUuid(value.attemptId) ||
+    typeof value.createdAt !== "string" ||
+    !UtcIsoTimestampSchema.safeParse(value.createdAt).success
+  )
+    throw new Error("invalid attempt cursor");
+  return Object.freeze({
+    version: 1,
+    athleteId: value.athleteId,
+    createdAt: value.createdAt,
+    attemptId: value.attemptId,
+  });
+}
 
 /**
  * AES-GCM cursor encoding authenticates the cohort tuple, snapshot cutoff,

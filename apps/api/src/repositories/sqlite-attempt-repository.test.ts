@@ -28,6 +28,7 @@ import {
 } from "../media/c5-pipeline-test-support.js";
 import {
   SQLiteAttemptRepository,
+  createAttemptCursorCodec,
   createLiveLeaderboardCursorCodec,
   type Clock,
   type IdGenerator,
@@ -607,6 +608,36 @@ describe("SQLiteAttemptRepository", () => {
     ).toThrow("C5 handoff verifier");
   });
 
+  it("rejects cloned, proxied, and structural database wrappers before their raw methods can become C4 authority", () => {
+    const structural = {
+      raw: {
+        exec: () => undefined,
+        prepare: () => ({
+          get: () => ({ originals: 1, frames: 1 }),
+          run: () => ({ changes: 1 }),
+          all: () => [],
+        }),
+      },
+      reopen: () => structural,
+      close: () => undefined,
+    };
+    for (const database of [
+      Object.assign({}, fixture.database),
+      new Proxy(fixture.database, {}),
+      structural,
+    ]) {
+      expect(
+        () =>
+          new SQLiteAttemptRepository({
+            database: database as never,
+            clock: fixture.clock,
+            ids: fixture.ids,
+            handoffVerifier: fixture.c5.handoffVerifier,
+          }),
+      ).toThrow("factory-issued SQLite database capability");
+    }
+  });
+
   it("accepts only the handoff issuer composed with this C4 repository", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
@@ -1134,6 +1165,16 @@ describe("SQLiteAttemptRepository", () => {
     });
     expect(first.items.map((attempt) => attempt.id)).toEqual([ATTEMPT_B]);
     expect(first.nextCursor).toEqual(expect.any(String));
+    expect(() =>
+      JSON.parse(Buffer.from(first.nextCursor!, "base64url").toString("utf8")),
+    ).toThrow();
+    await expect(
+      fixture.repository.listAttempts({
+        athleteId: ATHLETE_B,
+        limit: 1,
+        cursor: first.nextCursor!,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
     const second = await fixture.repository.listAttempts({
       athleteId: ATHLETE_A,
       limit: 1,
@@ -1889,6 +1930,46 @@ describe("SQLiteAttemptRepository", () => {
     repeatedNonce.encode(payload);
     expect(() => repeatedNonce.encode(payload)).toThrow("nonce was reused");
     expect(() => codec.encode(payload)).not.toThrow();
+  });
+
+  it("authenticates canonical opaque attempt cursors with their athlete boundary", () => {
+    let nonce = 0;
+    const codec = createAttemptCursorCodec({
+      key: Uint8Array.from({ length: 32 }, (_, index) => index),
+      nonceSource: {
+        next: () => Uint8Array.from({ length: 12 }, () => nonce++),
+      },
+    });
+    const payload = {
+      version: 1 as const,
+      athleteId: ATHLETE_A,
+      createdAt: "2030-01-15T12:00:00.000Z",
+      attemptId: ATTEMPT_A,
+    };
+    const cursor = codec.encode(payload);
+    expect(cursor).not.toContain(ATHLETE_A);
+    expect(cursor).not.toContain(ATTEMPT_A);
+    expect(codec.decode(cursor)).toEqual(payload);
+    const second = codec.encode(payload);
+    expect(second).not.toEqual(cursor);
+    expect(codec.decode(second)).toEqual(payload);
+    expect(() =>
+      createAttemptCursorCodec({
+        key: Uint8Array.from({ length: 32 }, (_, index) => 31 - index),
+      }).decode(cursor),
+    ).toThrow(expect.objectContaining({ code: "invalid_input" }));
+    for (const malformed of [
+      "A",
+      "AAAA",
+      `${cursor}!`,
+      `${cursor}=`,
+      `${cursor.slice(0, -1)}A`,
+      Buffer.from(JSON.stringify(payload)).toString("base64url"),
+    ]) {
+      expect(() => codec.decode(malformed)).toThrow(
+        expect.objectContaining({ code: "invalid_input" }),
+      );
+    }
   });
 
   it("never projects demo or experimental verified candidates onto the leaderboard", async () => {

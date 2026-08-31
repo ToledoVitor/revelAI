@@ -294,13 +294,188 @@ describe("attempt HTTP foundation", () => {
       clearIntervalSpy.mockRestore();
     }
   });
+
+  it("rejects a second Fastify owner for one repository without disturbing the first, then reopens after close", async () => {
+    const fixture = await makeApi();
+    const secondScheduler = {
+      everyHour: () => ({ timer: 2 }),
+      cancel: () => undefined,
+    };
+    expect(() =>
+      createAttemptApi({
+        repository: fixture.repository,
+        queue: { enqueue: async () => undefined },
+        cleaner: { cleanup: async () => undefined },
+        scheduler: secondScheduler,
+        recoveryBatchLimit: 10,
+      }),
+    ).toThrow("C8 recovery runtime already has an active owner.");
+    await expect(
+      fixture.app.inject({ method: "GET", url: "/v1/challenges" }),
+    ).resolves.toMatchObject({ statusCode: 200 });
+
+    await fixture.app.close();
+    const reopened = createAttemptApi({
+      repository: fixture.repository,
+      queue: { enqueue: async () => undefined },
+      cleaner: { cleanup: async () => undefined },
+      scheduler: secondScheduler,
+      recoveryBatchLimit: 10,
+    });
+    await expect(
+      reopened.inject({ method: "GET", url: "/v1/challenges" }),
+    ).resolves.toMatchObject({ statusCode: 200 });
+    await reopened.close();
+    fixture.database.close();
+  });
+
+  it("rejects invalid generated identifiers and nonces before creating athlete, session, or attempt rows", async () => {
+    const invalidSession = await makeApi({
+      ids: () => "not-a-uuid",
+      nonce: () => "not-a-nonce",
+    });
+    const sessionReply = await invalidSession.app.inject({
+      method: "POST",
+      url: "/v1/calibration-sessions",
+      headers: athleteHeader(ATHLETE_A),
+      payload: { challengeId: "wall-pass", challengeVersion: 1 },
+    });
+    expect(sessionReply.statusCode).toBe(503);
+    expect(RouteErrorSchema.parse(sessionReply.json()).code).toBe(
+      "service_not_ready",
+    );
+    expect(
+      invalidSession.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM athletes")
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      invalidSession.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM calibration_sessions")
+        .get(),
+    ).toEqual({ count: 0 });
+    await invalidSession.close();
+
+    const nonCanonicalNonce = await makeApi({
+      nonce: () => `${"A".repeat(42)}B`,
+    });
+    const nonCanonicalNonceReply = await nonCanonicalNonce.app.inject({
+      method: "POST",
+      url: "/v1/calibration-sessions",
+      headers: athleteHeader(ATHLETE_A),
+      payload: { challengeId: "wall-pass", challengeVersion: 1 },
+    });
+    expect(nonCanonicalNonceReply.statusCode).toBe(503);
+    expect(
+      nonCanonicalNonce.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM athletes")
+        .get(),
+    ).toEqual({ count: 0 });
+    await nonCanonicalNonce.close();
+
+    const invalidAttempt = await makeApi({
+      ids: () => "not-a-uuid",
+    });
+    const attemptReply = await invalidAttempt.app.inject({
+      method: "POST",
+      url: "/v1/attempts",
+      headers: athleteHeader(ATHLETE_A),
+      payload: { mode: "free" },
+    });
+    expect(attemptReply.statusCode).toBe(503);
+    expect(
+      invalidAttempt.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM athletes")
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      invalidAttempt.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM attempts")
+        .get(),
+    ).toEqual({ count: 0 });
+    await invalidAttempt.close();
+
+    const duplicate = await makeApi({
+      ids: () => "33333333-3333-4333-8333-333333333333",
+      nonce: () => "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    });
+    const request = {
+      method: "POST" as const,
+      url: "/v1/calibration-sessions",
+      headers: athleteHeader(ATHLETE_A),
+      payload: { challengeId: "wall-pass" as const, challengeVersion: 1 },
+    };
+    expect((await duplicate.app.inject(request)).statusCode).toBe(201);
+    const duplicateReply = await duplicate.app.inject(request);
+    expect(duplicateReply.statusCode).toBe(503);
+    expect(RouteErrorSchema.parse(duplicateReply.json()).code).toBe(
+      "service_not_ready",
+    );
+    expect(
+      duplicate.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM calibration_sessions")
+        .get(),
+    ).toEqual({ count: 1 });
+    await duplicate.close();
+
+    const duplicateAttempt = await makeApi({
+      ids: () => "44444444-4444-4444-8444-444444444444",
+    });
+    const attemptRequest = {
+      method: "POST" as const,
+      url: "/v1/attempts",
+      headers: athleteHeader(ATHLETE_A),
+      payload: { mode: "free" as const },
+    };
+    expect((await duplicateAttempt.app.inject(attemptRequest)).statusCode).toBe(
+      201,
+    );
+    const duplicateAttemptReply =
+      await duplicateAttempt.app.inject(attemptRequest);
+    expect(duplicateAttemptReply.statusCode).toBe(503);
+    expect(RouteErrorSchema.parse(duplicateAttemptReply.json()).code).toBe(
+      "service_not_ready",
+    );
+    expect(
+      duplicateAttempt.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM attempts")
+        .get(),
+    ).toEqual({ count: 1 });
+    await duplicateAttempt.close();
+  });
+
+  it("normalizes malformed URL paths and query injection without echoing framework detail", async () => {
+    const fixture = await makeApi();
+    for (const url of ["/v1/%ZZ", "/v1/challenges?%ZZ"]) {
+      const reply = await fixture.app.inject({ method: "GET", url });
+      expect(reply.statusCode).toBe(400);
+      expect(RouteErrorSchema.parse(reply.json())).toEqual({
+        code: "invalid_request",
+        message: "Não foi possível entender esta solicitação.",
+        retryable: false,
+      });
+      expect(reply.headers["content-type"]).toContain("application/json");
+      expect(Number(reply.headers["content-length"])).toBe(
+        Buffer.byteLength(reply.body),
+      );
+      expect(reply.body).not.toContain("%ZZ");
+      expect(reply.body).not.toContain("FST_ERR");
+    }
+    await fixture.close();
+  });
 });
 
 function athleteHeader(athleteId: string): Readonly<Record<string, string>> {
   return { "x-revelai-athlete-id": athleteId };
 }
 
-async function makeApi(input?: Readonly<{ useDefaultScheduler?: boolean }>) {
+async function makeApi(
+  input?: Readonly<{
+    useDefaultScheduler?: boolean;
+    ids?: () => string;
+    nonce?: () => string;
+  }>,
+) {
   const directory = await mkdtemp(join(tmpdir(), "revelai-attempt-api-"));
   directories.push(directory);
   const database = openSqliteDatabase(join(directory, "api.sqlite"));
@@ -339,11 +514,17 @@ async function makeApi(input?: Readonly<{ useDefaultScheduler?: boolean }>) {
     ...(scheduler ? { scheduler } : {}),
     recoveryBatchLimit: 10,
     clock,
-    ids: { next: () => ids.shift() ?? "99999999-9999-4999-8999-999999999999" },
-    nonce: () => "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ids: {
+      next: () =>
+        input?.ids?.() ?? ids.shift() ?? "99999999-9999-4999-8999-999999999999",
+    },
+    nonce:
+      input?.nonce ?? (() => "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
   });
   return {
     app,
+    database,
+    repository,
     scheduled,
     get cancelled() {
       return cancelled;

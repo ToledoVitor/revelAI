@@ -158,7 +158,7 @@ describe("C8 recovery runtime", () => {
     expect(claims).toBe(1);
   });
 
-  it("coalesces repeated production composition for one repository into one auto-started schedule", async () => {
+  it("rejects a second active app owner without stopping the first runtime, then permits recreation after close", async () => {
     const scheduled: Array<() => void> = [];
     const repository = {
       claimMediaDeliveryRedelivery: async () => [],
@@ -184,11 +184,15 @@ describe("C8 recovery runtime", () => {
       maxBatchSize: 1,
     };
     const first = createC8RecoveryRuntime(input);
-    const second = createC8RecoveryRuntime(input);
-
-    expect(second).toBe(first);
+    expect(() => createC8RecoveryRuntime(input)).toThrow(
+      "C8 recovery runtime already has an active owner.",
+    );
     expect(scheduled).toHaveLength(1);
     await first.stop();
+    const reopened = createC8RecoveryRuntime(input);
+    expect(reopened).not.toBe(first);
+    expect(scheduled).toHaveLength(2);
+    await reopened.stop();
   });
 
   it("does not retain a failed startup and creates a fresh schedule after the caller drains stop", async () => {
@@ -242,7 +246,7 @@ describe("C8 recovery runtime", () => {
     expect(scheduled).toHaveLength(1);
 
     const stopping = first.stop();
-    expect(
+    expect(() =>
       createC8RecoveryRuntime({
         ...common,
         scheduler: {
@@ -253,7 +257,7 @@ describe("C8 recovery runtime", () => {
           cancel: () => undefined,
         },
       }),
-    ).toBe(first);
+    ).toThrow("C8 recovery runtime already has an active owner.");
 
     unblock!();
     await stopping;
@@ -271,6 +275,76 @@ describe("C8 recovery runtime", () => {
     expect(restarted).not.toBe(first);
     expect(scheduled).toHaveLength(2);
     await restarted.stop();
+  });
+
+  it("registers scheduling before immediate recovery and leaves no work behind when registration throws", async () => {
+    const events: string[] = [];
+    const repository = {
+      claimMediaDeliveryRedelivery: async () => {
+        events.push("claim");
+        return [];
+      },
+      acknowledgeMediaDeliveryRedelivery: async () => undefined,
+      releaseMediaDeliveryRedelivery: async () => undefined,
+      claimMediaAttachmentRecovery: async () => [],
+      rollbackMediaAttachment: async () => undefined,
+      acknowledgeMediaAttachmentCleanup: async () => undefined,
+      releaseMediaAttachmentRecovery: async () => undefined,
+    };
+    const runtime = createC8RecoveryRuntime({
+      repository,
+      queue: { enqueue: async () => undefined },
+      cleaner: { cleanup: async () => undefined },
+      log: { event: () => undefined },
+      scheduler: {
+        everyHour: (task) => {
+          events.push("registered");
+          task();
+          return { timer: 1 };
+        },
+        cancel: () => undefined,
+      },
+      maxBatchSize: 1,
+    });
+    await nextTurn();
+    expect(events).toEqual(["registered", "claim"]);
+    await runtime.stop();
+
+    const failedEvents: string[] = [];
+    expect(() =>
+      createC8RecoveryRuntime({
+        repository: {
+          ...repository,
+          claimMediaDeliveryRedelivery: async () => {
+            failedEvents.push("delivery-claim");
+            return [];
+          },
+          claimMediaAttachmentRecovery: async () => {
+            failedEvents.push("cleanup-claim");
+            return [];
+          },
+        },
+        queue: {
+          enqueue: async () => {
+            failedEvents.push("enqueue");
+          },
+        },
+        cleaner: {
+          cleanup: async () => {
+            failedEvents.push("cleanup");
+          },
+        },
+        log: { event: () => undefined },
+        scheduler: {
+          everyHour: () => {
+            throw new Error("scheduler unavailable");
+          },
+          cancel: () => undefined,
+        },
+        maxBatchSize: 1,
+      }),
+    ).toThrow("scheduler unavailable");
+    expect(failedEvents).toEqual([]);
   });
 });
 

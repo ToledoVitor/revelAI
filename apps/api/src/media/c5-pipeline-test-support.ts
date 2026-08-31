@@ -8,6 +8,7 @@ import type {
 import { createLocalFrameExtraction } from "../storage/local-frame-extraction.js";
 import {
   createLocalMediaStorage,
+  type LocalMediaStorage,
   type UploadRetentionRepository,
 } from "../storage/local-media-storage.js";
 import {
@@ -26,6 +27,7 @@ export const C5_TEST_SOURCE_SHA256 = createHash("sha256")
 
 export type C5PipelineTestSupport = Readonly<{
   handoffVerifier: ReturnType<C5MediaPipeline["handoffVerifier"]>;
+  storage: LocalMediaStorage;
   accept(
     context: MediaUploadContext,
     media: StoredMediaAttachment,
@@ -121,6 +123,7 @@ export function createC5PipelineTestSupport(
   );
   return Object.freeze({
     handoffVerifier: pipeline.handoffVerifier(),
+    storage,
     accept: async (context, media, options) => {
       nextMediaId = media.id;
       currentMode = context.mode;
