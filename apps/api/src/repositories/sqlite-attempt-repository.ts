@@ -26,7 +26,14 @@ import type {
 } from "../media/accepted-media-handoff.js";
 import { isC5AcceptedMediaHandoffVerifier } from "../media/media-pipeline.js";
 import type { SqliteDatabase } from "../database/sqlite-database.js";
-import { isStoredMediaAttachment } from "./attempt-repository.js";
+import {
+  isStoredMediaAttachment,
+  RepositoryError,
+} from "./attempt-repository.js";
+export {
+  RepositoryError,
+  type RepositoryErrorCode,
+} from "./attempt-repository.js";
 import { reconcileMediaDeliveryCleanup } from "./media-delivery-recovery-sql.js";
 import type {
   AttemptRecord,
@@ -210,27 +217,6 @@ export type LiveLeaderboardCursorPayload = Readonly<{
   completedAt: string;
   attemptId: string;
 }>;
-
-export class RepositoryError extends Error {
-  public constructor(
-    public readonly code:
-      | "attempt_not_found"
-      | "duplicate_media_upload"
-      | "invalid_attempt_transition"
-      | "calibration_session_not_found"
-      | "calibration_session_expired"
-      | "calibration_session_not_ready"
-      | "calibration_session_consumed"
-      | "calibration_session_challenge_mismatch"
-      | "invalid_terminal_outcome"
-      | "terminal_result_conflict"
-      | "invalid_input"
-      | "persisted_data_corrupt",
-  ) {
-    super(code);
-    this.name = "RepositoryError";
-  }
-}
 
 export class SQLiteAttemptRepository implements AttemptRepository {
   private static readonly readOnlyTestVerifier: AcceptedMediaHandoffVerifier =

@@ -9,6 +9,28 @@ import type { DurableProcessingContext } from "../media/extraction-manifest.js";
 import type { AcceptedMediaHandoff } from "../media/accepted-media-handoff.js";
 import type { AnalysisJob } from "../queue/analysis-queue.js";
 
+export type RepositoryErrorCode =
+  | "attempt_not_found"
+  | "duplicate_media_upload"
+  | "invalid_attempt_transition"
+  | "calibration_session_not_found"
+  | "calibration_session_expired"
+  | "calibration_session_not_ready"
+  | "calibration_session_consumed"
+  | "calibration_session_challenge_mismatch"
+  | "invalid_terminal_outcome"
+  | "terminal_result_conflict"
+  | "invalid_input"
+  | "persisted_data_corrupt";
+
+/** Safe repository-port error; HTTP maps only its allowlisted public codes. */
+export class RepositoryError extends Error {
+  public constructor(public readonly code: RepositoryErrorCode) {
+    super(code);
+    this.name = "RepositoryError";
+  }
+}
+
 export type StoredMedia = Readonly<{
   id: string;
   contentType: string;
