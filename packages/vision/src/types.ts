@@ -1,0 +1,274 @@
+import {
+  FreeAnalysisProvenanceSchema,
+  VerifiedAnalysisProvenanceSchema,
+} from "@revelai/contracts";
+import { z } from "zod";
+
+const finite = z.number().finite();
+const nonNegativeInteger = z.number().int().nonnegative();
+const positiveInteger = z.number().int().positive();
+const confidence = finite.min(0).max(1);
+const nonEmpty = z.string().min(1);
+
+export const FIDUCIAL_CORNER_IDS = [
+  "a-top-left",
+  "a-top-right",
+  "a-bottom-right",
+  "a-bottom-left",
+  "b-top-left",
+  "b-top-right",
+  "b-bottom-right",
+  "b-bottom-left",
+] as const;
+
+export const FiducialCornerIdSchema = z.enum(FIDUCIAL_CORNER_IDS);
+
+export const SourceFrameSchema = z
+  .object({
+    index: nonNegativeInteger,
+    timestampMs: nonNegativeInteger,
+    sourceWidth: positiveInteger,
+    sourceHeight: positiveInteger,
+    jpeg: z.instanceof(Uint8Array).refine((value) => value.byteLength > 0),
+  })
+  .strict();
+
+const ChallengeSchema = z
+  .object({ id: z.literal("wall-pass"), version: z.literal(1) })
+  .strict();
+
+export const VerifiedVisionFrameRequestSchema = z
+  .object({
+    kind: z.literal("verified-wall-pass"),
+    attemptId: z.string().uuid(),
+    challenge: ChallengeSchema,
+    frame: SourceFrameSchema,
+  })
+  .strict();
+
+export const FreeVisionFrameRequestSchema = z
+  .object({
+    kind: z.literal("free-training"),
+    attemptId: z.string().uuid(),
+    frame: SourceFrameSchema,
+  })
+  .strict();
+
+export const VisionFrameRequestSchema = z.discriminatedUnion("kind", [
+  VerifiedVisionFrameRequestSchema,
+  FreeVisionFrameRequestSchema,
+]);
+
+export const BoxSchema = z
+  .object({
+    xMin: finite,
+    yMin: finite,
+    xMax: finite,
+    yMax: finite,
+    confidence,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.xMin >= value.xMax)
+      context.addIssue({ code: "custom", message: "xMin must precede xMax" });
+    if (value.yMin >= value.yMax)
+      context.addIssue({ code: "custom", message: "yMin must precede yMax" });
+    if (
+      value.xMin < 0 ||
+      value.yMin < 0 ||
+      value.xMax > 1280 ||
+      value.yMax > 720
+    )
+      context.addIssue({
+        code: "custom",
+        message: "box outside inference image",
+      });
+  });
+
+const PointSchema = z
+  .object({ x: finite.min(0).max(1280), y: finite.min(0).max(720), confidence })
+  .strict();
+
+const InferenceImageSchema = z
+  .object({
+    width: z.literal(1280),
+    height: z.literal(720),
+    coordinateSystem: z.literal("inference_pixels"),
+  })
+  .strict();
+
+const WorkflowSchema = z
+  .object({
+    id: z.enum(["revelai-free-training-v1", "revelai-wall-pass-geometry-v1"]),
+    version: z.literal("1.0.0"),
+    modelBundleId: nonEmpty,
+    providerVersion: nonEmpty,
+  })
+  .strict();
+
+const DetectionSchema = z
+  .object({ class: z.enum(["athlete", "ball"]), ...BoxSchema.shape })
+  .strict();
+
+const FreeWorkflowOutputSchema = z
+  .object({
+    kind: z.literal("free-training-v1"),
+    image: InferenceImageSchema,
+    workflow: WorkflowSchema.extend({
+      id: z.literal("revelai-free-training-v1"),
+    }).strict(),
+    detections: z.array(DetectionSchema),
+  })
+  .strict();
+
+const WallPassWorkflowOutputSchema = z
+  .object({
+    kind: z.literal("wall-pass-geometry-v1"),
+    image: InferenceImageSchema,
+    workflow: WorkflowSchema.extend({
+      id: z.literal("revelai-wall-pass-geometry-v1"),
+    }).strict(),
+    detections: z.array(DetectionSchema),
+    keypoints: z.array(
+      PointSchema.extend({
+        class: z.enum(["left_foot", "right_foot"]),
+      }).strict(),
+    ),
+    fiducials: z.array(
+      PointSchema.extend({ class: FiducialCornerIdSchema }).strict(),
+    ),
+    geometry: z
+      .object({
+        wallFloorEdge: z
+          .object({
+            x1: finite.min(0).max(1280),
+            y1: finite.min(0).max(720),
+            x2: finite.min(0).max(1280),
+            y2: finite.min(0).max(720),
+            confidence,
+          })
+          .strict(),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const WorkflowEnvelopeSchema = z
+  .object({
+    outputs: z.tuple([
+      z.discriminatedUnion("kind", [
+        FreeWorkflowOutputSchema,
+        WallPassWorkflowOutputSchema,
+      ]),
+    ]),
+  })
+  .strict();
+
+const SourceBoxSchema = z
+  .object({
+    xMin: finite,
+    yMin: finite,
+    xMax: finite,
+    yMax: finite,
+    confidence,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.xMin >= value.xMax || value.yMin >= value.yMax)
+      context.addIssue({ code: "custom", message: "source box has no area" });
+  });
+
+export const FreeFrameObservationSchema = z
+  .object({
+    kind: z.literal("free-training"),
+    frameIndex: nonNegativeInteger,
+    timestampMs: nonNegativeInteger,
+    sourceWidth: positiveInteger,
+    sourceHeight: positiveInteger,
+    athlete: SourceBoxSchema.optional(),
+    ball: SourceBoxSchema.optional(),
+  })
+  .strict();
+
+const SourcePointSchema = z
+  .object({ x: finite, y: finite, confidence })
+  .strict();
+
+export const WallPassFrameObservationSchema = z
+  .object({
+    kind: z.literal("verified-wall-pass"),
+    frameIndex: nonNegativeInteger,
+    timestampMs: nonNegativeInteger,
+    sourceWidth: positiveInteger,
+    sourceHeight: positiveInteger,
+    athlete: SourceBoxSchema.optional(),
+    ball: SourceBoxSchema.optional(),
+    feet: z.array(
+      SourcePointSchema.extend({ side: z.enum(["left", "right"]) }).strict(),
+    ),
+    fiducialCorners: z.array(
+      SourcePointSchema.extend({ id: FiducialCornerIdSchema }).strict(),
+    ),
+    wallFloorEdge: z
+      .object({ x1: finite, y1: finite, x2: finite, y2: finite, confidence })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+export const FreeVisionObservationBatchSchema = z
+  .object({
+    attemptId: z.string().uuid(),
+    kind: z.literal("free-training"),
+    frames: z.array(FreeFrameObservationSchema),
+    provenance: FreeAnalysisProvenanceSchema,
+  })
+  .strict()
+  .superRefine((batch, context) => {
+    if (batch.frames.some((frame) => frame.kind !== batch.kind))
+      context.addIssue({ code: "custom", message: "mixed Free frame batch" });
+  });
+
+export const VerifiedVisionObservationBatchSchema = z
+  .object({
+    attemptId: z.string().uuid(),
+    kind: z.literal("verified-wall-pass"),
+    frames: z.array(WallPassFrameObservationSchema),
+    provenance: VerifiedAnalysisProvenanceSchema,
+  })
+  .strict()
+  .superRefine((batch, context) => {
+    if (batch.frames.some((frame) => frame.kind !== batch.kind))
+      context.addIssue({
+        code: "custom",
+        message: "mixed verified frame batch",
+      });
+  });
+
+export const VisionObservationBatchSchema = z.discriminatedUnion("kind", [
+  FreeVisionObservationBatchSchema,
+  VerifiedVisionObservationBatchSchema,
+]);
+
+export type SourceFrame = z.infer<typeof SourceFrameSchema>;
+export type VerifiedVisionFrameRequest = z.infer<
+  typeof VerifiedVisionFrameRequestSchema
+>;
+export type FreeVisionFrameRequest = z.infer<
+  typeof FreeVisionFrameRequestSchema
+>;
+export type VisionFrameRequest = z.infer<typeof VisionFrameRequestSchema>;
+export type WorkflowEnvelope = z.infer<typeof WorkflowEnvelopeSchema>;
+export type FreeFrameObservation = z.infer<typeof FreeFrameObservationSchema>;
+export type WallPassFrameObservation = z.infer<
+  typeof WallPassFrameObservationSchema
+>;
+export type FreeVisionObservationBatch = z.infer<
+  typeof FreeVisionObservationBatchSchema
+>;
+export type VerifiedVisionObservationBatch = z.infer<
+  typeof VerifiedVisionObservationBatchSchema
+>;
+export type VisionObservationBatch = z.infer<
+  typeof VisionObservationBatchSchema
+>;
