@@ -12,6 +12,7 @@ import {
 import { assembleVerifiedObservation } from "./observation-assembler.js";
 import {
   evaluateVerifiedIntegrity,
+  isC7AcceptedGeometry,
   scoreVerifiedCandidate,
   serializeIntegrityDecision,
   temporaryIntegrityDecision,
@@ -190,30 +191,144 @@ describe("verified integrity evaluator", () => {
   });
 
   it.each([
-    [
-      "the median anchor-drift limit",
-      [8, -8, 8, -8, 8, -8, 8, -8],
-      "calibration_not_verified",
-    ],
-    [
-      "the maximum anchor-drift limit while median remains admissible",
-      [12, 12, 12, 12, 0, 0, 0, 0],
-      "calibration_not_verified",
-    ],
-    [
-      "both independent anchor-drift limits below threshold",
-      [6, 6, 6, 6, 0, 0, 0, 0],
-      "integrity-valid",
-    ],
+    [5.99, "integrity-valid"],
+    [6, "integrity-valid"],
+    [6.01, "calibration_not_verified"],
   ] as const)(
-    "enforces %s through private C5 to C6 evidence",
-    async (_, offsets, expected) => {
-      const decision = evaluateVerifiedIntegrity(
-        await validInput(fixtureProvider({ activeFiducialXOffsets: offsets })),
+    "measures median drift %f through private C5 to C6 evidence",
+    async (offset, expected) => {
+      const input = await validInput(
+        fixtureProvider({ activeFiducialXOffset: offset }),
       );
+      const frame = input.evidence.active[0]!;
+      expect(frame.anchorMedianDrift).toBeCloseTo(offset, 2);
+      expect(frame.anchorMaximumDrift).toBeCloseTo(offset, 2);
+      const decision = evaluateVerifiedIntegrity(input);
       expect(
         decision.kind === "integrity-valid" ? decision.kind : decision.code,
       ).toBe(expected);
+    },
+  );
+
+  it.each([
+    [
+      "maximum drift below twelve",
+      [11.63, 11.63, 11.63, 11.63, 0, 0, 0, 0],
+      "integrity-valid",
+    ],
+    [
+      "maximum drift at twelve",
+      [11.64, 11.64, 11.64, 11.64, 0, 0, 0, 0],
+      "integrity-valid",
+    ],
+    [
+      "maximum drift above twelve",
+      [11.65, 11.65, 11.65, 11.65, 0, 0, 0, 0],
+      "calibration_not_verified",
+    ],
+  ] as const)(
+    "measures %s through private C5 to C6 evidence",
+    async (_, offsets, expected) => {
+      const input = await validInput(
+        fixtureProvider({ activeFiducialXOffsets: offsets }),
+      );
+      const frame = input.evidence.active[0]!;
+      expect(frame.anchorMedianDrift).not.toBeNull();
+      expect(frame.anchorMedianDrift!).toBeLessThanOrEqual(6);
+      expect(frame.anchorMaximumDrift).not.toBeNull();
+      expect(frame.anchorMaximumDrift!).toBeCloseTo(12, 1);
+      const decision = evaluateVerifiedIntegrity(input);
+      expect(
+        decision.kind === "integrity-valid" ? decision.kind : decision.code,
+      ).toBe(expected);
+    },
+  );
+
+  it.each([
+    [
+      "median below four and maximum below eight",
+      "x",
+      [2, -2, 2, -2, 2, -2, 2, -2],
+      true,
+      "integrity-valid",
+    ],
+    [
+      "median at four",
+      "x",
+      [4.01, -4.01, 4.01, -4.01, 4.01, -4.01, 4.01, -4.01],
+      false,
+      "calibration_not_verified",
+    ],
+    [
+      "median above four",
+      "x",
+      [4.1, -4.1, 4.1, -4.1, 4.1, -4.1, 4.1, -4.1],
+      false,
+      "calibration_not_verified",
+    ],
+    [
+      "maximum below eight",
+      "x",
+      [7, -7, 7, -7, 7, -7, 7, -7],
+      true,
+      "calibration_not_verified",
+    ],
+    [
+      "maximum at eight",
+      "y",
+      [-6.03, -6.26, 1.6, -6.83, 6.76, 3.38, 1.92, -6.35],
+      false,
+      "calibration_not_verified",
+    ],
+  ] as const)(
+    "measures C5 to C6 reprojection boundaries: %s",
+    async (label, axis, offsets, accepted, expectedDecision) => {
+      const input = await validInput(
+        fixtureProvider(
+          axis === "x"
+            ? { activeFiducialXOffsets: offsets }
+            : { activeFiducialYOffsets: offsets },
+        ),
+      );
+      const geometry = input.evidence.active[0]!.geometry;
+      expect(geometry.medianReprojectionError).not.toBeNull();
+      expect(geometry.maxReprojectionError).not.toBeNull();
+      expect(geometry.valid).toBe(accepted);
+      const decision = evaluateVerifiedIntegrity(input);
+      expect(
+        decision.kind === "integrity-valid" ? decision.kind : decision.code,
+      ).toBe(expectedDecision);
+      if (accepted) {
+        expect(geometry.medianReprojectionError!).toBeLessThanOrEqual(4);
+        expect(geometry.maxReprojectionError!).toBeLessThanOrEqual(8);
+      } else
+        expect(
+          geometry.medianReprojectionError! > 4 ||
+            geometry.maxReprojectionError! > 8 ||
+            geometry.wallEdgeError! > 8,
+        ).toBe(true);
+      if (label === "median at four")
+        expect(geometry.medianReprojectionError!).toBeCloseTo(4, 1);
+      if (label === "median above four")
+        expect(geometry.medianReprojectionError!).toBeGreaterThan(4);
+      if (label === "maximum at eight")
+        expect(geometry.maxReprojectionError!).toBeCloseTo(8, 2);
+    },
+  );
+
+  it.each([
+    [7.99, true],
+    [8, true],
+    [8.01, false],
+  ] as const)(
+    "keeps the C7 maximum-reprojection guard at %f as a defense in depth",
+    async (maxReprojectionError, accepted) => {
+      const input = await validInput();
+      const geometry = input.evidence.active[0]!.geometry;
+      expect(isC7AcceptedGeometry(geometry)).toBe(true);
+      expect(isC7AcceptedGeometry({ ...geometry, maxReprojectionError })).toBe(
+        accepted,
+      );
     },
   );
 
@@ -232,9 +347,12 @@ describe("verified integrity evaluator", () => {
   ] as const)(
     "enforces the C6 wall-edge error %i boundary from actual evidence",
     async (wallEdgeOffset, expected) => {
-      const decision = evaluateVerifiedIntegrity(
-        await validInput(fixtureProvider({ wallEdgeOffset })),
+      const input = await validInput(fixtureProvider({ wallEdgeOffset }));
+      expect(input.evidence.active[0]!.geometry.wallEdgeError).toBeCloseTo(
+        wallEdgeOffset,
+        1,
       );
+      const decision = evaluateVerifiedIntegrity(input);
       expect(
         decision.kind === "integrity-valid" ? decision.kind : decision.code,
       ).toBe(expected);
@@ -335,6 +453,121 @@ describe("verified integrity evaluator", () => {
     },
   );
 
+  it("keeps the C5 to C6 to C7 joined graph duplicate, one-to-one, and permitted-reuse invariants", async () => {
+    const input = await validInput();
+    const decision = evaluateVerifiedIntegrity(input);
+    expect(decision.kind).toBe("integrity-valid");
+    if (decision.kind !== "integrity-valid") return;
+
+    const canonical = [
+      ...input.evidence.canonicalEvents.contacts.map(
+        (event) => `contact:${event.timestampMs}:${event.trackId}`,
+      ),
+      ...input.evidence.canonicalEvents.wallImpacts.map(
+        (event) => `wall-impact:${event.timestampMs}:${event.trackId}`,
+      ),
+    ].sort();
+    const graph = input.evidence.eventGraph.map(
+      (event) => `${event.kind}:${event.timestampMs}:${event.trackId}`,
+    );
+    expect(graph).toEqual(
+      [...canonical].sort((left, right) => {
+        const leftTimestamp = Number(left.split(":")[1]);
+        const rightTimestamp = Number(right.split(":")[1]);
+        return leftTimestamp - rightTimestamp || left.localeCompare(right);
+      }),
+    );
+    expect(new Set(graph).size).toBe(graph.length);
+    expect(
+      input.evidence.eventGraph.every(
+        (event) =>
+          event.frameIndex === event.homographyFrameIndex &&
+          event.frameIndex >= 40 &&
+          event.frameIndex < 640,
+      ),
+    ).toBe(true);
+
+    expect(input.evidence.passEvidence).toContainEqual(
+      expect.objectContaining({
+        kind: "complete",
+        startedAtMs: 4000,
+        completedAtMs: 4500,
+      }),
+    );
+    expect(input.evidence.passEvidence).toContainEqual(
+      expect.objectContaining({
+        kind: "complete",
+        startedAtMs: 4500,
+        completedAtMs: 5000,
+      }),
+    );
+    expect(
+      input.evidence.eventGraph.filter(
+        (event) => event.kind === "contact" && event.timestampMs === 4500,
+      ),
+    ).toHaveLength(1);
+    expect(
+      scoreVerifiedCandidate(decision.candidate).opportunities,
+    ).toBeGreaterThan(1);
+  });
+
+  it.each([
+    ["too-short impact window", "short-window", shortWindowTimeline],
+    ["too-long impact window", "long-window", undefined],
+    ["marker-loss cross-track return", "cross-track", undefined],
+    ["active-end pending return", "active-end", undefined],
+  ] as const)(
+    "keeps the C5 to C6 to C7 joined graph window/end/cross-track matrix for %s",
+    async (_, eventScenario, timestampSeconds) => {
+      const input = await validInput(
+        fixtureProvider({ eventScenario }),
+        undefined,
+        timestampSeconds ? { timestampSeconds } : {},
+      );
+      const decision = evaluateVerifiedIntegrity(input);
+      expect(decision.kind).toBe("integrity-valid");
+      if (decision.kind !== "integrity-valid") return;
+
+      if (eventScenario !== "active-end") {
+        expect(input.evidence.passEvidence).toContainEqual(
+          expect.objectContaining({ kind: "missed", startedAtMs: 4000 }),
+        );
+        expect(input.evidence.passEvidence).not.toContainEqual(
+          expect.objectContaining({ kind: "complete", startedAtMs: 4000 }),
+        );
+      }
+      expect(
+        scoreVerifiedCandidate(decision.candidate).missedPasses,
+      ).toBeGreaterThan(0);
+      if (eventScenario === "short-window")
+        expect(input.evidence.eventGraph).toContainEqual(
+          expect.objectContaining({ kind: "wall-impact", timestampMs: 4020 }),
+        );
+      if (eventScenario === "long-window")
+        expect(input.evidence.eventGraph).toContainEqual(
+          expect.objectContaining({ kind: "wall-impact", timestampMs: 6100 }),
+        );
+      if (eventScenario === "cross-track") {
+        const firstContact = input.evidence.eventGraph.find(
+          (event) => event.kind === "contact" && event.timestampMs === 4000,
+        );
+        const laterContacts = input.evidence.eventGraph.filter(
+          (event) => event.kind === "contact" && event.timestampMs > 4000,
+        );
+        expect(firstContact?.trackId).toBe(0);
+        expect(laterContacts.some((event) => event.trackId !== 0)).toBe(true);
+      }
+      if (eventScenario === "active-end")
+        expect(input.evidence.passEvidence).toContainEqual(
+          expect.objectContaining({
+            kind: "missed",
+            startedAtMs: 63_500,
+            deadlineAtMs: 67_500,
+          }),
+        );
+    },
+  );
+
   it("gives C5 probe/continuity binding failures precedence", async () => {
     const input = await validInput();
     const portrait = {
@@ -360,18 +593,40 @@ describe("verified integrity evaluator", () => {
     });
   });
 
-  it("redacts invalid and temporary outcomes and makes equivalent evidence deterministic", async () => {
+  it("redacts valid, invalid, and temporary serialized/log/error paths and makes equivalent evidence deterministic", async () => {
     const input = await validInput();
+    const valid = evaluateVerifiedIntegrity(input);
     const invalid = evaluateVerifiedIntegrity({
       ...input,
       manifest: structuredClone(input.manifest),
     });
     const temporary = temporaryIntegrityDecision();
 
-    for (const decision of [invalid, temporary])
-      expect(JSON.stringify(serializeIntegrityDecision(decision))).not.toMatch(
+    for (const decision of [valid, invalid, temporary]) {
+      const serialized = JSON.stringify(serializeIntegrityDecision(decision));
+      const logPayload = JSON.stringify({
+        event: "verified-integrity-decision",
+        decision: serializeIntegrityDecision(decision),
+      });
+      expect(serialized).not.toMatch(
         /sha|nonce|frame|confidence|drift|media|session/i,
       );
+      expect(logPayload).not.toMatch(
+        /sha|nonce|frame|confidence|drift|media|session/i,
+      );
+    }
+
+    expect(() =>
+      scoreVerifiedCandidate({ kind: "verified-attempt-candidate" }),
+    ).toThrowError("invalid verified candidate");
+    try {
+      scoreVerifiedCandidate({ kind: "verified-attempt-candidate" });
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).not.toMatch(
+        /sha|nonce|frame|confidence|drift|media|session/i,
+      );
+    }
 
     const replay = evaluateVerifiedIntegrity(input);
     const first = evaluateVerifiedIntegrity(input);
@@ -389,6 +644,7 @@ describe("verified integrity evaluator", () => {
 async function validInput(
   provider: VisionProvider = createDemoVisionProvider(),
   scheduler?: VisionBatchScheduler,
+  options: Readonly<{ timestampSeconds?: (index: number) => number }> = {},
 ) {
   const manifest = createExtractionManifest({
     attemptId,
@@ -406,7 +662,7 @@ async function validInput(
       sourceRotationDegrees: 0,
     },
     frames: Array.from({ length: 640 }, (_, index) => ({
-      timestampSeconds: index / 10,
+      timestampSeconds: options.timestampSeconds?.(index) ?? index / 10,
       reference: `frame_${index}`,
       rawBytes: Uint8Array.of(index % 256),
     })),
@@ -459,6 +715,8 @@ type FixtureFault = Readonly<{
   activeFiducialXOffset?: number;
   gradualFiducialXDrift?: boolean;
   activeFiducialXOffsets?: readonly number[];
+  activeFiducialYOffsets?: readonly number[];
+  eventScenario?: "short-window" | "long-window" | "cross-track" | "active-end";
   mirroredGeometry?: boolean;
   wrongWallSide?: boolean;
   singularGeometry?: boolean;
@@ -491,6 +749,11 @@ function fixtureProvider(fault: FixtureFault): VisionProvider {
             corner.x +
             (activeIndex >= 0
               ? (fault.activeFiducialXOffsets?.[index] ?? 0)
+              : 0),
+          y:
+            corner.y +
+            (activeIndex >= 0
+              ? (fault.activeFiducialYOffsets?.[index] ?? 0)
               : 0),
         }),
       );
@@ -526,12 +789,18 @@ function fixtureProvider(fault: FixtureFault): VisionProvider {
                 y2: observation.wallFloorEdge.y2 + (fault.wallEdgeOffset ?? 0),
               })
         : undefined;
+      const event = eventScenario(
+        observation,
+        activeIndex,
+        fault.eventScenario,
+      );
       return Object.freeze({
         ...observation,
         ...(missingPreRoll || missingStable || unstable
           ? { athlete: undefined }
           : {}),
         ...(missingTrack ? { ball: undefined } : {}),
+        ...event,
         ...(fault.inlierCount === undefined
           ? {}
           : {
@@ -554,6 +823,50 @@ function fixtureProvider(fault: FixtureFault): VisionProvider {
             }),
       });
     },
+  });
+}
+
+function eventScenario(
+  observation: Awaited<ReturnType<VisionProvider["analyzeVerified"]>>,
+  activeIndex: number,
+  scenario: FixtureFault["eventScenario"],
+) {
+  if (activeIndex < 0 || !scenario) return {};
+  if (scenario === "cross-track" && activeIndex >= 3 && activeIndex <= 5)
+    return Object.freeze({ ball: undefined, feet: Object.freeze([]) });
+  if (scenario === "short-window" && activeIndex >= 2 && activeIndex <= 4)
+    return Object.freeze({
+      ball: withBallY(observation, activeIndex === 2 ? 10 : 40),
+      feet: Object.freeze([]),
+    });
+  if (scenario === "long-window" && activeIndex >= 2 && activeIndex <= 24)
+    return Object.freeze({
+      ball: withBallY(observation, activeIndex === 21 ? 10 : 40),
+      feet: Object.freeze([]),
+    });
+  if (scenario === "active-end" && activeIndex === 597)
+    return Object.freeze({
+      ball: withBallY(observation, 100),
+      feet: Object.freeze([]),
+    });
+  return {};
+}
+
+function withBallY(
+  observation: Awaited<ReturnType<VisionProvider["analyzeVerified"]>>,
+  yMax: number,
+) {
+  const ball = observation.ball ?? {
+    xMin: 500,
+    yMin: Math.max(0, yMax - 15),
+    xMax: 530,
+    yMax,
+    confidence: 0.88,
+  };
+  return Object.freeze({
+    ...ball,
+    yMin: Math.max(0, yMax - 15),
+    yMax,
   });
 }
 
@@ -599,4 +912,12 @@ function isEvenlyRemoved(index: number, count: number): boolean {
     Math.floor(((index + 1) * count) / 600) !==
     Math.floor((index * count) / 600)
   );
+}
+
+function shortWindowTimeline(index: number): number {
+  if (index < 40) return index / 10;
+  if (index === 40) return 4;
+  if (index === 41) return 4.01;
+  if (index === 42) return 4.02;
+  return 4.27 + (index - 43) / 10;
 }

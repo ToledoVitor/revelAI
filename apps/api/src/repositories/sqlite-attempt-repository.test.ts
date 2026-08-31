@@ -3432,6 +3432,87 @@ describe("SQLiteAttemptRepository", () => {
     beforeRetry.close();
   });
 
+  it.each([
+    [
+      "status",
+      "failed",
+      passingWorkflowBenchmarkReceiptFixture.runAt,
+      passingWorkflowBenchmarkReceiptFixture.validUntil,
+      null,
+    ],
+    [
+      "run_at",
+      "passed",
+      "2030-01-01T00:00:01.000Z",
+      passingWorkflowBenchmarkReceiptFixture.validUntil,
+      null,
+    ],
+    [
+      "valid_until",
+      "passed",
+      passingWorkflowBenchmarkReceiptFixture.runAt,
+      "2030-01-30T00:00:00.000Z",
+      null,
+    ],
+    [
+      "invalidated_at",
+      "passed",
+      passingWorkflowBenchmarkReceiptFixture.runAt,
+      passingWorkflowBenchmarkReceiptFixture.validUntil,
+      "2030-01-15T12:00:00.000Z",
+    ],
+  ] as const)(
+    "rolls back and reopens at v14 when v15 receipt JSON contradicts durable %s",
+    async (_, status, runAt, validUntil, invalidatedAt) => {
+      const filename = join(
+        fixture.directory,
+        `legacy-v14-receipt-${_}-mismatch.sqlite`,
+      );
+      const legacy = openSqliteDatabaseAtVersionForTest(filename, 14);
+      const {
+        receiptSha256: _hash,
+        evidence: _evidence,
+        ...oldPayload
+      } = passingWorkflowBenchmarkReceiptFixture;
+      void _hash;
+      void _evidence;
+      const oldHash = workflowBenchmarkReceiptDigest(oldPayload as never);
+      const oldReceipt = { ...oldPayload, receiptSha256: oldHash };
+      legacy.raw
+        .prepare(
+          "INSERT INTO workflow_benchmark_receipts (id, receipt_sha256, schema_version, workflow_id, workflow_version, model_bundle_id, provider_version, status, run_at, valid_until, invalidated_at, receipt_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          oldReceipt.id,
+          oldReceipt.receiptSha256,
+          oldReceipt.schemaVersion,
+          oldReceipt.workflow.workflowId,
+          oldReceipt.workflow.workflowVersion,
+          oldReceipt.workflow.modelBundleId,
+          oldReceipt.workflow.providerVersion,
+          status,
+          runAt,
+          validUntil,
+          invalidatedAt,
+          JSON.stringify(oldReceipt),
+          fixture.clock.now(),
+        );
+      legacy.close();
+
+      for (let attempt = 0; attempt < 2; attempt += 1)
+        expect(() => openSqliteDatabase(filename)).toThrow(
+          "competitive_policy_persisted_data_corrupt",
+        );
+      const beforeRetry = openSqliteDatabaseAtVersionForTest(filename, 14);
+      expect(
+        beforeRetry.raw
+          .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+          .get(),
+      ).toMatchObject({ count: 14 });
+      beforeRetry.close();
+    },
+  );
+
   it("upgrades an already-applied v7/v8 database with quarantine, policy, and invalidation invariants", async () => {
     const filename = join(
       fixture.directory,

@@ -39,6 +39,10 @@ export function parseStoredBenchmarkReceipt(
     workflowId: string;
     workflowVersion: string;
     providerVersion: string;
+    status: string;
+    runAt: string;
+    validUntil: string;
+    invalidatedAt: string | null;
     receiptJson: string;
   }>,
 ): WorkflowBenchmarkReceipt {
@@ -61,7 +65,11 @@ export function parseStoredBenchmarkReceipt(
     receipt.workflow.modelBundleId !== input.modelBundleId ||
     receipt.workflow.workflowId !== input.workflowId ||
     receipt.workflow.workflowVersion !== input.workflowVersion ||
-    receipt.workflow.providerVersion !== input.providerVersion
+    receipt.workflow.providerVersion !== input.providerVersion ||
+    receipt.status !== input.status ||
+    receipt.runAt !== input.runAt ||
+    receipt.validUntil !== input.validUntil ||
+    receipt.invalidatedAt !== input.invalidatedAt
   )
     throw new CompetitivePolicyRepositoryError(
       "competitive_policy_persisted_data_corrupt",

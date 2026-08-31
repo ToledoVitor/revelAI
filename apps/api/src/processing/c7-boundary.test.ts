@@ -56,48 +56,65 @@ describe("C7 decision-layer boundary", () => {
   it("keeps every API score and competitive-policy consumer behind the valid-only candidate seam", async () => {
     const apiSource = resolve(processingDirectory, "..");
     const modules = await productionModules(apiSource);
-    const calls = new Map<string, string[]>();
-    const declarations = new Map<string, ts.FunctionDeclaration>();
+    const program = apiProductionProgram(apiSource);
+    const checker = program.getTypeChecker();
+    const sourceByPath = new Map(
+      modules.map((filename) => [filename, program.getSourceFile(filename)]),
+    );
+    const integritySource = sourceByPath.get(
+      resolve(processingDirectory, "integrity-evaluator.ts"),
+    );
+    const policySource = sourceByPath.get(
+      resolve(processingDirectory, "competitive-policy.ts"),
+    );
+    if (!integritySource || !policySource)
+      throw new Error("C7 score/policy topology sources missing");
+    const sources = [...sourceByPath.values()].filter(
+      (source): source is ts.SourceFile => source !== undefined,
+    );
 
-    for (const filename of modules) {
-      const source = ts.createSourceFile(
-        filename,
-        await readFile(filename, "utf8"),
-        ts.ScriptTarget.ES2023,
-        true,
-      );
-      const visit = (node: ts.Node): void => {
-        if (
-          ts.isCallExpression(node) &&
-          ts.isIdentifier(node.expression) &&
-          [
-            "evaluateWallPassV1",
-            "scoreVerifiedCandidate",
-            "evaluateCompetitiveEligibility",
-          ].includes(node.expression.text)
-        ) {
-          const entries = calls.get(node.expression.text) ?? [];
-          entries.push(relative(apiSource, filename));
-          calls.set(node.expression.text, entries);
-        }
-        if (ts.isFunctionDeclaration(node) && node.name)
-          declarations.set(node.name.text, node);
-        ts.forEachChild(node, visit);
-      };
-      visit(source);
-    }
-
-    expect(calls.get("evaluateWallPassV1")).toEqual([
-      "processing/integrity-evaluator.ts",
-    ]);
-    expect(calls.get("scoreVerifiedCandidate") ?? []).toEqual([]);
-    expect(calls.get("evaluateCompetitiveEligibility") ?? []).toEqual([]);
     expect(
-      candidateParameterType(declarations.get("scoreVerifiedCandidate")),
+      relativeCallSites(
+        apiSource,
+        callSitesForSymbol(
+          checker,
+          sources,
+          importedSymbol(checker, integritySource, "evaluateWallPassV1"),
+        ),
+      ),
+    ).toEqual(["processing/integrity-evaluator.ts"]);
+    expect(
+      relativeCallSites(
+        apiSource,
+        callSitesForSymbol(
+          checker,
+          sources,
+          declaredSymbol(checker, integritySource, "scoreVerifiedCandidate"),
+        ),
+      ),
+    ).toEqual([]);
+    expect(
+      relativeCallSites(
+        apiSource,
+        callSitesForSymbol(
+          checker,
+          sources,
+          declaredSymbol(
+            checker,
+            policySource,
+            "evaluateCompetitiveEligibility",
+          ),
+        ),
+      ),
+    ).toEqual([]);
+    expect(
+      candidateParameterType(
+        functionDeclaration(integritySource, "scoreVerifiedCandidate"),
+      ),
     ).toBe("VerifiedAttemptCandidate");
     expect(
       candidateParameterType(
-        declarations.get("evaluateCompetitiveEligibility"),
+        functionDeclaration(policySource, "evaluateCompetitiveEligibility"),
       ),
     ).toBe("VerifiedAttemptCandidate");
   });
@@ -215,30 +232,69 @@ describe("C7 decision-layer boundary", () => {
     expect(legacyRebindIdentifiers).toEqual([]);
   });
 
-  it("resolves imported aliases, namespaces, and computed access before accepting a topology proof", () => {
+  it("resolves constant-computed capability and aliased score/policy calls before accepting a topology proof", () => {
     const program = virtualProgram({
-      "/vision.ts": "export function ownedRunner() {}",
+      "/capability.ts": "export function c5BoundEvidenceExecution() {}",
+      "/domain.ts": [
+        "export function evaluateWallPassV1() {}",
+        "export function evaluateCompetitiveEligibility() {}",
+      ].join("\n"),
       "/entry.ts": [
-        'import { ownedRunner as alias } from "./vision";',
-        'import * as vision from "./vision";',
-        "alias();",
-        "vision.ownedRunner();",
-        'vision["ownedRunner"]();',
+        'import { c5BoundEvidenceExecution as capabilityByAlias } from "./capability";',
+        'import * as capability from "./capability";',
+        'import { evaluateWallPassV1 as scoreByAlias, evaluateCompetitiveEligibility as policyByAlias } from "./domain";',
+        'const capabilityKey = "c5BoundEvidenceExecution" as const;',
+        "capabilityByAlias();",
+        "capability.c5BoundEvidenceExecution();",
+        'capability["c5BoundEvidenceExecution"]();',
+        "capability[capabilityKey]();",
+        "scoreByAlias();",
+        "policyByAlias();",
       ].join("\n"),
     });
     const checker = program.getTypeChecker();
-    const vision = program.getSourceFile("/vision.ts");
+    const capability = program.getSourceFile("/capability.ts");
+    const domain = program.getSourceFile("/domain.ts");
     const entry = program.getSourceFile("/entry.ts");
-    if (!vision || !entry) throw new Error("virtual topology source missing");
-    const target = declaredSymbol(checker, vision, "ownedRunner");
+    if (!capability || !domain || !entry)
+      throw new Error("virtual topology source missing");
+    const target = declaredSymbol(
+      checker,
+      capability,
+      "c5BoundEvidenceExecution",
+    );
 
-    expect(callSitesForSymbol(checker, [entry], target)).toEqual([
-      "/entry.ts",
-      "/entry.ts",
-      "/entry.ts",
-    ]);
+    expect(callSitesForSymbol(checker, [entry], target)).toHaveLength(4);
+    expect(
+      callSitesForSymbol(
+        checker,
+        [entry],
+        declaredSymbol(checker, domain, "evaluateWallPassV1"),
+      ),
+    ).toEqual(["/entry.ts"]);
+    expect(
+      callSitesForSymbol(
+        checker,
+        [entry],
+        declaredSymbol(checker, domain, "evaluateCompetitiveEligibility"),
+      ),
+    ).toEqual(["/entry.ts"]);
   });
 });
+
+function functionDeclaration(
+  source: ts.SourceFile,
+  name: string,
+): ts.FunctionDeclaration | undefined {
+  let result: ts.FunctionDeclaration | undefined;
+  const visit = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === name)
+      result = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return result;
+}
 
 async function productionModules(
   directory: string,
@@ -314,9 +370,15 @@ function virtualProgram(files: Readonly<Record<string, string>>): ts.Program {
   };
   host.resolveModuleNames = (names, containingFile) =>
     names.map((name) => {
-      if (name !== "./vision") return undefined;
+      if (!name.startsWith("./")) return undefined;
+      const resolvedFileName = resolve(
+        containingFile,
+        "..",
+        `${name.slice(2)}.ts`,
+      );
+      if (!read(resolvedFileName)) return undefined;
       return {
-        resolvedFileName: resolve(containingFile, "..", "vision.ts"),
+        resolvedFileName,
         extension: ts.Extension.Ts,
         isExternalLibraryImport: false,
       };
@@ -413,15 +475,24 @@ function callSymbol(
     return checker.getSymbolAtLocation(expression);
   if (ts.isPropertyAccessExpression(expression))
     return checker.getSymbolAtLocation(expression.name);
-  if (
-    ts.isElementAccessExpression(expression) &&
-    ts.isStringLiteral(expression.argumentExpression)
-  )
-    return checker.getPropertyOfType(
-      checker.getTypeAtLocation(expression.expression),
-      expression.argumentExpression.text,
-    );
+  if (ts.isElementAccessExpression(expression)) {
+    const argument = expression.argumentExpression;
+    const key = ts.isStringLiteral(argument)
+      ? argument.text
+      : literalStringValue(checker.getTypeAtLocation(argument));
+    if (key)
+      return checker.getPropertyOfType(
+        checker.getTypeAtLocation(expression.expression),
+        key,
+      );
+  }
   return undefined;
+}
+
+function literalStringValue(type: ts.Type): string | undefined {
+  return type.flags & ts.TypeFlags.StringLiteral
+    ? (type as ts.StringLiteralType).value
+    : undefined;
 }
 
 function sameSymbol(

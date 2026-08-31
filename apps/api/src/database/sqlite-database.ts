@@ -785,7 +785,8 @@ function bindCompetitivePolicyWorkspacesV14(raw: Database.Database): void {
     .prepare(
       `SELECT p.id AS policy_id, r.id, r.receipt_sha256, r.schema_version,
               r.model_bundle_id, r.workflow_id, r.workflow_version,
-              r.provider_version, r.receipt_json
+              r.provider_version, r.status, r.run_at, r.valid_until,
+              r.invalidated_at, r.receipt_json
        FROM approved_competitive_model_policies p
        INNER JOIN workflow_benchmark_receipts r ON r.id = p.receipt_id`,
     )
@@ -798,6 +799,10 @@ function bindCompetitivePolicyWorkspacesV14(raw: Database.Database): void {
     workflow_id: string;
     workflow_version: string;
     provider_version: string;
+    status: string;
+    run_at: string;
+    valid_until: string;
+    invalidated_at: string | null;
     receipt_json: string;
   }>[];
   const update = raw.prepare(
@@ -812,6 +817,10 @@ function bindCompetitivePolicyWorkspacesV14(raw: Database.Database): void {
       workflowId: row.workflow_id,
       workflowVersion: row.workflow_version,
       providerVersion: row.provider_version,
+      status: row.status,
+      runAt: row.run_at,
+      validUntil: row.valid_until,
+      invalidatedAt: row.invalidated_at,
       receiptJson: row.receipt_json,
     });
     update.run(receipt.workflow.workspaceId, row.policy_id);
@@ -834,7 +843,7 @@ function upgradeCompetitivePolicyEvidenceVersionsV15(
 ): void {
   const rows = raw
     .prepare(
-      "SELECT id, receipt_sha256, schema_version, model_bundle_id, workflow_id, workflow_version, provider_version, receipt_json FROM workflow_benchmark_receipts",
+      "SELECT id, receipt_sha256, schema_version, model_bundle_id, workflow_id, workflow_version, provider_version, status, run_at, valid_until, invalidated_at, receipt_json FROM workflow_benchmark_receipts",
     )
     .all() as readonly Readonly<{
     id: string;
@@ -844,6 +853,10 @@ function upgradeCompetitivePolicyEvidenceVersionsV15(
     workflow_id: string;
     workflow_version: string;
     provider_version: string;
+    status: string;
+    run_at: string;
+    valid_until: string;
+    invalidated_at: string | null;
     receipt_json: string;
   }>[];
   const policiesForReceipt = raw.prepare(
@@ -859,7 +872,7 @@ function upgradeCompetitivePolicyEvidenceVersionsV15(
     "UPDATE workflow_benchmark_receipts SET receipt_sha256 = ?, receipt_json = ? WHERE id = ? AND receipt_sha256 = ?",
   );
   const receiptForId = raw.prepare(
-    "SELECT id, receipt_sha256, schema_version, model_bundle_id, workflow_id, workflow_version, provider_version, receipt_json FROM workflow_benchmark_receipts WHERE id = ?",
+    "SELECT id, receipt_sha256, schema_version, model_bundle_id, workflow_id, workflow_version, provider_version, status, run_at, valid_until, invalidated_at, receipt_json FROM workflow_benchmark_receipts WHERE id = ?",
   );
   for (const row of rows) {
     const parsed = parseV14ReceiptValue(row);
@@ -938,6 +951,10 @@ type V15ReceiptRow = Readonly<{
   workflow_id: string;
   workflow_version: string;
   provider_version: string;
+  status: string;
+  run_at: string;
+  valid_until: string;
+  invalidated_at: string | null;
   receipt_json: string;
 }>;
 
@@ -1017,6 +1034,10 @@ function parseStrictV15ReceiptRow(row: V15ReceiptRow) {
     workflowId: row.workflow_id,
     workflowVersion: row.workflow_version,
     providerVersion: row.provider_version,
+    status: row.status,
+    runAt: row.run_at,
+    validUntil: row.valid_until,
+    invalidatedAt: row.invalidated_at,
     receiptJson: row.receipt_json,
   });
 }

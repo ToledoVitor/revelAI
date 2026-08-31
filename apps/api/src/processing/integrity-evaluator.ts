@@ -329,7 +329,7 @@ function hasVerifiedCalibration(
   evidence: VerifiedObservationEvidence,
 ): boolean {
   const preRoll = evidence.preRoll.filter(
-    (frame) => frame.confidencePresent && acceptedGeometry(frame.geometry),
+    (frame) => frame.confidencePresent && isC7AcceptedGeometry(frame.geometry),
   );
   if (
     preRoll.length < REQUIRED_PRE_ROLL_FRAMES ||
@@ -350,7 +350,7 @@ function hasVerifiedCalibration(
   for (const frame of evidence.active) {
     if (!frame.stable) continue;
     if (
-      !acceptedGeometry(frame.geometry) ||
+      !isC7AcceptedGeometry(frame.geometry) ||
       frame.anchorMedianDrift === null ||
       frame.anchorMaximumDrift === null ||
       frame.anchorMedianDrift < 0 ||
@@ -363,7 +363,8 @@ function hasVerifiedCalibration(
   return evidence.longestUnstableRun <= MAX_UNSTABLE_RUN;
 }
 
-function acceptedGeometry(
+/** Pure C7 threshold guard; the opaque C5/C6 capability prevents structural use. */
+export function isC7AcceptedGeometry(
   geometry: VerifiedObservationEvidence["active"][number]["geometry"],
 ): boolean {
   return (
@@ -421,7 +422,7 @@ function hasBoundCanonicalEvents(
       !Number.isSafeInteger(event.trackId) ||
       event.trackId < 0 ||
       !frame?.stable ||
-      !acceptedGeometry(frame.geometry) ||
+      !isC7AcceptedGeometry(frame.geometry) ||
       !expectedEvents.some(
         (expected) =>
           expected.kind === event.kind &&

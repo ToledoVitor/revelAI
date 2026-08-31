@@ -94,7 +94,7 @@ export class SQLiteCompetitivePolicyRepository
     await this.transaction(() => {
       const receipt = this.raw
         .prepare(
-          "SELECT r.receipt_sha256, r.schema_version, r.workflow_id, r.workflow_version, r.model_bundle_id, r.provider_version, r.status, r.valid_until, r.invalidated_at, r.receipt_json, i.receipt_id AS invalidation_receipt_id, q.receipt_id AS quarantined_invalidation_receipt_id FROM workflow_benchmark_receipts r LEFT JOIN workflow_benchmark_receipt_invalidations i ON i.receipt_id = r.id LEFT JOIN workflow_benchmark_receipt_invalidation_quarantine q ON q.receipt_id = r.id WHERE r.id = ?",
+          "SELECT r.receipt_sha256, r.schema_version, r.workflow_id, r.workflow_version, r.model_bundle_id, r.provider_version, r.status, r.run_at, r.valid_until, r.invalidated_at, r.receipt_json, i.receipt_id AS invalidation_receipt_id, q.receipt_id AS quarantined_invalidation_receipt_id FROM workflow_benchmark_receipts r LEFT JOIN workflow_benchmark_receipt_invalidations i ON i.receipt_id = r.id LEFT JOIN workflow_benchmark_receipt_invalidation_quarantine q ON q.receipt_id = r.id WHERE r.id = ?",
         )
         .get(input.receiptId) as
         | {
@@ -105,6 +105,7 @@ export class SQLiteCompetitivePolicyRepository
             model_bundle_id: string;
             provider_version: string;
             status: string;
+            run_at: string;
             valid_until: string;
             invalidated_at: string | null;
             receipt_json: string;
@@ -145,6 +146,10 @@ export class SQLiteCompetitivePolicyRepository
         workflowVersion: receipt.workflow_version,
         modelBundleId: receipt.model_bundle_id,
         providerVersion: receipt.provider_version,
+        status: receipt.status,
+        runAt: receipt.run_at,
+        validUntil: receipt.valid_until,
+        invalidatedAt: receipt.invalidated_at,
         receiptJson: receipt.receipt_json,
       });
       if (
@@ -299,7 +304,7 @@ export class SQLiteCompetitivePolicyRepository
       row = this.raw
         .prepare(
           `SELECT p.id, p.receipt_id, p.receipt_sha256, p.receipt_schema_version, p.workspace_id, p.model_bundle_id, p.workflow_id, p.workflow_version, p.provider_version, p.calibration_evidence_version, p.extraction_evidence_version, p.observation_evidence_version, p.challenge_id, p.challenge_version, p.rule_version,
-                r.receipt_json, r.receipt_sha256 AS source_receipt_sha256, r.schema_version AS source_schema_version, r.model_bundle_id AS source_model_bundle_id, r.workflow_id AS source_workflow_id, r.workflow_version AS source_workflow_version, r.provider_version AS source_provider_version
+                r.receipt_json, r.receipt_sha256 AS source_receipt_sha256, r.schema_version AS source_schema_version, r.model_bundle_id AS source_model_bundle_id, r.workflow_id AS source_workflow_id, r.workflow_version AS source_workflow_version, r.provider_version AS source_provider_version, r.status AS source_status, r.run_at AS source_run_at, r.valid_until AS source_valid_until, r.invalidated_at AS source_invalidated_at
          FROM approved_competitive_model_policies p
          INNER JOIN workflow_benchmark_receipts r
            ON r.id = p.receipt_id
@@ -416,6 +421,10 @@ function assertReceiptRowMatches(
     workflowId: string;
     workflowVersion: string;
     providerVersion: string;
+    status: string;
+    runAt: string;
+    validUntil: string;
+    invalidatedAt: string | null;
     receiptJson: string;
   }>,
 ): WorkflowBenchmarkReceipt {
@@ -450,8 +459,18 @@ function parsePolicyRow(row: unknown): CompetitivePolicyActivation {
     "source_workflow_id",
     "source_workflow_version",
     "source_provider_version",
+    "source_status",
+    "source_run_at",
+    "source_valid_until",
   ];
   if (strings.some((key) => typeof value[key] !== "string"))
+    throw new CompetitivePolicyRepositoryError(
+      "competitive_policy_persisted_data_corrupt",
+    );
+  if (
+    value.source_invalidated_at !== null &&
+    typeof value.source_invalidated_at !== "string"
+  )
     throw new CompetitivePolicyRepositoryError(
       "competitive_policy_persisted_data_corrupt",
     );
@@ -477,6 +496,13 @@ function parsePolicyRow(row: unknown): CompetitivePolicyActivation {
     workflowId: value.source_workflow_id as string,
     workflowVersion: value.source_workflow_version as string,
     providerVersion: value.source_provider_version as string,
+    status: value.source_status as string,
+    runAt: value.source_run_at as string,
+    validUntil: value.source_valid_until as string,
+    invalidatedAt:
+      value.source_invalidated_at === null
+        ? null
+        : (value.source_invalidated_at as string),
     receiptJson: value.receipt_json as string,
   });
   if (
