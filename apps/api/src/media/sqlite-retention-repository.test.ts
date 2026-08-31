@@ -362,7 +362,6 @@ describe("SQLiteRetentionRepository", () => {
         enqueue: async () => {
           throw new QueueUnavailableError();
         },
-        subscribe: () => () => undefined,
       },
     });
 
@@ -519,7 +518,6 @@ describe("SQLiteRetentionRepository", () => {
       queue: {
         isAvailable: async () => true,
         enqueue: async (job) => void queued.push(job),
-        subscribe: () => () => undefined,
       },
     });
     await service.attachAcceptedMedia({ accepted });
@@ -595,7 +593,6 @@ describe("SQLiteRetentionRepository", () => {
         enqueue: async () => {
           throw new QueueUnavailableError();
         },
-        subscribe: () => () => undefined,
       },
     });
     await expect(
@@ -637,7 +634,6 @@ describe("SQLiteRetentionRepository", () => {
       queue: {
         isAvailable: async () => true,
         enqueue: async () => undefined,
-        subscribe: () => () => undefined,
       },
     }).attachAcceptedMedia({ accepted: retry });
     expect(retried).toEqual({ attemptId: retryAttempt, generation: 2 });

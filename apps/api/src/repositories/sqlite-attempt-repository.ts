@@ -41,6 +41,8 @@ export {
   type RepositoryErrorCode,
 } from "./attempt-repository.js";
 import { reconcileMediaDeliveryCleanup } from "./media-delivery-recovery-sql.js";
+import { SQLiteRetentionRepository } from "../media/sqlite-retention-repository.js";
+import type { UploadRetentionRepository } from "../storage/local-media-storage.js";
 import type {
   AttemptRecord,
   AttemptRepository,
@@ -222,7 +224,9 @@ export type LiveLeaderboardCursorPayload = Readonly<{
   attemptId: string;
 }>;
 
-export class SQLiteAttemptRepository implements AttemptRepository {
+export class SQLiteAttemptRepository
+  implements AttemptRepository, UploadRetentionRepository
+{
   private static readonly readOnlyTestVerifier: AcceptedMediaHandoffVerifier =
     Object.freeze({
       accepts: (_value: unknown): _value is AcceptedMediaHandoff => false,
@@ -233,6 +237,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
   private readonly attemptCursor: AttemptCursorCodec;
   private readonly liveLeaderboardCursor: LiveLeaderboardCursorCodec;
   private readonly handoffVerifier: AcceptedMediaHandoffVerifier;
+  private readonly retention: SQLiteRetentionRepository;
 
   /**
    * Test/migration reads never attach C5 media. Keep that explicitly
@@ -253,6 +258,9 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         "C4 requires a factory-issued SQLite database capability.",
       );
     this.raw = input.database.raw;
+    this.retention = new SQLiteRetentionRepository({
+      database: input.database,
+    });
     this.clock = input.clock;
     this.ids = input.ids;
     this.attemptCursor =
@@ -503,6 +511,18 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       if (!row) throw new RepositoryError("attempt_not_found");
       return uploadContextFromRow(row, this.clock.now());
     });
+  }
+
+  public schedule(
+    input: Parameters<UploadRetentionRepository["schedule"]>[0],
+  ): ReturnType<UploadRetentionRepository["schedule"]> {
+    return this.retention.schedule(input);
+  }
+
+  public acknowledge(
+    record: Parameters<UploadRetentionRepository["acknowledge"]>[0],
+  ): ReturnType<UploadRetentionRepository["acknowledge"]> {
+    return this.retention.acknowledge(record);
   }
 
   public async attachPreparedMedia(
@@ -1944,7 +1964,9 @@ function uploadContextFromRow(
     throw new RepositoryError("persisted_data_corrupt");
   if (row.deletion_state !== "active")
     throw new RepositoryError("attempt_not_found");
-  if (row.status !== "awaiting-upload" || row.media_json !== null)
+  if (row.media_json !== null)
+    throw new RepositoryError("duplicate_media_upload");
+  if (row.status !== "awaiting-upload")
     throw new RepositoryError("invalid_attempt_transition");
   const generation = row.processing_generation + 1;
   if (!Number.isSafeInteger(generation))

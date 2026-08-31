@@ -39,16 +39,18 @@ export interface AttemptServiceLog {
   ): void;
 }
 
+type AttemptAttachmentQueue = Pick<AnalysisQueue, "isAvailable" | "enqueue">;
+
 /** Coordinates one accepted C5 handoff with identifier-only queue delivery. */
 export class AttemptService {
   private readonly repository: AttachmentRepository;
-  private readonly queue: AnalysisQueue;
+  private readonly queue: AttemptAttachmentQueue;
   private readonly log: AttemptServiceLog | undefined;
 
   public constructor(
     input: Readonly<{
       repository: AttachmentRepository;
-      queue: AnalysisQueue;
+      queue: AttemptAttachmentQueue;
       log?: AttemptServiceLog;
     }>,
   ) {

@@ -28,6 +28,7 @@ export const C5_TEST_SOURCE_SHA256 = createHash("sha256")
 export type C5PipelineTestSupport = Readonly<{
   handoffVerifier: ReturnType<C5MediaPipeline["handoffVerifier"]>;
   storage: LocalMediaStorage;
+  pipeline: C5MediaPipeline;
   accept(
     context: MediaUploadContext,
     media: StoredMediaAttachment,
@@ -44,14 +45,19 @@ export function createC5PipelineTestSupport(
   input: Readonly<{ root: string }>,
 ): C5PipelineTestSupport {
   let nextMediaId: string | undefined;
+  let directPipelineMediaSequence = 0;
   let currentMode: "free" | "verified" = "free";
   let frameSequence = 0;
   const storage = createLocalMediaStorage({
     root: input.root,
     ids: {
       next: () => {
-        if (!nextMediaId) throw new Error("C5 fixture media ID was not set.");
-        const id = nextMediaId;
+        const id =
+          nextMediaId ??
+          `dddddddd-dddd-4ddd-8ddd-${directPipelineMediaSequence
+            .toString(16)
+            .padStart(12, "0")}`;
+        directPipelineMediaSequence += nextMediaId ? 0 : 1;
         nextMediaId = undefined;
         return id;
       },
@@ -124,6 +130,7 @@ export function createC5PipelineTestSupport(
   return Object.freeze({
     handoffVerifier: pipeline.handoffVerifier(),
     storage,
+    pipeline,
     accept: async (context, media, options) => {
       nextMediaId = media.id;
       currentMode = context.mode;

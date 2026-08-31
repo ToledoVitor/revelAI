@@ -87,9 +87,7 @@ export async function acceptSingleMediaPart(
   assertLimit(input.maxMultipartBytes, "multipart_body_too_large");
   if (
     input.rawBody.limit !== input.maxMultipartBytes ||
-    input.rawBody.measuredBytes > input.maxMultipartBytes ||
-    (input.declaredContentLength !== undefined &&
-      input.declaredContentLength > input.maxMultipartBytes)
+    input.rawBody.measuredBytes > input.maxMultipartBytes
   )
     throw new MediaPipelineError("multipart_body_too_large");
 
@@ -100,9 +98,7 @@ export async function acceptSingleMediaPart(
       if (part.kind === "field")
         throw new MediaPipelineError("multipart_extra_part_forbidden");
       if (part.name !== "media") {
-        if (accepted)
-          throw new MediaPipelineError("multipart_extra_part_forbidden");
-        throw new MediaPipelineError("media_part_count_invalid");
+        throw new MediaPipelineError("multipart_extra_part_forbidden");
       }
       if (accepted) throw new MediaPipelineError("media_part_count_invalid");
       const filenameExtension = validateFilenameMime(

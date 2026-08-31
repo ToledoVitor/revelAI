@@ -131,7 +131,6 @@ describe("AttemptService", () => {
           throw new Error("queue endpoint /private");
         },
         enqueue: async () => undefined,
-        subscribe: () => () => undefined,
       },
     });
 

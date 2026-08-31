@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import multipart from "@fastify/multipart";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -6,6 +7,7 @@ import Fastify, {
 } from "fastify";
 import {
   AthleteIdentityHeaderSchema,
+  AttemptIdPathParamsSchema,
   AttemptListQuerySchema,
   AttemptListResponseSchema,
   CalibrationSessionCreateInputSchema,
@@ -15,13 +17,22 @@ import {
   ChallengeListResponseSchema,
   CreateAttemptInputSchema,
   CreateAttemptResponseSchema,
+  MAX_MULTIPART_ENVELOPE_BYTES,
+  MAX_UPLOAD_BYTES,
+  MediaUploadAcceptedSchema,
   RouteErrorMessageByCode,
   RouteErrorRetryabilityByCode,
   RouteErrorSchema,
   RouteErrorStatusByCode,
   type RouteErrorCode,
 } from "@revelai/contracts";
-import type { AnalysisQueue } from "../queue/analysis-queue.js";
+import {
+  QueueUnavailableError,
+  type AnalysisQueue,
+} from "../queue/analysis-queue.js";
+import { type C5MediaPipeline } from "../media/media-pipeline.js";
+import { MediaPipelineError } from "../media/probe.js";
+import type { UploadRetentionRepository } from "../storage/local-media-storage.js";
 import { RepositoryError } from "../repositories/attempt-repository.js";
 import type {
   AttemptRecord,
@@ -36,12 +47,21 @@ import {
   type MediaDeliveryRedeliveryRepository,
   type OpaqueAcceptedMediaCleaner,
 } from "../services/media-attachment-recovery.js";
+import { AttemptService } from "../services/attempt-service.js";
+import {
+  createStreamingMultipartIntake,
+  drainPreparedMultipartRequest,
+  MultipartParserError,
+  prepareRawMultipartRequest,
+} from "./streamed-multipart.js";
 
 type AttemptHttpRepository = AttemptRepository &
   MediaAttachmentRecoveryRepository &
-  MediaDeliveryRedeliveryRepository;
+  MediaDeliveryRedeliveryRepository &
+  UploadRetentionRepository;
 type AttemptApiClock = Readonly<{ now(): string }>;
 type AttemptApiIdGenerator = Readonly<{ next(): string }>;
+type AttemptUploadQueue = Pick<AnalysisQueue, "isAvailable" | "enqueue">;
 
 const RECOVERY_BATCH_LIMIT = 100;
 const HOUR_MILLISECONDS = 60 * 60 * 1_000;
@@ -73,8 +93,10 @@ const processHourlyRecoveryScheduler: HourlyRecoveryScheduler = Object.freeze({
 export function createAttemptApi(
   input: Readonly<{
     repository: AttemptHttpRepository;
-    queue: Pick<AnalysisQueue, "enqueue">;
+    queue: AttemptUploadQueue;
     cleaner: OpaqueAcceptedMediaCleaner;
+    mediaPipeline?: C5MediaPipeline;
+    maxUploadBytes?: number;
     scheduler?: HourlyRecoveryScheduler;
     recoveryBatchLimit?: number;
     clock?: AttemptApiClock;
@@ -83,8 +105,12 @@ export function createAttemptApi(
     log?: MediaAttachmentRecoveryLog;
   }>,
 ): FastifyInstance {
+  const maxUploadBytes = input.maxUploadBytes ?? MAX_UPLOAD_BYTES;
+  const maxMultipartBytes =
+    maxUploadBytes + (MAX_MULTIPART_ENVELOPE_BYTES - MAX_UPLOAD_BYTES);
   const app = Fastify({
     logger: false,
+    bodyLimit: maxMultipartBytes,
     routerOptions: {
       onBadUrl: (_path, _request, response) => {
         response.statusCode = RouteErrorStatusByCode.invalid_request;
@@ -101,6 +127,15 @@ export function createAttemptApi(
   let recovery: C8RecoveryRuntimeHandle | undefined;
 
   try {
+    app.register(multipart, {
+      throwFileSizeLimit: false,
+      limits: {
+        fileSize: maxUploadBytes + 1,
+        files: 16,
+        fields: 16,
+        parts: 32,
+      },
+    });
     recovery = createC8RecoveryRuntime({
       repository: input.repository,
       queue: input.queue,
@@ -118,6 +153,17 @@ export function createAttemptApi(
       const athleteId = parseAthleteIdentity(request);
       if (!athleteId) throw new AttemptRouteError("invalid_athlete_identity");
       athleteIds.set(request, athleteId);
+    });
+    app.addHook("onRequest", async (request) => {
+      if (!isAttemptMediaRequest(request)) return;
+      prepareRawMultipartRequest(request, {
+        maxUploadBytes,
+        maxMultipartBytes,
+      });
+    });
+    app.addHook("onResponse", async (request) => {
+      if (isAttemptMediaRequest(request))
+        drainPreparedMultipartRequest(request);
     });
 
     app.get("/v1/challenges", async (request, reply) => {
@@ -206,6 +252,49 @@ export function createAttemptApi(
       });
     });
 
+    app.post("/v1/attempts/:id/media", async (request, reply) => {
+      const params = parseRequest(AttemptIdPathParamsSchema, request.params);
+      const athleteId = requiredAthleteId(athleteIds, request);
+      const upload = await input.repository.prepareMediaUpload({
+        attemptId: params.id,
+        athleteId,
+      });
+      if (!(await queueAvailable(input.queue)))
+        throw new AttemptRouteError("queue_unavailable");
+      if (!request.isMultipart())
+        throw new AttemptRouteError("invalid_request");
+      if (!input.mediaPipeline)
+        throw new AttemptRouteError("service_not_ready");
+      const accepted = await input.mediaPipeline.acceptMultipart({
+        mode: upload.mode,
+        multipart: createStreamingMultipartIntake(request),
+        retention: {
+          repository: input.repository,
+          attemptId: upload.attemptId,
+          generation: upload.generation,
+          uploadedAt: upload.uploadedAt,
+          authority: upload,
+        },
+      });
+      const service = new AttemptService({
+        repository: input.repository,
+        queue: input.queue,
+      });
+      await service.attachAcceptedMedia({ accepted });
+      return sendResponse(reply, 202, MediaUploadAcceptedSchema, {
+        kind: "media-upload-accepted",
+        attemptId: upload.attemptId,
+        mode: upload.mode,
+        acceptedStatus: "uploaded",
+        outcome: {
+          state: "pending",
+          attemptId: upload.attemptId,
+          mode: upload.mode,
+          status: "uploaded",
+        },
+      });
+    });
+
     app.setNotFoundHandler((_request, reply) =>
       sendRouteError(reply, "invalid_request"),
     );
@@ -281,6 +370,21 @@ function isPublicChallengeRequest(request: FastifyRequest): boolean {
   );
 }
 
+function isAttemptMediaRequest(request: FastifyRequest): boolean {
+  return (
+    request.method === "POST" &&
+    /^\/v1\/attempts\/[^/]+\/media(?:\?|$)/.test(request.url)
+  );
+}
+
+async function queueAvailable(queue: AttemptUploadQueue): Promise<boolean> {
+  try {
+    return await queue.isAvailable();
+  } catch {
+    return false;
+  }
+}
+
 function parseAthleteIdentity(request: FastifyRequest): string | undefined {
   const values: string[] = [];
   for (let index = 0; index < request.raw.rawHeaders.length; index += 2) {
@@ -342,6 +446,9 @@ function projectAttempt(attempt: AttemptRecord): unknown {
 
 function routeErrorCode(error: unknown): RouteErrorCode {
   if (error instanceof AttemptRouteError) return error.routeCode;
+  if (error instanceof MediaPipelineError) return error.code;
+  if (error instanceof QueueUnavailableError) return "queue_unavailable";
+  if (error instanceof MultipartParserError) return "invalid_request";
   if (error instanceof RepositoryError) {
     if (error.code === "invalid_input") return "invalid_request";
     switch (error.code) {
@@ -369,6 +476,7 @@ function isFastifyRequestError(error: unknown): boolean {
     typeof code === "string" &&
     (code.startsWith("FST_ERR_CTP_") ||
       code.startsWith("FST_ERR_VALIDATION") ||
-      code.startsWith("FST_ERR_QS"))
+      code.startsWith("FST_ERR_QS") ||
+      code.startsWith("FST_MP_"))
   );
 }

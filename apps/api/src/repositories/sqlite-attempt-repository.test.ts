@@ -838,7 +838,7 @@ describe("SQLiteAttemptRepository", () => {
           ),
         ),
       }),
-    ).rejects.toMatchObject({ code: "invalid_attempt_transition" });
+    ).rejects.toMatchObject({ code: "duplicate_media_upload" });
 
     const reopened = SQLiteAttemptRepository.forReadOnlyTest({
       database: fixture.openSecondaryDatabase(),
