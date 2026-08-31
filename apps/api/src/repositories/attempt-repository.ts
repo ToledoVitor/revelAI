@@ -189,9 +189,14 @@ export type MediaDeliveryRecovery = Readonly<{
   attemptId: string;
   generation: number;
   mediaId: string;
+  frameBatchId: string;
   state: "pending-delivery" | "queued" | "cleanup-recoverable" | "resolved";
   requiresRollback: boolean;
 }>;
+
+/** A bounded, leased C4 outbox item for opaque C5 byte cleanup. */
+export type MediaAttachmentRecoveryClaim = MediaDeliveryRecovery &
+  Readonly<{ leaseId: string }>;
 
 /** A durable non-terminal recovery state after bounded terminalization fails. */
 export type DeadLetterProcessingClaimOutcome =
@@ -296,6 +301,7 @@ export interface AttemptRepository {
       attemptId: string;
       generation: number;
       mediaId: string;
+      frameBatchId: string;
     }>,
   ): Promise<void>;
   acknowledgeMediaAttachmentCleanup(
@@ -308,6 +314,12 @@ export interface AttemptRepository {
   getMediaDeliveryRecovery(
     input: Readonly<{ attemptId: string; generation: number }>,
   ): Promise<MediaDeliveryRecovery | null>;
+  claimMediaAttachmentRecovery(
+    input: Readonly<{ now: string; limit: number }>,
+  ): Promise<readonly MediaAttachmentRecoveryClaim[]>;
+  releaseMediaAttachmentRecovery(
+    input: Readonly<{ attemptId: string; generation: number; leaseId: string }>,
+  ): Promise<void>;
   claimProcessing(job: AnalysisJob): Promise<ProcessingClaim | null>;
   getProcessingContext(
     input: Readonly<{

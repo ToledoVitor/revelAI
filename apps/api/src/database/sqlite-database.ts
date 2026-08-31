@@ -692,6 +692,46 @@ const migrations: readonly Migration[] = [
         ON media_delivery_recovery_records(state, updated_at, attempt_id);
     `,
   },
+  {
+    // A live leaderboard page is fixed by both event time and an allocation
+    // sequence committed by this repository. Wall time alone admits either a
+    // future-dated old commit or a newly committed backdated result.
+    version: 18,
+    sql: `
+      ALTER TABLE leaderboard_entries
+      ADD COLUMN commit_sequence INTEGER NOT NULL DEFAULT 0 CHECK (
+        typeof(commit_sequence) = 'integer' AND commit_sequence >= 0
+      );
+      UPDATE leaderboard_entries
+         SET commit_sequence = (
+           SELECT COUNT(*)
+             FROM leaderboard_entries AS older
+            WHERE older.created_at < leaderboard_entries.created_at
+               OR (older.created_at = leaderboard_entries.created_at
+                   AND older.id <= leaderboard_entries.id)
+         );
+      CREATE UNIQUE INDEX leaderboard_entries_commit_sequence
+        ON leaderboard_entries(commit_sequence);
+      CREATE TABLE leaderboard_commit_clock (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        sequence INTEGER NOT NULL CHECK (
+          typeof(sequence) = 'integer' AND sequence >= 0
+        )
+      );
+      INSERT INTO leaderboard_commit_clock (singleton, sequence)
+      SELECT 1, COALESCE(MAX(commit_sequence), 0) FROM leaderboard_entries;
+
+      ALTER TABLE media_delivery_recovery_records
+      ADD COLUMN frame_batch_id TEXT;
+      ALTER TABLE media_delivery_recovery_records
+      ADD COLUMN recovery_lease_id TEXT;
+      ALTER TABLE media_delivery_recovery_records
+      ADD COLUMN recovery_lease_expires_at TEXT;
+      CREATE INDEX media_delivery_recovery_claimable
+        ON media_delivery_recovery_records(state, recovery_lease_expires_at, updated_at, attempt_id);
+    `,
+    afterApply: backfillDeliveryRecoveryV18,
+  },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {
@@ -891,6 +931,106 @@ function resetLegacyProcessingRowsV16(raw: Database.Database): void {
       "UPDATE attempts SET media_json = NULL, media_sha256 = NULL, processing_context_json = NULL, processing_receipt_id = NULL, processing_receipt_sha256 = NULL, status = 'awaiting-upload', processing_generation = processing_generation + 1, processing_lease_id = NULL, processing_lease_expires_at = NULL WHERE deletion_state = 'active' AND status IN ('uploaded', 'processing')",
     )
     .run();
+}
+
+/**
+ * v17 created the delivery journal but could not see already-live v16 work.
+ * An upload without a durable delivery acknowledgement is retired rather than
+ * guessed queued; an already-processing row has proved a worker claim and is
+ * preserved as queued. Malformed rows follow v16's fail-safe re-upload path.
+ */
+function backfillDeliveryRecoveryV18(raw: Database.Database): void {
+  const rows = raw
+    .prepare(
+      `SELECT id, status, processing_generation, media_json,
+              processing_context_json, processing_receipt_id
+         FROM attempts
+        WHERE deletion_state = 'active' AND status IN ('uploaded', 'processing')`,
+    )
+    .all() as readonly Readonly<{
+    id: string;
+    status: "uploaded" | "processing";
+    processing_generation: number;
+    media_json: string | null;
+    processing_context_json: string | null;
+    processing_receipt_id: string | null;
+  }>[];
+  const now = new Date().toISOString();
+  const insert = raw.prepare(
+    `INSERT INTO media_delivery_recovery_records
+     (attempt_id, generation, media_id, frame_batch_id, state, requires_rollback, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(attempt_id, generation) DO UPDATE SET
+       frame_batch_id = COALESCE(media_delivery_recovery_records.frame_batch_id, excluded.frame_batch_id),
+       updated_at = excluded.updated_at`,
+  );
+  const reset = raw.prepare(
+    `UPDATE attempts
+        SET media_json = NULL, media_sha256 = NULL, processing_context_json = NULL,
+            processing_receipt_id = NULL, processing_receipt_sha256 = NULL,
+            status = 'awaiting-upload', processing_generation = processing_generation + 1,
+            processing_lease_id = NULL, processing_lease_expires_at = NULL
+      WHERE id = ? AND deletion_state = 'active' AND status IN ('uploaded', 'processing')`,
+  );
+  for (const row of rows) {
+    const identity = legacyDeliveryIdentity(row);
+    if (!identity) {
+      reset.run(row.id);
+      continue;
+    }
+    insert.run(
+      row.id,
+      row.processing_generation,
+      identity.mediaId,
+      identity.frameBatchId,
+      row.status === "uploaded" ? "cleanup-recoverable" : "queued",
+      row.status === "uploaded" ? 1 : 0,
+      now,
+      now,
+    );
+  }
+}
+
+function legacyDeliveryIdentity(
+  row: Readonly<{
+    processing_generation: number;
+    media_json: string | null;
+    processing_context_json: string | null;
+    processing_receipt_id: string | null;
+  }>,
+): Readonly<{ mediaId: string; frameBatchId: string }> | null {
+  try {
+    if (
+      !Number.isSafeInteger(row.processing_generation) ||
+      row.processing_generation < 1 ||
+      row.media_json === null ||
+      row.processing_context_json === null ||
+      row.processing_receipt_id === null
+    )
+      return null;
+    const media = JSON.parse(row.media_json) as { id?: unknown };
+    const context = JSON.parse(row.processing_context_json) as {
+      processing?: {
+        kind?: unknown;
+        receipt?: { frameBatchId?: unknown; mediaId?: unknown };
+      };
+    };
+    if (
+      typeof media.id !== "string" ||
+      context.processing?.kind !== "c5-durable-processing-context-v2" ||
+      typeof context.processing.receipt?.frameBatchId !== "string" ||
+      typeof context.processing.receipt?.mediaId !== "string" ||
+      context.processing.receipt.mediaId !== media.id ||
+      context.processing.receipt.frameBatchId !== row.processing_receipt_id
+    )
+      return null;
+    return Object.freeze({
+      mediaId: media.id,
+      frameBatchId: context.processing.receipt.frameBatchId,
+    });
+  } catch {
+    return null;
+  }
 }
 
 function upgradeCompetitivePolicyEvidenceVersionsV15(

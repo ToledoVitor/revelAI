@@ -18,38 +18,15 @@ import { originalOrFrameDeleteAt } from "./retention-deadlines.js";
 import { temporaryDeleteAt } from "./retention-deadlines.js";
 import {
   LocalMediaStorage,
+  isLocalMediaStorageCapability,
   type LocalMediaUploadSession,
   type StoredLocalMedia,
   type UploadRetentionRepository,
 } from "../storage/local-media-storage.js";
-
-/** C5 owns this seam; C8 may only provide process execution. */
-export interface MediaEvidenceExtractor {
-  extract(
-    input: Readonly<{
-      mode: MediaMode;
-      attemptId: string;
-      generation: number;
-      mediaId: string;
-      mediaSha256: string;
-      probe: StoredLocalMedia["probe"];
-      uploadedAt: string;
-      source: "staged";
-      authority: Readonly<{
-        athleteId: string;
-        calibrationSessionId: string | null;
-        calibrationNonce: string | null;
-      }>;
-    }>,
-  ): Promise<ExtractionManifest>;
-  /**
-   * The extractor owns this reference and returns it only for its exact
-   * published manifest. C8 gets neither an issuer nor receipt bytes here.
-   */
-  durableReceiptFor(
-    manifest: ExtractionManifest,
-  ): Readonly<{ frameBatchId: string; mediaId: string; sha256: string }>;
-}
+import {
+  LocalFrameExtraction,
+  isLocalFrameExtractionCapability,
+} from "../storage/local-frame-extraction.js";
 
 /**
  * C5's acceptance result deliberately separates private evidence from its
@@ -65,6 +42,25 @@ export type AcceptedMedia = AcceptedMediaHandoff &
 
 export type { AcceptedMediaCleanup } from "./accepted-media-handoff.js";
 
+export type MediaPipelineAcceptanceInput = Readonly<{
+  mode: MediaMode;
+  source: AsyncIterable<Uint8Array>;
+  maxBytes: number;
+  retention: Readonly<{
+    repository: UploadRetentionRepository;
+    attemptId: string;
+    generation: number;
+    uploadedAt: string;
+    authority: MediaUploadContext;
+  }>;
+}>;
+
+export type MediaPipelineMultipartAcceptanceInput = Readonly<{
+  mode: MediaMode;
+  multipart: Omit<MultipartIntake, "createStage">;
+  retention: MediaPipelineAcceptanceInput["retention"];
+}>;
+
 const c5HandoffVerifiers = new WeakSet<object>();
 
 /** Only a real MediaPipeline can register a verifier in this private registry. */
@@ -76,21 +72,43 @@ export function isC5AcceptedMediaHandoffVerifier(
   );
 }
 
+/**
+ * The only public C5 boundary. Its concrete constructor remains private so a
+ * structural object cannot acquire an attach-capable verifier or issuer.
+ */
+export interface C5MediaPipeline {
+  handoffVerifier(): AcceptedMediaHandoffVerifier;
+  accept(input: MediaPipelineAcceptanceInput): Promise<AcceptedMedia>;
+  acceptMultipart(
+    input: MediaPipelineMultipartAcceptanceInput,
+  ): Promise<AcceptedMedia>;
+}
+
+/** C5-owned composition point. Both inputs are concrete runtime capabilities. */
+export function createMediaPipeline(
+  input: Readonly<{
+    storage: LocalMediaStorage;
+    extraction: LocalFrameExtraction;
+  }>,
+): C5MediaPipeline {
+  if (
+    !isLocalMediaStorageCapability(input.storage) ||
+    !isLocalFrameExtractionCapability(input.extraction)
+  )
+    throw new Error("C5 media pipeline requires local storage and extraction.");
+  return new MediaPipeline(input.storage, input.extraction);
+}
+
 /** The public acceptance capability cannot publish a probe-only upload. */
-export class MediaPipeline {
+class MediaPipeline implements C5MediaPipeline {
   private readonly storage: LocalMediaStorage;
-  private readonly extractor: MediaEvidenceExtractor;
+  private readonly extractor: LocalFrameExtraction;
   private readonly issuedHandoffs = new WeakSet<object>();
   private readonly verifier: AcceptedMediaHandoffVerifier;
 
-  public constructor(
-    input: Readonly<{
-      storage: LocalMediaStorage;
-      extractor: MediaEvidenceExtractor;
-    }>,
-  ) {
-    this.storage = input.storage;
-    this.extractor = input.extractor;
+  constructor(storage: LocalMediaStorage, extractor: LocalFrameExtraction) {
+    this.storage = storage;
+    this.extractor = extractor;
     this.verifier = Object.freeze({
       accepts: (value: unknown): value is AcceptedMediaHandoff =>
         typeof value === "object" &&
@@ -106,18 +124,7 @@ export class MediaPipeline {
   }
 
   public async accept(
-    input: Readonly<{
-      mode: MediaMode;
-      source: AsyncIterable<Uint8Array>;
-      maxBytes: number;
-      retention: Readonly<{
-        repository: UploadRetentionRepository;
-        attemptId: string;
-        generation: number;
-        uploadedAt: string;
-        authority: MediaUploadContext;
-      }>;
-    }>,
+    input: MediaPipelineAcceptanceInput,
   ): Promise<AcceptedMedia> {
     const session = await this.openUpload({
       mode: input.mode,
@@ -147,17 +154,7 @@ export class MediaPipeline {
    * twice before sniff/probe/extraction/publication.
    */
   public async acceptMultipart(
-    input: Readonly<{
-      mode: MediaMode;
-      multipart: Omit<MultipartIntake, "createStage">;
-      retention: Readonly<{
-        repository: UploadRetentionRepository;
-        attemptId: string;
-        generation: number;
-        uploadedAt: string;
-        authority: MediaUploadContext;
-      }>;
-    }>,
+    input: MediaPipelineMultipartAcceptanceInput,
   ): Promise<AcceptedMedia> {
     const session = await this.openUpload({
       mode: input.mode,

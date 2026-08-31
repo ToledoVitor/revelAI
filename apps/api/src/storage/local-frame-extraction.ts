@@ -16,9 +16,9 @@ import { decode } from "jpeg-js";
 import {
   attestVerifiedExtractionContinuity,
   createExtractionManifest,
-  createStorageExtractionReceipt,
   type ExtractedFrame,
   type ExtractionManifest,
+  type StorageExtractionReceipt,
   type StorageReceiptAuthority,
 } from "../media/extraction-manifest.js";
 import { freeSampleTimestamps } from "../media/eligibility.js";
@@ -28,6 +28,19 @@ import type {
   OpaqueMediaIdGenerator,
   RetentionScheduleResult,
 } from "./local-media-storage.js";
+
+const localFrameExtractionCapabilities = new WeakSet<object>();
+
+/** Runtime capability check used only by C5 composition; it never mints. */
+export function isLocalFrameExtractionCapability(
+  value: unknown,
+): value is LocalFrameExtraction {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    localFrameExtractionCapabilities.has(value)
+  );
+}
 
 /**
  * C8 supplies child-process spawning. C5 owns the exact FFmpeg argv and
@@ -74,6 +87,52 @@ type ExtractionAuthority = Pick<
   StorageReceiptAuthority,
   "athleteId" | "calibrationSessionId" | "calibrationNonce"
 >;
+
+/** Only the local publisher may turn owned frame bytes into a durable receipt. */
+function createLocalStorageExtractionReceipt(
+  input: Readonly<{
+    frameBatchId: string;
+    authority: StorageExtractionReceipt["authority"];
+    manifest: ExtractionManifest;
+    frames: readonly Uint8Array[];
+    activeScenes: StorageExtractionReceipt["activeScenes"];
+  }>,
+): StorageExtractionReceipt {
+  const { manifest, authority } = input;
+  if (
+    authority.attemptId !== manifest.attemptId ||
+    authority.generation !== manifest.generation ||
+    authority.mode !== manifest.mode ||
+    authority.mediaId !== manifest.mediaId ||
+    authority.sourceSha256 !== manifest.mediaSha256 ||
+    input.frames.length !== manifest.frames.items.length ||
+    manifest.frames.items.some(
+      (frame) =>
+        frame.reference !==
+        `${input.frameBatchId}_${String(frame.ordinal).padStart(4, "0")}`,
+    ) ||
+    (manifest.mode === "free" && input.activeScenes !== null) ||
+    (manifest.mode === "verified" && input.activeScenes === null)
+  )
+    throw new MediaPipelineError("media_probe_failed");
+  return Object.freeze({
+    kind: "c5-storage-extraction-receipt-v1",
+    frameBatchId: input.frameBatchId,
+    authority: Object.freeze({ ...authority }),
+    manifest,
+    frameSha256: Object.freeze(
+      input.frames.map((frame) =>
+        createHash("sha256").update(frame).digest("hex"),
+      ),
+    ),
+    activeScenes:
+      input.activeScenes === null
+        ? null
+        : Object.freeze(
+            input.activeScenes.map((scene) => Object.freeze({ ...scene })),
+          ),
+  });
+}
 
 // FFmpeg showinfo can emit a complete per-frame record with colour, side-data,
 // and metadata. This cap permits 640 bounded 512-byte records plus process
@@ -123,6 +182,7 @@ export class LocalFrameExtraction {
     this.executable = input.executable ?? "ffmpeg";
     this.timeoutMilliseconds = input.timeoutMilliseconds ?? 30_000;
     this.maxFrameBytes = input.maxFrameBytes ?? 52_428;
+    localFrameExtractionCapabilities.add(this);
   }
 
   public async extract(
@@ -206,7 +266,7 @@ export class LocalFrameExtraction {
       if (manifest.mode === "verified")
         attestVerifiedExtractionContinuity(manifest, evidence.scenes);
       let receiptSha256: string | null = null;
-      const receipt = createStorageExtractionReceipt({
+      const receipt = createLocalStorageExtractionReceipt({
         frameBatchId: batchId,
         authority: Object.freeze({
           attemptId: input.attemptId,

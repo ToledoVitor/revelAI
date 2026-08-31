@@ -26,6 +26,19 @@ export interface OpaqueMediaIdGenerator {
   next(): string;
 }
 
+const localMediaStorageCapabilities = new WeakSet<object>();
+
+/** Runtime capability check used only by C5 composition; it never mints. */
+export function isLocalMediaStorageCapability(
+  value: unknown,
+): value is LocalMediaStorage {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    localMediaStorageCapabilities.has(value)
+  );
+}
+
 /** Process-backed probing stays injected so tests never require host FFprobe. */
 export interface LocalMediaProber {
   probe(
@@ -146,6 +159,7 @@ export class LocalMediaStorage {
     this.prober = input.prober;
     this.publisher = input.publisher ?? { publish: publishNoReplace };
     this.cleanupLog = input.cleanupLog;
+    localMediaStorageCapabilities.add(this);
   }
 
   public async initialize(): Promise<void> {

@@ -5,13 +5,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { LocalMediaStorage } from "../storage/local-media-storage.js";
 import { LocalFrameExtraction } from "../storage/local-frame-extraction.js";
 import { RawMultipartByteCounter } from "./multipart-intake.js";
-import { MediaPipeline } from "./media-pipeline.js";
+import { createMediaPipeline } from "./media-pipeline.js";
 import { MediaPipelineError } from "./probe.js";
 import { isC5AcceptedMediaHandoffVerifier } from "./media-pipeline.js";
-import {
-  reconstructDurableProcessingContext,
-  type ExtractionManifest,
-} from "./extraction-manifest.js";
+import { reconstructDurableProcessingContext } from "./extraction-manifest.js";
 
 const mediaId = "11111111-1111-4111-8111-111111111111";
 const frameBatchId = "33333333-3333-4333-8333-333333333333";
@@ -35,15 +32,6 @@ const retention = {
     verified: null,
   },
 };
-const extractor = {
-  extract: async () => ({}) as ExtractionManifest,
-  durableReceiptFor: () => ({
-    frameBatchId,
-    mediaId,
-    sha256: "a".repeat(64),
-  }),
-};
-
 describe("MediaPipeline", () => {
   const roots: string[] = [];
   afterEach(async () => {
@@ -90,9 +78,9 @@ describe("MediaPipeline", () => {
       },
       retention: { schedule: async () => ({ kind: "created" as const }) },
     });
-    const pipeline = new MediaPipeline({
+    const pipeline = createMediaPipeline({
       storage,
-      extractor: extraction,
+      extraction,
     });
     const accepted = await pipeline.accept({
       mode: "free",
@@ -148,20 +136,28 @@ describe("MediaPipeline", () => {
       cleanup: { cleanup: async () => undefined },
     });
     const verifier = pipeline.handoffVerifier();
+    const separateTopology = createMediaPipeline({ storage, extraction });
     expect(isC5AcceptedMediaHandoffVerifier(verifier)).toBe(true);
     expect(verifier.accepts(accepted)).toBe(true);
     expect(verifier.accepts(reflectedClone)).toBe(false);
     expect(verifier.accepts(spreadClone)).toBe(false);
     expect(verifier.accepts(structuralForge)).toBe(false);
+    expect(separateTopology.handoffVerifier().accepts(accepted)).toBe(false);
     await expect(
       import("./accepted-media-handoff.js"),
     ).resolves.not.toHaveProperty("createAcceptedMediaHandoff");
+    await expect(import("./extraction-manifest.js")).resolves.not.toMatchObject(
+      {
+        createStorageExtractionReceipt: expect.anything(),
+        createDurableProcessingContext: expect.anything(),
+      },
+    );
   });
 
   it("rejects verified ineligible media before an original becomes visible", async () => {
     const root = await mkdtemp(join(tmpdir(), "revelai-c5-pipeline-"));
     roots.push(root);
-    const pipeline = new MediaPipeline({
+    const pipeline = createMediaPipeline({
       storage: new LocalMediaStorage({
         root,
         ids: { next: () => mediaId },
@@ -177,7 +173,19 @@ describe("MediaPipeline", () => {
           }),
         },
       }),
-      extractor,
+      extraction: new LocalFrameExtraction({
+        root,
+        ids: { next: () => frameBatchId },
+        runner: {
+          run: async () => ({
+            exitCode: 1,
+            termination: "completed" as const,
+            stdout: "",
+            stderr: "",
+          }),
+        },
+        retention: { schedule: async () => ({ kind: "created" as const }) },
+      }),
     });
     await expect(
       pipeline.accept({
@@ -191,46 +199,38 @@ describe("MediaPipeline", () => {
     expect(await readdir(join(root, "temporary"))).toEqual([]);
   });
 
-  it("does not publish a probe-valid verified upload when authoritative extraction rejects", async () => {
+  it("rejects a structural extractor before it can mint a C5 verifier", async () => {
     const root = await mkdtemp(join(tmpdir(), "revelai-c5-pipeline-"));
     roots.push(root);
-    const pipeline = new MediaPipeline({
-      storage: new LocalMediaStorage({
-        root,
-        ids: { next: () => mediaId },
-        prober: {
-          probe: async () => ({
-            container: "mp4",
-            durationSeconds: 64,
-            displayWidth: 1280,
-            displayHeight: 720,
-            nominalFps: 30,
-            codec: "h264",
-            sourceRotationDegrees: 0,
+    expect(() =>
+      createMediaPipeline({
+        storage: new LocalMediaStorage({
+          root,
+          ids: { next: () => mediaId },
+          prober: {
+            probe: async () => ({
+              container: "mp4",
+              durationSeconds: 64,
+              displayWidth: 1280,
+              displayHeight: 720,
+              nominalFps: 30,
+              codec: "h264",
+              sourceRotationDegrees: 0,
+            }),
+          },
+        }),
+        extraction: {
+          extract: async () => {
+            throw new MediaPipelineError("media_requirements_not_met");
+          },
+          durableReceiptFor: () => ({
+            frameBatchId,
+            mediaId,
+            sha256: "a".repeat(64),
           }),
         },
-      }),
-      extractor: {
-        extract: async () => {
-          throw new MediaPipelineError("media_requirements_not_met");
-        },
-        durableReceiptFor: () => ({
-          frameBatchId,
-          mediaId,
-          sha256: "a".repeat(64),
-        }),
-      },
-    });
-
-    await expect(
-      pipeline.accept({
-        mode: "verified",
-        source: chunks(bytes),
-        maxBytes: bytes.length,
-        retention,
-      }),
-    ).rejects.toThrow(new MediaPipelineError("media_requirements_not_met"));
-    expect(await readdir(join(root, "originals"))).toEqual([]);
+      } as never),
+    ).toThrow("C5 media pipeline requires local storage and extraction");
   });
 
   it("feeds the sole validated multipart file into the same pipeline session", async () => {
@@ -251,9 +251,9 @@ describe("MediaPipeline", () => {
         }),
       },
     });
-    const pipeline = new MediaPipeline({
+    const pipeline = createMediaPipeline({
       storage,
-      extractor: new LocalFrameExtraction({
+      extraction: new LocalFrameExtraction({
         root,
         ids: { next: () => frameBatchId },
         runner: {

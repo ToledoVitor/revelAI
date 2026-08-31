@@ -1,0 +1,58 @@
+import { describe, expect, it } from "vitest";
+import { MediaAttachmentRecoveryExecutor } from "./media-attachment-recovery.js";
+
+const claim = Object.freeze({
+  attemptId: "11111111-1111-4111-8111-111111111111",
+  generation: 2,
+  mediaId: "22222222-2222-4222-8222-222222222222",
+  frameBatchId: "33333333-3333-4333-8333-333333333333",
+  state: "cleanup-recoverable" as const,
+  requiresRollback: true,
+  leaseId: "44444444-4444-4444-8444-444444444444",
+});
+
+describe("MediaAttachmentRecoveryExecutor", () => {
+  it("leases, detaches, cleans opaque resources, and acknowledges in order", async () => {
+    const calls: string[] = [];
+    const executor = new MediaAttachmentRecoveryExecutor(
+      {
+        claimMediaAttachmentRecovery: async () => {
+          calls.push("claim");
+          return [claim];
+        },
+        rollbackMediaAttachment: async () => void calls.push("rollback"),
+        acknowledgeMediaAttachmentCleanup: async () => void calls.push("ack"),
+        releaseMediaAttachmentRecovery: async () => void calls.push("release"),
+      },
+      { cleanup: async () => void calls.push("cleanup") },
+      { event: () => calls.push("log") },
+    );
+
+    await expect(
+      executor.run({ now: "2030-01-15T12:00:00.000Z", limit: 4 }),
+    ).resolves.toBe(1);
+    expect(calls).toEqual(["claim", "rollback", "cleanup", "ack", "release"]);
+  });
+
+  it("never cleans when exact rollback fails and leaves the durable item retriable", async () => {
+    const calls: string[] = [];
+    const executor = new MediaAttachmentRecoveryExecutor(
+      {
+        claimMediaAttachmentRecovery: async () => [claim],
+        rollbackMediaAttachment: async () => {
+          calls.push("rollback");
+          throw new Error("private sqlite detail");
+        },
+        acknowledgeMediaAttachmentCleanup: async () => void calls.push("ack"),
+        releaseMediaAttachmentRecovery: async () => void calls.push("release"),
+      },
+      { cleanup: async () => void calls.push("cleanup") },
+      { event: () => calls.push("log") },
+    );
+
+    await expect(
+      executor.run({ now: "2030-01-15T12:00:00.000Z", limit: 1 }),
+    ).resolves.toBe(0);
+    expect(calls).toEqual(["rollback", "log", "release"]);
+  });
+});

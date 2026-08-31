@@ -88,30 +88,19 @@ export type ExtractionManifest =
  * capability after a queued delivery. It intentionally never contains a
  * capability, local path, raw frame byte, or provider payload.
  */
-export type DurableProcessingContext =
-  | Readonly<{
-      /**
-       * C4 persists only this reference. The receipt itself is atomically
-       * published with C5's owned frame batch and carries the full byte
-       * binding; context JSON is therefore never self-authenticating.
-       */
-      kind: "c5-durable-processing-context-v2";
-      receipt: Readonly<{
-        frameBatchId: string;
-        mediaId: string;
-        sha256: string;
-      }>;
-    }>
-  | Readonly<{
-      kind: "c5-durable-processing-context-v1";
-      manifest: FreeExtractionManifest;
-    }>
-  | Readonly<{
-      kind: "c5-durable-processing-context-v1";
-      manifest: VerifiedExtractionManifest;
-      activeScenes: readonly ContinuityScene[];
-      sourceSha256: readonly string[];
-    }>;
+export type DurableProcessingContext = Readonly<{
+  /**
+   * C4 persists only this reference. The receipt itself is atomically
+   * published with C5's owned frame batch and carries the full byte
+   * binding; context JSON is therefore never self-authenticating.
+   */
+  kind: "c5-durable-processing-context-v2";
+  receipt: Readonly<{
+    frameBatchId: string;
+    mediaId: string;
+    sha256: string;
+  }>;
+}>;
 
 /** One canonical cross-process binding for a C5-owned receipt. */
 export type StorageReceiptAuthority = Readonly<{
@@ -228,37 +217,6 @@ export function createExtractionManifest(
 }
 
 /**
- * Creates the only persistence-safe representation of a materialized C5
- * extraction. A verified context requires the exact continuity attestation
- * before it can be queued for later reconstruction.
- */
-export function createDurableProcessingContext(
-  manifest: ExtractionManifest,
-): DurableProcessingContext {
-  const parsed = parseExtractionManifest(manifest);
-  if (parsed.mode === "free")
-    return Object.freeze({
-      kind: "c5-durable-processing-context-v1" as const,
-      manifest: parsed,
-    });
-
-  if (manifest.mode !== "verified")
-    throw new Error("verified continuity evidence required");
-  const capability = verifiedExtractionCapability(manifest);
-  const data = verifiedExtractionData.get(capability);
-  if (!data?.activeScenes)
-    throw new Error("verified continuity evidence required");
-  return Object.freeze({
-    kind: "c5-durable-processing-context-v1" as const,
-    manifest: parsed,
-    activeScenes: Object.freeze(
-      data.activeScenes.map((scene) => Object.freeze({ ...scene })),
-    ),
-    sourceSha256: Object.freeze(data.frames.map((frame) => frame.sourceSha256)),
-  });
-}
-
-/**
  * Reissues a new process-local C5 capability from strictly parsed durable
  * facts and the opaque frame reader. Byte/digest mismatches fail closed.
  */
@@ -266,59 +224,12 @@ export async function reconstructDurableProcessingContext(
   input: Readonly<{
     context: unknown;
     frames: DurableFrameReader;
-    /**
-     * Legacy v1 contexts are never a production persistence format. Keeping
-     * this explicit authority parameter lets the test-only compatibility
-     * reader fail closed instead of treating a caller supplied manifest as
-     * its own authority.
-     */
-    authoritative?: ExtractionManifest;
     receipts?: DurableReceiptReader;
     authority?: DurableReconstructionAuthority;
   }>,
 ): Promise<ExtractionManifest> {
   const context = parseDurableProcessingContext(input.context);
-  if (context.kind === "c5-durable-processing-context-v2")
-    return reconstructStorageBackedContext(context, input);
-  if (!input.authoritative)
-    throw new Error("durable extraction authority unavailable");
-  if (!sameExtractionAuthority(context.manifest, input.authoritative))
-    throw new Error("durable extraction authority mismatch");
-  const frames = await Promise.all(
-    context.manifest.frames.items.map(async (frame) =>
-      Object.freeze({
-        timestampSeconds: frame.timestampSeconds,
-        reference: frame.reference,
-        rawBytes: await input.frames.readFrame(frame.reference),
-      }),
-    ),
-  );
-  const reconstructed = createExtractionManifest({
-    attemptId: context.manifest.attemptId,
-    generation: context.manifest.generation,
-    mediaId: context.manifest.mediaId,
-    mediaSha256: context.manifest.mediaSha256,
-    mode: context.manifest.mode,
-    probe: context.manifest.probe,
-    frames,
-  });
-  if (reconstructed.mode !== context.manifest.mode)
-    throw new Error("durable extraction mode mismatch");
-  if (reconstructed.mode === "free") return reconstructed;
-  if (!isVerifiedDurableProcessingContext(context))
-    throw new Error("durable extraction frame mismatch");
-
-  if (
-    context.sourceSha256.some(
-      (digest, index) =>
-        createHash("sha256").update(frames[index]!.rawBytes).digest("hex") !==
-        digest,
-    ) ||
-    reconstructed.rawPreRollSha256 !== context.manifest.rawPreRollSha256
-  )
-    throw new Error("durable extraction frame mismatch");
-  attestVerifiedExtractionContinuity(reconstructed, context.activeScenes);
-  return reconstructed;
+  return reconstructStorageBackedContext(context, input);
 }
 
 async function reconstructStorageBackedContext(
@@ -391,69 +302,6 @@ async function reconstructStorageBackedContext(
     throw new Error("durable extraction frame mismatch");
   }
   return reconstructed;
-}
-
-export function createStorageExtractionReceipt(
-  input: Readonly<{
-    frameBatchId: string;
-    authority: StorageExtractionReceipt["authority"];
-    manifest: ExtractionManifest;
-    frames: readonly Uint8Array[];
-    activeScenes: readonly ContinuityScene[] | null;
-  }>,
-): StorageExtractionReceipt {
-  const manifest = parseExtractionManifest(input.manifest);
-  assertUuid(input.frameBatchId);
-  if (
-    input.authority.attemptId !== manifest.attemptId ||
-    input.authority.generation !== manifest.generation ||
-    input.authority.mode !== manifest.mode ||
-    input.authority.mediaId !== manifest.mediaId ||
-    input.authority.sourceSha256 !== manifest.mediaSha256 ||
-    !isUtcIsoTimestamp(input.authority.uploadedAt) ||
-    (manifest.mode === "free" &&
-      (input.authority.calibrationSessionId !== null ||
-        input.authority.calibrationNonce !== null)) ||
-    (manifest.mode === "verified" &&
-      (!input.authority.calibrationSessionId ||
-        !input.authority.calibrationNonce))
-  )
-    throw new Error("invalid storage extraction receipt");
-  assertUuid(input.authority.athleteId);
-  assertDigest(input.authority.sourceSha256);
-  if (
-    manifest.frames.items.some(
-      (frame) =>
-        frame.reference !==
-        `${input.frameBatchId}_${String(frame.ordinal).padStart(4, "0")}`,
-    )
-  )
-    throw new Error("invalid storage extraction receipt");
-  const activeScenes = input.activeScenes
-    ? Object.freeze(
-        input.activeScenes.map((scene) => Object.freeze({ ...scene })),
-      )
-    : null;
-  if (manifest.mode === "verified") {
-    if (!activeScenes) throw new Error("invalid storage extraction receipt");
-    if (input.manifest.mode !== "verified")
-      throw new Error("invalid storage extraction receipt");
-    attestVerifiedExtractionContinuity(input.manifest, activeScenes);
-  } else if (activeScenes !== null) {
-    throw new Error("invalid storage extraction receipt");
-  }
-  return Object.freeze({
-    kind: "c5-storage-extraction-receipt-v1",
-    frameBatchId: input.frameBatchId,
-    authority: Object.freeze({ ...input.authority }),
-    manifest,
-    frameSha256: Object.freeze(
-      input.frames.map((frame) =>
-        createHash("sha256").update(frame).digest("hex"),
-      ),
-    ),
-    activeScenes,
-  });
 }
 
 export function parseStorageExtractionReceipt(
@@ -663,72 +511,7 @@ export function parseDurableProcessingContext(
       }),
     });
   }
-  if (value.kind !== "c5-durable-processing-context-v1")
-    throw new Error("Invalid durable processing context.");
-  const manifest = parseExtractionManifest(value.manifest);
-  if (manifest.mode === "free") {
-    if (!hasOnlyKeys(value, ["kind", "manifest"]))
-      throw new Error("Invalid durable processing context.");
-    return Object.freeze({
-      kind: "c5-durable-processing-context-v1" as const,
-      manifest,
-    });
-  }
-  if (
-    !hasOnlyKeys(value, ["kind", "manifest", "activeScenes", "sourceSha256"]) ||
-    !Array.isArray(value.activeScenes) ||
-    !Array.isArray(value.sourceSha256) ||
-    value.activeScenes.length !== 600 ||
-    value.sourceSha256.length !== 640
-  )
-    throw new Error("Invalid durable processing context.");
-  const activeScenes: ContinuityScene[] = [];
-  for (const [index, scene] of value.activeScenes.entries()) {
-    if (
-      !isRecord(scene) ||
-      !hasOnlyKeys(scene, ["timestampSeconds", "score"]) ||
-      typeof scene.timestampSeconds !== "number" ||
-      typeof scene.score !== "number" ||
-      scene.timestampSeconds !==
-        manifest.frames.items[index + 40]!.timestampSeconds ||
-      !Number.isFinite(scene.score) ||
-      scene.score < 0 ||
-      scene.score >= 0.42 ||
-      (index > 0 &&
-        scene.timestampSeconds <= activeScenes[index - 1]!.timestampSeconds)
-    )
-      throw new Error("Invalid durable processing context.");
-    activeScenes.push(
-      Object.freeze({
-        timestampSeconds: scene.timestampSeconds,
-        score: scene.score,
-      }),
-    );
-  }
-  const sourceSha256 = value.sourceSha256.map((digest) => {
-    if (typeof digest !== "string")
-      throw new Error("Invalid durable processing context.");
-    assertDigest(digest);
-    return digest;
-  });
-  return Object.freeze({
-    kind: "c5-durable-processing-context-v1" as const,
-    manifest,
-    activeScenes: Object.freeze(activeScenes),
-    sourceSha256: Object.freeze(sourceSha256),
-  });
-}
-
-function isVerifiedDurableProcessingContext(
-  context: DurableProcessingContext,
-): context is Extract<
-  DurableProcessingContext,
-  { manifest: VerifiedExtractionManifest }
-> {
-  return (
-    context.kind === "c5-durable-processing-context-v1" &&
-    context.manifest.mode === "verified"
-  );
+  throw new Error("Invalid durable processing context.");
 }
 
 /**

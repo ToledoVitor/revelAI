@@ -1,4 +1,5 @@
 import type { SqliteDatabase } from "../database/sqlite-database.js";
+import { reconcileMediaDeliveryCleanup } from "../repositories/media-delivery-recovery-sql.js";
 import type {
   RetentionRecord,
   RetentionRepository,
@@ -121,6 +122,10 @@ export class SQLiteRetentionRepository implements RetentionRepository {
             "DELETE FROM media_retention_records WHERE media_id = ? AND attempt_id = ?",
           )
           .run(record.id, record.attemptId);
+        reconcileMediaDeliveryCleanup(this.raw, {
+          attemptId: record.attemptId,
+          now: new Date().toISOString(),
+        });
         return;
       }
       if (record.kind === "observation") {
@@ -138,6 +143,10 @@ export class SQLiteRetentionRepository implements RetentionRepository {
           "DELETE FROM retention_cleanup_records WHERE resource_id = ? AND attempt_id = ?",
         )
         .run(record.id, record.attemptId);
+      reconcileMediaDeliveryCleanup(this.raw, {
+        attemptId: record.attemptId,
+        now: new Date().toISOString(),
+      });
     });
   }
 

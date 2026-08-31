@@ -252,11 +252,6 @@ describe("AttemptService", () => {
         attempt: "33333333",
         generation: 3,
       },
-      {
-        category: "media_attachment_cleanup_failed",
-        attempt: "33333333",
-        generation: 3,
-      },
     ]);
   });
 
@@ -285,12 +280,6 @@ describe("AttemptService", () => {
         }),
       }),
     ).rejects.toBeInstanceOf(QueueUnavailableError);
-    expect(store.calls).toEqual([
-      "attach",
-      "retain-recovery",
-      "rollback",
-      "cleanup",
-      "ack-cleanup",
-    ]);
+    expect(store.calls).toEqual(["attach", "retain-recovery", "rollback"]);
   });
 });

@@ -22,8 +22,10 @@ import {
   AnalysisWorker,
   ExpectedProcessingFailure,
 } from "../workers/analysis-worker.js";
-import { type ExtractionManifest } from "../media/extraction-manifest.js";
-import { MediaPipeline } from "../media/media-pipeline.js";
+import {
+  C5_TEST_SOURCE_SHA256,
+  createC5PipelineTestSupport,
+} from "../media/c5-pipeline-test-support.js";
 import {
   SQLiteAttemptRepository,
   createLiveLeaderboardCursorCodec,
@@ -32,9 +34,7 @@ import {
 } from "./sqlite-attempt-repository.js";
 import {
   createStoredMediaAttachment,
-  type MediaUploadContext,
   type StoredMedia,
-  type StoredMediaAttachment,
   type TerminalCandidate,
 } from "./attempt-repository.js";
 import { SQLiteCompetitivePolicyRepository } from "./sqlite-competitive-policy-repository.js";
@@ -464,7 +464,7 @@ async function makeRepository(
   const database = openSqliteDatabase(join(directory, "api.sqlite"));
   const secondaryDatabases: ReturnType<typeof openSqliteDatabase>[] = [];
   const clock = new TestClock();
-  const c5 = createTestPipelineIssuer();
+  const c5 = createC5PipelineTestSupport({ root: join(directory, "c5") });
   const repository = new SQLiteAttemptRepository({
     database,
     clock,
@@ -582,110 +582,6 @@ function freeProcessingContext(
   });
 }
 
-type TestPipelineIssuer = Readonly<{
-  handoffVerifier: ReturnType<MediaPipeline["handoffVerifier"]>;
-  accept(
-    context: MediaUploadContext,
-    media: StoredMediaAttachment,
-  ): ReturnType<MediaPipeline["accept"]>;
-}>;
-
-/** A fixture models one composed C5 pipeline and its exact C4 verifier. */
-function createTestPipelineIssuer(): TestPipelineIssuer {
-  let staged:
-    | Readonly<{
-        id: string;
-        bytes: number;
-        contentType: "video/mp4";
-        sha256: string;
-        probe: never;
-        transitionResourceId: string;
-      }>
-    | undefined;
-  let processingContext: ReturnType<typeof freeProcessingContext> | undefined;
-  const pipeline = new MediaPipeline({
-    storage: {
-      createUploadSession: async () => {
-        if (!staged) throw new Error("test media is required");
-        return {
-          write: async () => undefined,
-          inspect: async () => staged,
-          publish: async () => staged,
-          commit: async () => staged,
-          abort: async () => undefined,
-        };
-      },
-      delete: async () => undefined,
-      deleteFrame: async () => undefined,
-    } as never,
-    extractor: {
-      extract: async (input) => {
-        if (!processingContext) throw new Error("test receipt is required");
-        if (processingContext.kind !== "c5-durable-processing-context-v2")
-          throw new Error("test receipt must be storage-backed");
-        const manifest = Object.freeze({
-          attemptId: input.attemptId,
-          generation: input.generation,
-          mediaId: input.mediaId,
-          mediaSha256: input.mediaSha256,
-          mode: input.mode,
-        }) as ExtractionManifest;
-        return manifest;
-      },
-      durableReceiptFor: () => {
-        if (
-          !processingContext ||
-          processingContext.kind !== "c5-durable-processing-context-v2"
-        )
-          throw new Error("test receipt is required");
-        return processingContext.receipt;
-      },
-    },
-  });
-  return Object.freeze({
-    handoffVerifier: pipeline.handoffVerifier(),
-    accept: async (context, media) => {
-      staged = {
-        id: media.id,
-        bytes: media.bytes,
-        contentType: media.contentType as "video/mp4",
-        sha256: "e".repeat(64),
-        probe: {} as never,
-        transitionResourceId: media.transition.resourceId,
-      };
-      processingContext = freeProcessingContext({
-        attemptId: context.attemptId,
-        generation: context.generation,
-        mediaId: media.id,
-      });
-      try {
-        return await pipeline.accept({
-          mode: context.mode,
-          source: oneByteSource(),
-          maxBytes: 1,
-          retention: {
-            repository: {
-              schedule: async () => ({ kind: "created" as const }),
-              acknowledge: async () => undefined,
-            },
-            attemptId: context.attemptId,
-            generation: context.generation,
-            uploadedAt: context.uploadedAt,
-            authority: context,
-          },
-        });
-      } finally {
-        staged = undefined;
-        processingContext = undefined;
-      }
-    },
-  });
-}
-
-async function* oneByteSource(): AsyncIterable<Uint8Array> {
-  yield Uint8Array.of(1);
-}
-
 describe("SQLiteAttemptRepository", () => {
   let fixture: Awaited<ReturnType<typeof makeRepository>>;
 
@@ -723,12 +619,14 @@ describe("SQLiteAttemptRepository", () => {
     });
     const media = createStoredMediaAttachment(
       preparedStoredMedia({
-        id: "media-c5-topology",
+        id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
         uploadedAt: context.uploadedAt,
       }),
     );
     await scheduleTemporaryRetention(fixture, ATTEMPT_A, media);
-    const foreignC5 = createTestPipelineIssuer();
+    const foreignC5 = createC5PipelineTestSupport({
+      root: join(fixture.directory, "foreign-c5"),
+    });
     await expect(
       fixture.repository.attachPreparedMedia({
         accepted: await foreignC5.accept(context, media),
@@ -874,10 +772,9 @@ describe("SQLiteAttemptRepository", () => {
       uploadedAt: first.uploadedAt,
     });
     await scheduleTemporaryRetention(fixture, ATTEMPT_A, media);
-    const processingContext = freeProcessingContext({
-      attemptId: ATTEMPT_A,
-      generation: first.generation,
-      mediaId: media.id,
+    const poisonMedia = preparedStoredMedia({
+      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      uploadedAt: first.uploadedAt,
     });
     const poisonedContext = Object.freeze({
       ...first,
@@ -887,15 +784,16 @@ describe("SQLiteAttemptRepository", () => {
       fixture.repository.attachPreparedMedia({
         accepted: await fixture.c5.accept(
           poisonedContext as typeof first,
-          createStoredMediaAttachment(media),
+          createStoredMediaAttachment(poisonMedia),
         ),
       }),
     ).rejects.toMatchObject({ code: "invalid_input" });
+    const accepted = await fixture.c5.accept(
+      first,
+      createStoredMediaAttachment(media),
+    );
     const job = await fixture.repository.attachPreparedMedia({
-      accepted: await fixture.c5.accept(
-        first,
-        createStoredMediaAttachment(media),
-      ),
+      accepted,
     });
     await expect(
       fixture.repository.attachPreparedMedia({
@@ -925,8 +823,8 @@ describe("SQLiteAttemptRepository", () => {
     });
     expect(persisted).toEqual({
       upload: first,
-      processing: processingContext,
-      sourceSha256: "e".repeat(64),
+      processing: accepted.processingContext,
+      sourceSha256: C5_TEST_SOURCE_SHA256,
     });
     await expect(
       reopened.releaseProcessingClaim({
@@ -1009,7 +907,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -1255,7 +1153,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -1268,13 +1166,15 @@ describe("SQLiteAttemptRepository", () => {
     ).resolves.toEqual({
       attemptId: ATTEMPT_A,
       generation: 1,
-      mediaId: "media-a",
+      mediaId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      frameBatchId: "eeeeeeee-eeee-4eee-8eee-000000000000",
       state: "pending-delivery",
       requiresRollback: true,
     });
     await fixture.repository.beginMediaAttachmentRecovery({
       ...job,
-      mediaId: "media-a",
+      mediaId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      frameBatchId: "eeeeeeee-eeee-4eee-8eee-000000000000",
     });
     const reopened = SQLiteAttemptRepository.forReadOnlyTest({
       database: fixture.openSecondaryDatabase(),
@@ -1303,14 +1203,60 @@ describe("SQLiteAttemptRepository", () => {
     });
     await fixture.repository.acknowledgeMediaAttachmentCleanup({
       ...job,
-      mediaId: "media-a",
+      mediaId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     });
     await expect(reopened.getMediaDeliveryRecovery(job)).resolves.toMatchObject(
       {
         state: "resolved",
-        mediaId: "media-a",
+        mediaId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       },
     );
+  });
+
+  it("rejects every impossible durable recovery lifecycle shape", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await attachMedia(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const reset = () =>
+      fixture.database.raw
+        .prepare(
+          `UPDATE media_delivery_recovery_records
+              SET state = 'pending-delivery', requires_rollback = 1,
+                  queued_at = NULL, rollback_completed_at = NULL,
+                  cleanup_completed_at = NULL, recovery_lease_id = NULL,
+                  recovery_lease_expires_at = NULL
+            WHERE attempt_id = ? AND generation = ?`,
+        )
+        .run(job.attemptId, job.generation);
+    const impossible = [
+      "UPDATE media_delivery_recovery_records SET queued_at = '2030-01-15T12:00:00.000Z' WHERE attempt_id = ? AND generation = ?",
+      "UPDATE media_delivery_recovery_records SET state = 'queued', requires_rollback = 0 WHERE attempt_id = ? AND generation = ?",
+      "UPDATE media_delivery_recovery_records SET state = 'cleanup-recoverable', cleanup_completed_at = '2030-01-15T12:00:00.000Z' WHERE attempt_id = ? AND generation = ?",
+      "UPDATE media_delivery_recovery_records SET state = 'resolved' WHERE attempt_id = ? AND generation = ?",
+      "UPDATE media_delivery_recovery_records SET state = 'cleanup-recoverable', recovery_lease_id = 'ffffffff-ffff-4fff-8fff-ffffffffffff' WHERE attempt_id = ? AND generation = ?",
+      "UPDATE media_delivery_recovery_records SET recovery_lease_id = 'ffffffff-ffff-4fff-8fff-ffffffffffff', recovery_lease_expires_at = '2030-01-15T12:05:00.000Z' WHERE attempt_id = ? AND generation = ?",
+    ] as const;
+    for (const statement of impossible) {
+      reset();
+      fixture.database.raw
+        .prepare(statement)
+        .run(job.attemptId, job.generation);
+      await expect(
+        fixture.repository.getMediaDeliveryRecovery(job),
+      ).rejects.toMatchObject({ code: "persisted_data_corrupt" });
+    }
   });
 
   it("rejects an attachment without its mandatory C5 upload-transition metadata before SQL", async () => {
@@ -1351,7 +1297,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -1381,7 +1327,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -1436,9 +1382,21 @@ describe("SQLiteAttemptRepository", () => {
         "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
       ),
     });
-    for (const [id, athlete, sessionId, nonce] of [
-      [ATTEMPT_A, ATHLETE_A, SESSION_A, "a".repeat(43)],
-      [ATTEMPT_B, ATHLETE_B, SESSION_B, "b".repeat(43)],
+    for (const [id, athlete, sessionId, nonce, mediaId] of [
+      [
+        ATTEMPT_A,
+        ATHLETE_A,
+        SESSION_A,
+        "a".repeat(43),
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      ],
+      [
+        ATTEMPT_B,
+        ATHLETE_B,
+        SESSION_B,
+        "b".repeat(43),
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      ],
     ] as const) {
       await fixture.repository.issueCalibrationSession({
         id: sessionId,
@@ -1466,7 +1424,7 @@ describe("SQLiteAttemptRepository", () => {
         attemptId: id,
         athleteId: athlete,
         media: {
-          id: `media-${id}`,
+          id: mediaId,
           contentType: "video/mp4",
           bytes: 10,
           deleteAt: "2030-01-16T12:00:00.000Z",
@@ -1665,9 +1623,21 @@ describe("SQLiteAttemptRepository", () => {
       ),
     );
     try {
-      for (const [attemptId, athleteId, sessionId, nonce] of [
-        [ATTEMPT_A, ATHLETE_A, SESSION_A, "a".repeat(43)],
-        [ATTEMPT_B, ATHLETE_B, SESSION_B, "b".repeat(43)],
+      for (const [attemptId, athleteId, sessionId, nonce, mediaId] of [
+        [
+          ATTEMPT_A,
+          ATHLETE_A,
+          SESSION_A,
+          "a".repeat(43),
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        ],
+        [
+          ATTEMPT_B,
+          ATHLETE_B,
+          SESSION_B,
+          "b".repeat(43),
+          "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        ],
       ] as const) {
         await local.repository.issueCalibrationSession({
           id: sessionId,
@@ -1695,7 +1665,7 @@ describe("SQLiteAttemptRepository", () => {
           attemptId,
           athleteId,
           media: {
-            id: `media-${attemptId}`,
+            id: mediaId,
             contentType: "video/mp4",
             bytes: 10,
             deleteAt: "2030-01-16T12:00:00.000Z",
@@ -1762,11 +1732,12 @@ describe("SQLiteAttemptRepository", () => {
       },
     });
     const payload = {
-      version: 2 as const,
+      version: 3 as const,
       challengeId: "wall-pass" as const,
       challengeVersion: 1 as const,
       ruleVersion: "wall-pass-v1-score-1" as const,
       calculatedAt: "2030-01-15T12:00:00.000Z",
+      snapshotSequence: 7,
       score: 80,
       completedAt: "2030-01-15T12:00:00.000Z",
       attemptId: ATTEMPT_A,
@@ -1774,6 +1745,15 @@ describe("SQLiteAttemptRepository", () => {
     const cursor = codec.encode(payload);
     expect(cursor).not.toContain(ATTEMPT_A);
     expect(codec.decode(cursor)).toEqual(payload);
+    const secondCursor = codec.encode(payload);
+    expect(secondCursor).not.toEqual(cursor);
+    expect(codec.decode(secondCursor)).toEqual(payload);
+    const restarted = createLiveLeaderboardCursorCodec({
+      key: Uint8Array.from({ length: 32 }, (_, index) => 31 - index),
+    });
+    expect(() => restarted.decode(cursor)).toThrow(
+      expect.objectContaining({ code: "invalid_input" }),
+    );
     let tamperError: unknown;
     try {
       codec.decode(`${cursor.slice(0, -1)}A`);
@@ -1781,14 +1761,23 @@ describe("SQLiteAttemptRepository", () => {
       tamperError = error;
     }
     expect(tamperError).toMatchObject({ code: "invalid_input" });
-    for (const nonCanonical of [`${cursor}!`, `${cursor}=`]) {
-      expect(() => codec.decode(nonCanonical)).toThrow(
+    for (const malformed of ["A", "AAAA", `${cursor}!`, `${cursor}=`]) {
+      expect(() => codec.decode(malformed)).toThrow(
         expect.objectContaining({ code: "invalid_input" }),
       );
     }
     expect(() =>
       createLiveLeaderboardCursorCodec({ key: new Uint8Array(31) }),
     ).toThrow("32 bytes");
+    expect(() =>
+      createLiveLeaderboardCursorCodec({ key: new Uint8Array(33) }),
+    ).toThrow("32 bytes");
+    const repeatedNonce = createLiveLeaderboardCursorCodec({
+      key: Uint8Array.from({ length: 32 }, (_, index) => index),
+      nonceSource: { next: () => new Uint8Array(12) },
+    });
+    repeatedNonce.encode(payload);
+    expect(() => repeatedNonce.encode(payload)).toThrow("nonce was reused");
     expect(() => codec.encode(payload)).not.toThrow();
   });
 
@@ -1850,9 +1839,21 @@ describe("SQLiteAttemptRepository", () => {
         },
       },
     ];
-    for (const [attemptId, athleteId, sessionId, candidate] of [
-      [ATTEMPT_A, ATHLETE_A, SESSION_A, candidates[0]],
-      [ATTEMPT_B, ATHLETE_B, SESSION_B, candidates[1]],
+    for (const [attemptId, athleteId, sessionId, candidate, mediaId] of [
+      [
+        ATTEMPT_A,
+        ATHLETE_A,
+        SESSION_A,
+        candidates[0],
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      ],
+      [
+        ATTEMPT_B,
+        ATHLETE_B,
+        SESSION_B,
+        candidates[1],
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      ],
     ] as const) {
       await fixture.repository.issueCalibrationSession({
         id: sessionId,
@@ -1880,7 +1881,7 @@ describe("SQLiteAttemptRepository", () => {
         attemptId,
         athleteId,
         media: {
-          id: `media-${attemptId}`,
+          id: mediaId,
           contentType: "video/mp4",
           bytes: 10,
           deleteAt: "2030-01-16T12:00:00.000Z",
@@ -1920,7 +1921,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -1958,7 +1959,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2041,7 +2042,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2106,7 +2107,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2178,7 +2179,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2192,7 +2193,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-b",
+        id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2213,13 +2214,16 @@ describe("SQLiteAttemptRepository", () => {
         attemptId: ATTEMPT_A,
         athleteId: ATHLETE_A,
       }),
-    ).toMatchObject({ status: "uploaded", media: { id: "media-b" } });
+    ).toMatchObject({
+      status: "uploaded",
+      media: { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+    });
     expect(
       fixture.database.raw
         .prepare(
           "SELECT cleanup_requested_at FROM media_retention_records WHERE attempt_id = ? AND media_id = ?",
         )
-        .get(ATTEMPT_A, "media-b"),
+        .get(ATTEMPT_A, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
     ).toMatchObject({ cleanup_requested_at: null });
     expect(await fixture.repository.claimProcessing(firstJob)).toBeNull();
     const firstClaim = (await fixture.repository.claimProcessing(secondJob))!;
@@ -2247,7 +2251,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2290,7 +2294,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2364,7 +2368,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2434,7 +2438,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2501,7 +2505,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2581,7 +2585,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2649,7 +2653,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2702,7 +2706,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2777,7 +2781,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2843,7 +2847,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2915,7 +2919,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -2992,7 +2996,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -3094,7 +3098,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -3156,7 +3160,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -3227,7 +3231,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -3304,7 +3308,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
-        id: "media-a",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         contentType: "video/mp4",
         bytes: 10,
         deleteAt: "2030-01-16T12:00:00.000Z",
@@ -3385,7 +3389,75 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toEqual({ count: 17 });
+    ).toEqual({ count: 18 });
+    reopened.close();
+  });
+
+  it("backfills a live v17 delivery row with its exact durable frame batch once", () => {
+    const filename = join(fixture.directory, "delivery-recovery-v17.sqlite");
+    const predecessor = openSqliteDatabaseAtVersionForTest(filename, 17);
+    const uploadedAt = fixture.clock.now();
+    const mediaId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const frameBatchId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const media = preparedStoredMedia({ id: mediaId, uploadedAt });
+    predecessor.raw
+      .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+      .run(ATHLETE_A, uploadedAt);
+    predecessor.raw
+      .prepare(
+        "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, created_at, updated_at, processing_context_json, media_sha256, processing_receipt_id, processing_receipt_sha256) VALUES (?, ?, 'free', NULL, NULL, NULL, 'uploaded', 'active', ?, 1, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        ATTEMPT_A,
+        ATHLETE_A,
+        JSON.stringify(media),
+        uploadedAt,
+        uploadedAt,
+        JSON.stringify({
+          upload: {
+            attemptId: ATTEMPT_A,
+            athleteId: ATHLETE_A,
+            mode: "free",
+            generation: 1,
+            uploadedAt,
+            verified: null,
+          },
+          processing: freeProcessingContext({
+            attemptId: ATTEMPT_A,
+            generation: 1,
+            mediaId,
+          }),
+          sourceSha256: "e".repeat(64),
+        }),
+        "e".repeat(64),
+        frameBatchId,
+        "d".repeat(64),
+      );
+    predecessor.raw
+      .prepare(
+        "INSERT INTO media_delivery_recovery_records (attempt_id, generation, media_id, state, requires_rollback, created_at, updated_at) VALUES (?, 1, ?, 'pending-delivery', 1, ?, ?)",
+      )
+      .run(ATTEMPT_A, mediaId, uploadedAt, uploadedAt);
+    predecessor.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT frame_batch_id FROM media_delivery_recovery_records WHERE attempt_id = ? AND generation = 1",
+        )
+        .get(ATTEMPT_A),
+    ).toEqual({ frame_batch_id: frameBatchId });
+    upgraded.close();
+
+    const reopened = openSqliteDatabase(filename);
+    expect(
+      reopened.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM media_delivery_recovery_records WHERE attempt_id = ? AND generation = 1",
+        )
+        .get(ATTEMPT_A),
+    ).toEqual({ count: 1 });
     reopened.close();
   });
 
@@ -3496,7 +3568,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 17 });
+    ).toMatchObject({ count: 18 });
     reopened.close();
     upgraded.close();
 
@@ -3550,14 +3622,14 @@ describe("SQLiteAttemptRepository", () => {
         ATTEMPT_A,
         ATHLETE_A,
         JSON.stringify({
-          id: "media-a",
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
           contentType: "video/mp4",
           bytes: 10,
           uploadedAt,
           deleteAt: "2030-01-16T11:00:00.000Z",
           transition: {
             kind: "upload-transition",
-            resourceId: "media-b",
+            resourceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             deleteAt: "2030-01-15T13:00:00.000Z",
           },
         }),
@@ -3586,11 +3658,11 @@ describe("SQLiteAttemptRepository", () => {
         ATTEMPT_A,
         ATHLETE_A,
         JSON.stringify({
-          id: "media-a",
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
           contentType: "video/mp4",
           bytes: 10,
           deleteAt: "2030-01-16T11:00:00.000Z",
-          transitionResourceId: "media-a",
+          transitionResourceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         }),
         uploadedAt,
         uploadedAt,
@@ -3625,7 +3697,7 @@ describe("SQLiteAttemptRepository", () => {
           ATTEMPT_A,
           ATHLETE_A,
           JSON.stringify({
-            id: "media-a",
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             contentType: "video/mp4",
             bytes: 10,
             uploadedAt,
@@ -3662,14 +3734,14 @@ describe("SQLiteAttemptRepository", () => {
         ATTEMPT_A,
         ATHLETE_A,
         JSON.stringify({
-          id: "media-a",
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
           contentType: "video/mp4",
           bytes: 10,
           uploadedAt,
           deleteAt: "2030-01-16T11:00:00.000Z",
           transition: {
             kind: "upload-transition",
-            resourceId: "media-a",
+            resourceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             deleteAt: "2030-01-15T13:00:00.000Z",
             unexpected: true,
           },
@@ -3691,14 +3763,14 @@ describe("SQLiteAttemptRepository", () => {
       input: { mode: "free" },
     });
     const canonical = {
-      id: "media-a",
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       contentType: "video/mp4",
       bytes: 10,
       uploadedAt: fixture.clock.now(),
       deleteAt: "2030-01-16T11:00:00.000Z",
       transition: {
         kind: "upload-transition",
-        resourceId: "media-a",
+        resourceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         deleteAt: "2030-01-15T13:00:00.000Z",
       },
     } as const;
@@ -3788,7 +3860,7 @@ describe("SQLiteAttemptRepository", () => {
         ATHLETE_A,
         SESSION_A,
         JSON.stringify({
-          id: "media-a",
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
           contentType: "video/mp4",
           bytes: 10,
           deleteAt: "2030-01-16T12:00:00.000Z",
@@ -3880,7 +3952,7 @@ describe("SQLiteAttemptRepository", () => {
         ATHLETE_A,
         SESSION_A,
         JSON.stringify({
-          id: "media-a",
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
           contentType: "video/mp4",
           bytes: 10,
           deleteAt: "2030-01-16T12:00:00.000Z",
@@ -3945,7 +4017,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 17 });
+    ).toMatchObject({ count: 18 });
     reopened.close();
     upgraded.close();
   });
@@ -4026,7 +4098,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 17 });
+    ).toMatchObject({ count: 18 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -4178,7 +4250,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 17 });
+    ).toMatchObject({ count: 18 });
     reopened.close();
   });
 
@@ -4451,7 +4523,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 17 });
+    ).toMatchObject({ count: 18 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);

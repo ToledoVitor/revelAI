@@ -2,12 +2,9 @@ import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import {
   attestVerifiedExtractionContinuity,
-  createDurableProcessingContext,
-  createStorageExtractionReceipt,
   createExtractionManifest,
   parseExtractionManifest,
   reconstructDurableProcessingContext,
-  verifiedExtractionCapability,
 } from "./extraction-manifest.js";
 
 const IDs = [
@@ -24,6 +21,30 @@ const probe = {
   codec: "h264",
   sourceRotationDegrees: 0 as const,
 };
+
+/** Raw receipt fixture only: production issuance belongs to LocalFrameExtraction. */
+function storageReceipt<
+  T extends Readonly<{
+    frameBatchId: string;
+    authority: object;
+    manifest: object;
+    frames: readonly Uint8Array[];
+    activeScenes: unknown;
+  }>,
+>(input: T) {
+  return Object.freeze({
+    kind: "c5-storage-extraction-receipt-v1" as const,
+    frameBatchId: input.frameBatchId,
+    authority: input.authority,
+    manifest: input.manifest,
+    frameSha256: Object.freeze(
+      input.frames.map((frame) =>
+        createHash("sha256").update(frame).digest("hex"),
+      ),
+    ),
+    activeScenes: input.activeScenes,
+  });
+}
 
 describe("extraction manifest", () => {
   it("binds verified attempt, generation, media digest, raw pre-roll bytes, and 40/600 partitions", () => {
@@ -131,105 +152,6 @@ describe("extraction manifest", () => {
     ).toThrow();
   });
 
-  it("reconstructs a fresh verified extraction capability from durable path-free evidence", async () => {
-    const frames = verifiedFrames();
-    const manifest = createExtractionManifest({
-      attemptId: IDs[0],
-      generation: 1,
-      mediaId: IDs[1],
-      mediaSha256: "a".repeat(64),
-      mode: "verified",
-      probe,
-      frames,
-    });
-    if (manifest.mode !== "verified") throw new Error("verified required");
-    attestVerifiedExtractionContinuity(
-      manifest,
-      manifest.frames.items.slice(40).map((frame) => ({
-        timestampSeconds: frame.timestampSeconds,
-        score: 0.1,
-      })),
-    );
-    const context = createDurableProcessingContext(manifest);
-    const serialized = JSON.stringify(context);
-    expect(serialized).not.toContain("capability");
-    expect(serialized).not.toContain("provider");
-    expect(serialized).not.toContain("/");
-    const reconstructed = await reconstructDurableProcessingContext({
-      context: JSON.parse(serialized),
-      frames: {
-        readFrame: async (reference) =>
-          frames.find((frame) => frame.reference === reference)!.rawBytes,
-      },
-      authoritative: manifest,
-    });
-
-    expect(reconstructed).not.toBe(manifest);
-    expect(reconstructed).toEqual(manifest);
-    if (reconstructed.mode !== "verified")
-      throw new Error("verified reconstruction required");
-    expect(() => verifiedExtractionCapability(reconstructed)).not.toThrow();
-    await expect(
-      reconstructDurableProcessingContext({
-        context,
-        frames: { readFrame: async () => Uint8Array.of(0) },
-        authoritative: manifest,
-      }),
-    ).rejects.toThrow("durable extraction frame mismatch");
-  });
-
-  it("rejects rehashed substitute bytes when the claimed upload authority names another extraction", async () => {
-    const acceptedFrames = verifiedFrames();
-    const substitutedFrames = verifiedFrames().map((frame, index) => ({
-      ...frame,
-      reference: `substituted-${String(index).padStart(4, "0")}`,
-      rawBytes: Uint8Array.of((index + 1) % 256),
-    }));
-    const accepted = createExtractionManifest({
-      attemptId: IDs[0],
-      generation: 1,
-      mediaId: IDs[1],
-      mediaSha256: "a".repeat(64),
-      mode: "verified",
-      probe,
-      frames: acceptedFrames,
-    });
-    const substituted = createExtractionManifest({
-      attemptId: IDs[2],
-      generation: 2,
-      mediaId: IDs[2],
-      mediaSha256: "b".repeat(64),
-      mode: "verified",
-      probe,
-      frames: substitutedFrames,
-    });
-    if (accepted.mode !== "verified" || substituted.mode !== "verified")
-      throw new Error("verified extraction required");
-    for (const manifest of [accepted, substituted])
-      attestVerifiedExtractionContinuity(
-        manifest,
-        manifest.frames.items.slice(40).map((frame) => ({
-          timestampSeconds: frame.timestampSeconds,
-          score: 0.1,
-        })),
-      );
-
-    const substitutedContext = createDurableProcessingContext(substituted);
-    const reconstruction = {
-      context: substitutedContext,
-      frames: {
-        readFrame: async (reference: string) =>
-          substitutedFrames.find((frame) => frame.reference === reference)!
-            .rawBytes,
-      },
-      authoritative: accepted,
-    };
-
-    await expect(
-      reconstructDurableProcessingContext(reconstruction),
-    ).rejects.toThrow("durable extraction authority mismatch");
-  });
-
   it("rejects a receipt returned for a different durable frame batch", async () => {
     const receiptBatchId = IDs[2];
     const frames = Array.from({ length: 12 }, (_, index) => ({
@@ -246,7 +168,7 @@ describe("extraction manifest", () => {
       probe: { ...probe, durationSeconds: 3 },
       frames,
     });
-    const receipt = createStorageExtractionReceipt({
+    const receipt = storageReceipt({
       frameBatchId: receiptBatchId,
       authority: {
         attemptId: IDs[0],
@@ -338,7 +260,7 @@ describe("extraction manifest", () => {
       })),
     );
     attestVerifiedExtractionContinuity(substituted, scenes);
-    const receipt = createStorageExtractionReceipt({
+    const receipt = storageReceipt({
       frameBatchId: substitutedBatchId,
       authority: {
         attemptId: IDs[2],
@@ -408,7 +330,7 @@ describe("extraction manifest", () => {
       probe: { ...probe, durationSeconds: 3 },
       frames,
     });
-    const receipt = createStorageExtractionReceipt({
+    const receipt = storageReceipt({
       frameBatchId,
       authority: {
         attemptId: IDs[0],

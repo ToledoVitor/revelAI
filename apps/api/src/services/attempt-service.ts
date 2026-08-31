@@ -11,7 +11,12 @@ export type AttachmentRepository = Readonly<{
     input: Readonly<{ attemptId: string; generation: number }>,
   ): Promise<void>;
   beginMediaAttachmentRecovery(
-    input: Readonly<{ attemptId: string; generation: number; mediaId: string }>,
+    input: Readonly<{
+      attemptId: string;
+      generation: number;
+      mediaId: string;
+      frameBatchId: string;
+    }>,
   ): Promise<void>;
   acknowledgeMediaAttachmentCleanup(
     input: Readonly<{ attemptId: string; generation: number; mediaId: string }>,
@@ -106,6 +111,7 @@ export class AttemptService {
         attemptId: accepted.context.attemptId,
         generation,
         mediaId: accepted.storedMedia.id,
+        frameBatchId: accepted.processingContext.receipt.frameBatchId,
       }),
     );
     if (!recovery) this.logRecovery(accepted, generation);
@@ -117,7 +123,12 @@ export class AttemptService {
           generation,
         }),
       );
-      if (!rollback) this.logRecovery(accepted, generation);
+      if (!rollback) {
+        // The durable recovery fact remains claimable. Deleting bytes while
+        // C4 still references them would turn a queue failure into corruption.
+        this.logRecovery(accepted, generation);
+        return;
+      }
     }
 
     const cleanup = await settle(accepted.cleanup.cleanup());
