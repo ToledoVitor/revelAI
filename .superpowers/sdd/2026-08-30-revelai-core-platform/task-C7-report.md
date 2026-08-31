@@ -345,3 +345,95 @@ fail-closed across process boundaries; C8 must compose extraction, analysis and
 integrity in one worker process rather than attempting to persist the
 capability. No route, provider dispatch, media I/O, score formula, policy
 activation or leaderboard write was added to C7.
+
+---
+
+## Round 4 correction — `c2b6db9`
+
+### Status
+
+- Product correction: `c2b6db92da3d312dfec4c8ac05d5eb9a92bcccc9`
+  (`fix(api): close verified competitive execution`).
+- Local only; no push.
+- Scope: R3-C1, R3-I1 and R3-I2.
+
+### Factory-owned competitive execution
+
+- Competitive Roboflow batches now reject any caller scheduler. A private
+  scheduler invokes only the factory-owned Roboflow runner and consumes its
+  per-frame opaque receipt before producing the owned batch.
+- C5 source hashes are captured before dispatch from the original request
+  identity, private byte copies are supplied to the factory runtime, and the
+  original sequence is re-hashed on return. Receipt frame index, source hash
+  and encoded hash must each match the private request/result pair.
+- Scheduler injection remains available only for demo batches; that branch can
+  produce demo provenance only and cannot issue a Roboflow receipt.
+- Regression coverage includes a one-frame structural scheduler and a full
+  640-frame C5→C6→C7 fake scheduler. Both use a real Roboflow factory with
+  zero factory fetches and reject before evidence/candidate creation. A source
+  byte mutation while actual factory work is in flight also rejects.
+
+### Durable receipt migration
+
+- v15 reads every identity column with each receipt row. Current-shaped JSON
+  is parsed through the shared strict row matcher; the exact v14 predecessor
+  first verifies its historical canonical hash, then builds the one permitted
+  successor and validates it against every row field before write.
+- After update, exactly one row must have changed and the stored successor is
+  selected and strict-matched again before linked policies are recreated.
+- A v14 JSON/row ID mismatch now rolls back migration 15; the database remains
+  at 14 and can be reopened reproducibly for correction.
+
+### Actual-chain and topology evidence
+
+- C5→C6→C7 fixtures now cover independent anchor-median failure,
+  anchor-maximum failure with median still admissible, both limits below their
+  boundaries, and no selectable calibration reference.
+- The topology test now resolves TypeScript symbols, including import aliases,
+  namespaces and computed properties, before asserting the unique C5 reader,
+  factory-owned batch issue/consume, C6 assembly and C7 execution read.
+
+### RED → GREEN
+
+- RED: a real Roboflow factory plus a fake scheduler returned arbitrary
+  640-frame inference and reached a valid evidence path without calling
+  Roboflow. GREEN: competitive composition rejects the scheduler seam; only
+  the private runner can create the Roboflow owned receipt.
+- RED: mutating original source bytes during the provider wait left the
+  capability bound to stale pre-dispatch data. GREEN: pre/post ordered hash
+  equality rejects the batch.
+- RED: v15 accepted a canonical v14 JSON whose ID disagreed with the durable
+  receipt row. GREEN: strict predecessor/successor row matching aborts the
+  transaction and preserves migration 14.
+- RED: direct-name topology checks could miss aliases or computed namespace
+  calls. GREEN: compiler-symbol checks prove those call forms resolve to the
+  same guarded operation.
+
+### Verification
+
+```text
+rtk pnpm --filter @revelai/vision test -- providers.test.ts
+  6 files / 76 tests passed
+
+rtk pnpm --filter @revelai/api test -- integrity-evaluator.test.ts
+  21 API files / 197 tests passed
+
+rtk pnpm --filter @revelai/api test -- sqlite-attempt-repository.test.ts
+  21 API files / 191 tests passed at focused migration gate
+
+rtk pnpm check && rtk pnpm build && rtk pnpm install --frozen-lockfile
+  passed; root gate: API 21 files / 197 tests, Vision 6 files / 76 tests,
+  Contracts 33 tests, Domain 50 tests, all six builds
+
+fresh git archive c2b6db9 → frozen install → pnpm check → pnpm build
+  passed without prebuilt dist
+
+rtk git diff --check
+  passed
+```
+
+### Concern
+
+The owned execution capability remains process-local by design. C8 must keep
+C5 extraction, C6 analysis and C7 evaluation in one worker process and must
+not serialize or reconstruct the capability.
