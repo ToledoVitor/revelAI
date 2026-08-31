@@ -1874,13 +1874,9 @@ describe("SQLiteAttemptRepository", () => {
     }
   });
 
-  it("authenticates opaque live cursors with an injected AES key and unique nonce source", () => {
-    let nonce = 0;
+  it("authenticates opaque live cursors with an injected AES key", () => {
     const codec = createLiveLeaderboardCursorCodec({
       key: Uint8Array.from({ length: 32 }, (_, index) => index),
-      nonceSource: {
-        next: () => Uint8Array.from({ length: 12 }, () => nonce++),
-      },
     });
     const payload = {
       version: 3 as const,
@@ -1899,6 +1895,14 @@ describe("SQLiteAttemptRepository", () => {
     const secondCursor = codec.encode(payload);
     expect(secondCursor).not.toEqual(cursor);
     expect(codec.decode(secondCursor)).toEqual(payload);
+    const firstNonce = BigInt(
+      `0x${Buffer.from(cursor, "base64url").subarray(0, 12).toString("hex")}`,
+    );
+    expect(
+      BigInt(
+        `0x${Buffer.from(secondCursor, "base64url").subarray(0, 12).toString("hex")}`,
+      ),
+    ).toBe(firstNonce + 1n);
     const restarted = createLiveLeaderboardCursorCodec({
       key: Uint8Array.from({ length: 32 }, (_, index) => 31 - index),
     });
@@ -1923,22 +1927,12 @@ describe("SQLiteAttemptRepository", () => {
     expect(() =>
       createLiveLeaderboardCursorCodec({ key: new Uint8Array(33) }),
     ).toThrow("32 bytes");
-    const repeatedNonce = createLiveLeaderboardCursorCodec({
-      key: Uint8Array.from({ length: 32 }, (_, index) => index),
-      nonceSource: { next: () => new Uint8Array(12) },
-    });
-    repeatedNonce.encode(payload);
-    expect(() => repeatedNonce.encode(payload)).toThrow("nonce was reused");
     expect(() => codec.encode(payload)).not.toThrow();
   });
 
   it("authenticates canonical opaque attempt cursors with their athlete boundary", () => {
-    let nonce = 0;
     const codec = createAttemptCursorCodec({
       key: Uint8Array.from({ length: 32 }, (_, index) => index),
-      nonceSource: {
-        next: () => Uint8Array.from({ length: 12 }, () => nonce++),
-      },
     });
     const payload = {
       version: 1 as const,
@@ -1970,6 +1964,83 @@ describe("SQLiteAttemptRepository", () => {
         expect.objectContaining({ code: "invalid_input" }),
       );
     }
+  });
+
+  it("derives unique attempt cursor IVs from a process-wide monotonic counter without per-page history", () => {
+    const codec = createAttemptCursorCodec({
+      key: Uint8Array.from({ length: 32 }, (_, index) => index),
+    });
+    const payload = {
+      version: 1 as const,
+      athleteId: ATHLETE_A,
+      createdAt: "2030-01-15T12:00:00.000Z",
+      attemptId: ATTEMPT_A,
+    };
+    const cursors = Array.from({ length: 128 }, () => codec.encode(payload));
+    const ivs = cursors.map((cursor) => Buffer.from(cursor, "base64url"));
+    const firstNonce = BigInt(`0x${ivs[0]!.subarray(0, 12).toString("hex")}`);
+
+    expect(new Set(cursors)).toHaveLength(cursors.length);
+    for (const [index, iv] of ivs.entries()) {
+      expect(BigInt(`0x${iv.subarray(0, 12).toString("hex")}`)).toBe(
+        firstNonce + BigInt(index),
+      );
+    }
+    expect(Reflect.ownKeys(codec)).toEqual(["encode", "decode"]);
+  });
+
+  it("does not reuse an IV when separately-created attempt codecs share a key", () => {
+    const key = Uint8Array.from({ length: 32 }, (_, index) => index);
+    const first = createAttemptCursorCodec({ key });
+    const second = createAttemptCursorCodec({ key });
+    const payload = {
+      version: 1 as const,
+      athleteId: ATHLETE_A,
+      createdAt: "2030-01-15T12:00:00.000Z",
+      attemptId: ATTEMPT_A,
+    };
+
+    const firstIv = Buffer.from(first.encode(payload), "base64url").subarray(
+      0,
+      12,
+    );
+    const secondIv = Buffer.from(second.encode(payload), "base64url").subarray(
+      0,
+      12,
+    );
+    expect(secondIv).not.toEqual(firstIv);
+  });
+
+  it("reserves distinct IVs across attempt and live codecs with the exact same key", () => {
+    const key = Uint8Array.from({ length: 32 }, (_, index) => index);
+    const attempt = createAttemptCursorCodec({ key });
+    const live = createLiveLeaderboardCursorCodec({ key });
+
+    const attemptIv = Buffer.from(
+      attempt.encode({
+        version: 1,
+        athleteId: ATHLETE_A,
+        createdAt: "2030-01-15T12:00:00.000Z",
+        attemptId: ATTEMPT_A,
+      }),
+      "base64url",
+    ).subarray(0, 12);
+    const liveIv = Buffer.from(
+      live.encode({
+        version: 3,
+        challengeId: "wall-pass",
+        challengeVersion: 1,
+        ruleVersion: "wall-pass-v1-score-1",
+        calculatedAt: "2030-01-15T12:00:00.000Z",
+        snapshotSequence: 7,
+        score: 80,
+        completedAt: "2030-01-15T12:00:00.000Z",
+        attemptId: ATTEMPT_A,
+      }),
+      "base64url",
+    ).subarray(0, 12);
+
+    expect(liveIv).not.toEqual(attemptIv);
   });
 
   it("never projects demo or experimental verified candidates onto the leaderboard", async () => {

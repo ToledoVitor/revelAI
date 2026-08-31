@@ -27,12 +27,15 @@ import type {
 import { isC5AcceptedMediaHandoffVerifier } from "../media/media-pipeline.js";
 import {
   isFactoryIssuedSqliteDatabase,
+  resolveFactoryIssuedC4AcceptedMediaCleanupAuthority,
+  type C4AcceptedMediaCleanupAuthority,
   type SqliteDatabase,
 } from "../database/sqlite-database.js";
 import {
   isStoredMediaAttachment,
   RepositoryError,
 } from "./attempt-repository.js";
+import { createAes256GcmNonceAllocator } from "./cursor-nonce-allocator.js";
 export {
   RepositoryError,
   type RepositoryErrorCode,
@@ -59,23 +62,7 @@ import type {
   TerminalCandidate,
 } from "./attempt-repository.js";
 
-type AcceptedMediaCleanupClaim = Readonly<{
-  attemptId: string;
-  mediaId: string;
-  frameBatchId: string;
-}>;
-
-/**
- * An opaque C4 authority whose implementation is closed over the exact raw
- * database supplied at repository construction. It deliberately is not a
- * repository method: mutable instances, inherited objects, and structural
- * lookalikes cannot redirect a physical C5 cleanup decision.
- */
-export type C4AcceptedMediaCleanupAuthority = Readonly<{
-  ownsExactAcceptedMediaCleanupPair(
-    input: AcceptedMediaCleanupClaim,
-  ): Promise<boolean>;
-}>;
+export type { C4AcceptedMediaCleanupAuthority } from "../database/sqlite-database.js";
 
 const c4AcceptedMediaCleanupAuthorities = new WeakMap<
   object,
@@ -216,16 +203,10 @@ export type AttemptCursorPayload = Readonly<{
 
 export type AttemptCursorCrypto = Readonly<{
   key: Uint8Array;
-  nonceSource?: LiveLeaderboardCursorNonceSource;
 }>;
-
-export interface LiveLeaderboardCursorNonceSource {
-  next(): Uint8Array;
-}
 
 export type LiveLeaderboardCursorCrypto = Readonly<{
   key: Uint8Array;
-  nonceSource?: LiveLeaderboardCursorNonceSource;
 }>;
 
 export type LiveLeaderboardCursorPayload = Readonly<{
@@ -292,11 +273,13 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     )
       throw new Error("C5 handoff verifier is required from MediaPipeline.");
     this.handoffVerifier = input.handoffVerifier;
-    if (productionVerifier)
-      c4AcceptedMediaCleanupAuthorities.set(
-        this,
-        createC4AcceptedMediaCleanupAuthority(this.raw),
-      );
+    if (productionVerifier) {
+      const cleanupAuthority =
+        resolveFactoryIssuedC4AcceptedMediaCleanupAuthority(input.database);
+      if (!cleanupAuthority)
+        throw new Error("C4 factory cleanup authority is required.");
+      c4AcceptedMediaCleanupAuthorities.set(this, cleanupAuthority);
+    }
   }
 
   public async issueCalibrationSession(
@@ -1751,50 +1734,6 @@ export class SQLiteAttemptRepository implements AttemptRepository {
   }
 }
 
-function createC4AcceptedMediaCleanupAuthority(
-  raw: SqliteDatabase["raw"],
-): C4AcceptedMediaCleanupAuthority {
-  const execute = raw.exec.bind(raw);
-  const query = raw.prepare(
-    `SELECT
-       (SELECT COUNT(*) FROM media_retention_records
-         WHERE attempt_id = ? AND media_id = ?) AS originals,
-       (SELECT COUNT(*) FROM retention_cleanup_records
-         WHERE attempt_id = ? AND resource_id = ?
-           AND resource_kind = 'frame') AS frames`,
-  );
-  const get = query.get.bind(query);
-
-  return Object.freeze({
-    async ownsExactAcceptedMediaCleanupPair(
-      input: AcceptedMediaCleanupClaim,
-    ): Promise<boolean> {
-      let began = false;
-      try {
-        execute("BEGIN IMMEDIATE");
-        began = true;
-        const row = get(
-          input.attemptId,
-          input.mediaId,
-          input.attemptId,
-          input.frameBatchId,
-        ) as Readonly<{ originals: number; frames: number }>;
-        execute("COMMIT");
-        began = false;
-        return row.originals === 1 && row.frames === 1;
-      } catch (error) {
-        if (began)
-          try {
-            execute("ROLLBACK");
-          } catch {
-            // The original query failure is the only useful authority result.
-          }
-        throw error;
-      }
-    },
-  });
-}
-
 function parseAttemptRow(row: unknown): AttemptRecord {
   const value = asRecord(row);
   const requiredStrings = [
@@ -2616,88 +2555,24 @@ const AES_256_GCM_IV_BYTES = 12;
 const AES_256_GCM_TAG_BYTES = 16;
 const AES_256_GCM_MINIMUM_PAYLOAD_BYTES =
   AES_256_GCM_IV_BYTES + AES_256_GCM_TAG_BYTES;
+const processAes256GcmCursorNonce = createAes256GcmNonceAllocator();
 const processLiveLeaderboardCursorCrypto: LiveLeaderboardCursorCrypto =
   Object.freeze({
     key: randomBytes(AES_256_GCM_KEY_BYTES),
-    nonceSource: Object.freeze({
-      next: () => randomBytes(AES_256_GCM_IV_BYTES),
-    }),
   });
 const processAttemptCursorCrypto: AttemptCursorCrypto = Object.freeze({
   key: randomBytes(AES_256_GCM_KEY_BYTES),
-  nonceSource: Object.freeze({
-    next: () => randomBytes(AES_256_GCM_IV_BYTES),
-  }),
 });
 
 /** AES-GCM attempt cursor with one independently-owned server key. */
 export function createAttemptCursorCodec(
   input: AttemptCursorCrypto,
 ): AttemptCursorCodec {
-  if (
-    !(input.key instanceof Uint8Array) ||
-    input.key.byteLength !== AES_256_GCM_KEY_BYTES
-  )
-    throw new Error("Attempt cursor key must be 32 bytes.");
-  const key = Buffer.from(input.key);
-  const nonceSource =
-    input.nonceSource ??
-    Object.freeze({ next: () => randomBytes(AES_256_GCM_IV_BYTES) });
-  const usedNonces = new Set<string>();
-  return Object.freeze({
-    encode(value: AttemptCursorPayload): string {
-      const payload = parseAttemptCursorPayload(value);
-      const iv = nonceSource.next();
-      if (!(iv instanceof Uint8Array) || iv.byteLength !== AES_256_GCM_IV_BYTES)
-        throw new Error("Attempt cursor nonce must be 12 bytes.");
-      const nonce = Buffer.from(iv);
-      const nonceKey = nonce.toString("base64url");
-      if (usedNonces.has(nonceKey))
-        throw new Error("Attempt cursor nonce was reused.");
-      usedNonces.add(nonceKey);
-      const cipher = createCipheriv("aes-256-gcm", key, nonce);
-      const encrypted = Buffer.concat([
-        cipher.update(stableJson(payload), "utf8"),
-        cipher.final(),
-      ]);
-      return Buffer.concat([nonce, cipher.getAuthTag(), encrypted]).toString(
-        "base64url",
-      );
-    },
-    decode(cursor: string): AttemptCursorPayload {
-      try {
-        if (!/^[A-Za-z0-9_-]+$/.test(cursor)) throw new Error("invalid cursor");
-        const encoded = Buffer.from(cursor, "base64url");
-        if (encoded.toString("base64url") !== cursor)
-          throw new Error("invalid cursor");
-        if (encoded.length <= AES_256_GCM_MINIMUM_PAYLOAD_BYTES)
-          throw new Error("invalid cursor");
-        const decipher = createDecipheriv(
-          "aes-256-gcm",
-          key,
-          encoded.subarray(0, AES_256_GCM_IV_BYTES),
-        );
-        decipher.setAuthTag(
-          encoded.subarray(
-            AES_256_GCM_IV_BYTES,
-            AES_256_GCM_MINIMUM_PAYLOAD_BYTES,
-          ),
-        );
-        return parseAttemptCursorPayload(
-          JSON.parse(
-            Buffer.concat([
-              decipher.update(
-                encoded.subarray(AES_256_GCM_MINIMUM_PAYLOAD_BYTES),
-              ),
-              decipher.final(),
-            ]).toString("utf8"),
-          ),
-        );
-      } catch {
-        throw new RepositoryError("invalid_input");
-      }
-    },
-  });
+  return createAes256GcmCursorCodec(
+    input,
+    parseAttemptCursorPayload,
+    "Attempt",
+  );
 }
 
 function parseAttemptCursorPayload(value: unknown): AttemptCursorPayload {
@@ -2727,36 +2602,52 @@ function parseAttemptCursorPayload(value: unknown): AttemptCursorPayload {
 export function createLiveLeaderboardCursorCodec(
   input: LiveLeaderboardCursorCrypto,
 ): LiveLeaderboardCursorCodec {
+  return createAes256GcmCursorCodec(
+    input,
+    parseLiveLeaderboardCursorPayload,
+    "Live leaderboard",
+  );
+}
+
+type Aes256GcmCursorCrypto = Readonly<{
+  key: Uint8Array;
+}>;
+
+type Aes256GcmCursorCodec<Payload> = Readonly<{
+  encode(value: Payload): string;
+  decode(cursor: string): Payload;
+}>;
+
+/**
+ * AES-GCM cursor envelope shared by C3 and C4 pages. One process-wide,
+ * random-seeded 96-bit monotonic nonce yields one twelve-byte IV per encode
+ * without retaining an unbounded history of prior cursors.
+ */
+function createAes256GcmCursorCodec<Payload>(
+  input: Aes256GcmCursorCrypto,
+  parsePayload: (value: unknown) => Payload,
+  name: string,
+): Aes256GcmCursorCodec<Payload> {
   if (
     !(input.key instanceof Uint8Array) ||
     input.key.byteLength !== AES_256_GCM_KEY_BYTES
   )
-    throw new Error("Live leaderboard cursor key must be 32 bytes.");
+    throw new Error(`${name} cursor key must be 32 bytes.`);
   const key = Buffer.from(input.key);
-  const nonceSource =
-    input.nonceSource ??
-    Object.freeze({ next: () => randomBytes(AES_256_GCM_IV_BYTES) });
-  const usedNonces = new Set<string>();
   return Object.freeze({
-    encode(value: LiveLeaderboardCursorPayload) {
-      const iv = nonceSource.next();
-      if (!(iv instanceof Uint8Array) || iv.byteLength !== AES_256_GCM_IV_BYTES)
-        throw new Error("Live leaderboard cursor nonce must be 12 bytes.");
-      const nonce = Buffer.from(iv);
-      const nonceKey = nonce.toString("base64url");
-      if (usedNonces.has(nonceKey))
-        throw new Error("Live leaderboard cursor nonce was reused.");
-      usedNonces.add(nonceKey);
-      const cipher = createCipheriv("aes-256-gcm", key, nonce);
+    encode(value: Payload): string {
+      const payload = parsePayload(value);
+      const iv = processAes256GcmCursorNonce.next();
+      const cipher = createCipheriv("aes-256-gcm", key, iv);
       const encrypted = Buffer.concat([
-        cipher.update(stableJson(value), "utf8"),
+        cipher.update(stableJson(payload), "utf8"),
         cipher.final(),
       ]);
       return Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString(
         "base64url",
       );
     },
-    decode(cursor: string) {
+    decode(cursor: string): Payload {
       try {
         if (!/^[A-Za-z0-9_-]+$/.test(cursor)) throw new Error("invalid cursor");
         const encoded = Buffer.from(cursor, "base64url");
@@ -2775,15 +2666,16 @@ export function createLiveLeaderboardCursorCodec(
             AES_256_GCM_MINIMUM_PAYLOAD_BYTES,
           ),
         );
-        const value = JSON.parse(
-          Buffer.concat([
-            decipher.update(
-              encoded.subarray(AES_256_GCM_MINIMUM_PAYLOAD_BYTES),
-            ),
-            decipher.final(),
-          ]).toString("utf8"),
+        return parsePayload(
+          JSON.parse(
+            Buffer.concat([
+              decipher.update(
+                encoded.subarray(AES_256_GCM_MINIMUM_PAYLOAD_BYTES),
+              ),
+              decipher.final(),
+            ]).toString("utf8"),
+          ),
         );
-        return parseLiveLeaderboardCursorPayload(value);
       } catch {
         throw new RepositoryError("invalid_input");
       }

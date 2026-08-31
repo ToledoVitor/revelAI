@@ -346,6 +346,69 @@ describe("C8 recovery runtime", () => {
     ).toThrow("scheduler unavailable");
     expect(failedEvents).toEqual([]);
   });
+
+  it("reserves the repository owner before an immediate claim can reenter composition", async () => {
+    const scheduled: Array<() => void> = [];
+    let claims = 0;
+    let nestedRuntime: ReturnType<typeof createC8RecoveryRuntime> | undefined;
+    let nestedError: unknown;
+    const scheduler = {
+      everyHour: (task: () => void) => {
+        scheduled.push(task);
+        return { timer: scheduled.length };
+      },
+      cancel: () => undefined,
+    };
+    const repository = {
+      claimMediaDeliveryRedelivery: async () => {
+        claims += 1;
+        if (claims === 1)
+          try {
+            nestedRuntime = createC8RecoveryRuntime({
+              repository,
+              queue: { enqueue: async () => undefined },
+              cleaner: { cleanup: async () => undefined },
+              log: { event: () => undefined },
+              scheduler,
+              maxBatchSize: 1,
+            });
+          } catch (error) {
+            nestedError = error;
+          }
+        return [];
+      },
+      acknowledgeMediaDeliveryRedelivery: async () => undefined,
+      releaseMediaDeliveryRedelivery: async () => undefined,
+      claimMediaAttachmentRecovery: async () => [],
+      rollbackMediaAttachment: async () => undefined,
+      acknowledgeMediaAttachmentCleanup: async () => undefined,
+      releaseMediaAttachmentRecovery: async () => undefined,
+    };
+    const runtime = createC8RecoveryRuntime({
+      repository,
+      queue: { enqueue: async () => undefined },
+      cleaner: { cleanup: async () => undefined },
+      log: { event: () => undefined },
+      scheduler,
+      maxBatchSize: 1,
+    });
+
+    try {
+      await nextTurn();
+      expect(nestedError).toMatchObject({
+        message: "C8 recovery runtime already has an active owner.",
+      });
+      expect(nestedRuntime).toBeUndefined();
+      expect(scheduled).toHaveLength(1);
+      expect(claims).toBe(1);
+      scheduled[0]!();
+      await nextTurn();
+      expect(claims).toBe(2);
+    } finally {
+      await runtime.stop();
+      await nestedRuntime?.stop();
+    }
+  });
 });
 
 function nextTurn(): Promise<void> {

@@ -147,6 +147,99 @@ describe("local C8 accepted-media cleaner", () => {
     );
   });
 
+  it("does not let pre-construction raw or prototype mutations forge cleanup ownership", async () => {
+    for (const mutatePrepare of [
+      (raw: { prepare: (sql: string) => unknown }) => {
+        const hadOwnPrepare = Object.hasOwn(raw, "prepare");
+        const originalPrepare = raw.prepare;
+        raw.prepare = forgedPrepare(raw, originalPrepare);
+        return () => {
+          if (hadOwnPrepare) raw.prepare = originalPrepare;
+          else Reflect.deleteProperty(raw, "prepare");
+        };
+      },
+      (raw: { prepare: (sql: string) => unknown }) => {
+        const prototype = Object.getPrototypeOf(raw) as {
+          prepare: (sql: string) => unknown;
+        };
+        const originalPrepare = prototype.prepare;
+        prototype.prepare = forgedPrepare(raw, originalPrepare);
+        return () => {
+          prototype.prepare = originalPrepare;
+        };
+      },
+    ]) {
+      const directory = await mkdtemp(
+        join(tmpdir(), "revelai-c8-cleaner-raw-mutation-"),
+      );
+      directories.push(directory);
+      const database = openSqliteDatabase(join(directory, "api.sqlite"));
+      const mediaId = "22222222-2222-4222-8222-222222222222";
+      const frameBatchId = "33333333-3333-4333-8333-333333333333";
+      const c5 = createC5PipelineTestSupport({
+        root: join(directory, "media"),
+      });
+      await c5.storage.initialize();
+      const original = join(
+        directory,
+        "media",
+        "originals",
+        mediaId,
+        "payload",
+      );
+      const frame = join(
+        directory,
+        "media",
+        "frames",
+        frameBatchId,
+        "frame.jpg",
+      );
+      await mkdir(join(directory, "media", "originals", mediaId));
+      await mkdir(join(directory, "media", "frames", frameBatchId));
+      await Promise.all([
+        writeFile(original, "must survive raw mutation"),
+        writeFile(frame, "must survive raw mutation"),
+      ]);
+      const raw = database.raw as unknown as {
+        prepare: (sql: string) => unknown;
+      };
+      const restorePrepare = mutatePrepare(raw);
+      let repository: SQLiteAttemptRepository;
+      try {
+        repository = new SQLiteAttemptRepository({
+          database,
+          clock: { now: () => "2030-01-15T12:00:00.000Z" },
+          ids: { next: () => "11111111-1111-4111-8111-111111111111" },
+          handoffVerifier: c5.handoffVerifier,
+        });
+      } finally {
+        restorePrepare();
+      }
+
+      try {
+        const cleaner = createLocalC8AcceptedMediaCleaner({
+          storage: c5.storage,
+          repository: repository!,
+        });
+        await expect(
+          cleaner.cleanup({
+            attemptId: "44444444-4444-4444-8444-444444444444",
+            mediaId,
+            frameBatchId,
+          }),
+        ).rejects.toThrow("C8 cleaner ownership mismatch.");
+        await expect(readFile(original, "utf8")).resolves.toBe(
+          "must survive raw mutation",
+        );
+        await expect(readFile(frame, "utf8")).resolves.toBe(
+          "must survive raw mutation",
+        );
+      } finally {
+        database.close();
+      }
+    }
+  });
+
   it("binds cleanup ownership to the factory-issued repository rather than a mutable instance method", async () => {
     const directory = await mkdtemp(join(tmpdir(), "revelai-c8-cleaner-"));
     directories.push(directory);
@@ -289,3 +382,14 @@ describe("local C8 accepted-media cleaner", () => {
     database.close();
   });
 });
+
+function forgedPrepare(
+  raw: { prepare: (sql: string) => unknown },
+  originalPrepare: (sql: string) => unknown,
+): (sql: string) => unknown {
+  return (sql) => {
+    if (sql.includes("media_retention_records"))
+      return Object.freeze({ get: () => ({ originals: 1, frames: 1 }) });
+    return originalPrepare.call(raw, sql);
+  };
+}

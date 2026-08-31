@@ -20,8 +20,22 @@ export type SqliteDatabase = Readonly<{
   close(): void;
 }>;
 
+export type C4AcceptedMediaCleanupAuthority = Readonly<{
+  ownsExactAcceptedMediaCleanupPair(
+    input: Readonly<{
+      attemptId: string;
+      mediaId: string;
+      frameBatchId: string;
+    }>,
+  ): Promise<boolean>;
+}>;
+
 /** Only this module can issue a database wrapper accepted by C4 composition. */
 const sqliteDatabaseCapabilities = new WeakSet<object>();
+const c4AcceptedMediaCleanupAuthorities = new WeakMap<
+  object,
+  C4AcceptedMediaCleanupAuthority
+>();
 
 export function isFactoryIssuedSqliteDatabase(
   value: unknown,
@@ -31,6 +45,18 @@ export function isFactoryIssuedSqliteDatabase(
     value !== null &&
     sqliteDatabaseCapabilities.has(value)
   );
+}
+
+/**
+ * Resolves only the cleanup query sealed before this factory exposes raw SQL.
+ * Callers can receive the opaque authority only for this exact wrapper; they
+ * can never cause it to compile against a mutable public raw method.
+ */
+export function resolveFactoryIssuedC4AcceptedMediaCleanupAuthority(
+  value: unknown,
+): C4AcceptedMediaCleanupAuthority | undefined {
+  if (!isFactoryIssuedSqliteDatabase(value)) return undefined;
+  return c4AcceptedMediaCleanupAuthorities.get(value);
 }
 
 const migrations: readonly Migration[] = [
@@ -792,13 +818,69 @@ function openSqliteDatabaseInternal(
     throw error;
   }
 
+  const cleanupAuthority = createC4AcceptedMediaCleanupAuthority(raw);
   const database = Object.freeze({
     raw,
     reopen: () => openSqliteDatabaseInternal(filename, migrationVersion),
     close: () => raw.close(),
   });
   sqliteDatabaseCapabilities.add(database);
+  if (cleanupAuthority)
+    c4AcceptedMediaCleanupAuthorities.set(database, cleanupAuthority);
   return database;
+}
+
+/**
+ * Captures the exact SQLite methods and statement while opening the factory
+ * wrapper. The public `raw` reference exists for repository work, but later
+ * own/prototype mutations cannot redirect this C8 cleanup ownership decision.
+ */
+function createC4AcceptedMediaCleanupAuthority(
+  raw: Database.Database,
+): C4AcceptedMediaCleanupAuthority | undefined {
+  const cleanupTables = raw
+    .prepare(
+      "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN ('media_retention_records', 'retention_cleanup_records')",
+    )
+    .get() as Readonly<{ count: number }>;
+  if (cleanupTables.count !== 2) return undefined;
+  const execute = raw.exec.bind(raw);
+  const query = raw.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM media_retention_records
+         WHERE attempt_id = ? AND media_id = ?) AS originals,
+       (SELECT COUNT(*) FROM retention_cleanup_records
+         WHERE attempt_id = ? AND resource_id = ?
+           AND resource_kind = 'frame') AS frames`,
+  );
+  const get = query.get.bind(query);
+
+  return Object.freeze({
+    async ownsExactAcceptedMediaCleanupPair(input): Promise<boolean> {
+      let began = false;
+      try {
+        execute("BEGIN IMMEDIATE");
+        began = true;
+        const row = get(
+          input.attemptId,
+          input.mediaId,
+          input.attemptId,
+          input.frameBatchId,
+        ) as Readonly<{ originals: number; frames: number }>;
+        execute("COMMIT");
+        began = false;
+        return row.originals === 1 && row.frames === 1;
+      } catch (error) {
+        if (began)
+          try {
+            execute("ROLLBACK");
+          } catch {
+            // The original query failure is the only useful authority result.
+          }
+        throw error;
+      }
+    },
+  });
 }
 
 function applyMigrations(

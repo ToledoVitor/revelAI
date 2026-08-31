@@ -234,11 +234,17 @@ export function createC8RecoveryRuntime(
         productionRuntimeByRepository.delete(input.repository);
     },
   });
-  runtime.start();
-  // Starting includes scheduler registration. A synchronous failure must not
-  // leave an inert runtime in the WeakMap for a later composition to inherit.
   productionRuntimeByRepository.set(input.repository, runtime);
-  return runtime;
+  try {
+    runtime.start();
+    return runtime;
+  } catch (error) {
+    // Starting includes scheduler registration. A synchronous failure must not
+    // leave an inert runtime in the WeakMap for a later composition to inherit.
+    if (productionRuntimeByRepository.get(input.repository) === runtime)
+      productionRuntimeByRepository.delete(input.repository);
+    throw error;
+  }
 }
 
 class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
