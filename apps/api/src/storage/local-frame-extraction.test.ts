@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type MediaProbe } from "../media/probe.js";
+import { verifiedExtractionCapability } from "../media/extraction-manifest.js";
 import { LocalFrameExtraction } from "./local-frame-extraction.js";
 
 const attemptId = "11111111-1111-4111-8111-111111111111";
@@ -64,6 +65,8 @@ describe("LocalFrameExtraction", () => {
       preRoll: { count: 40 },
       active: { count: 600 },
     });
+    if (manifest.mode !== "verified") throw new Error("wrong fixture mode");
+    expect(() => verifiedExtractionCapability(manifest)).not.toThrow();
     await expect(
       extractor.readFrame(manifest.frames.items[0]!.reference),
     ).resolves.toEqual(jpeg(0));

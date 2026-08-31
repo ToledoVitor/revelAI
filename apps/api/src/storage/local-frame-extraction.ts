@@ -13,6 +13,7 @@ import {
 import { basename, join, resolve } from "node:path";
 import { decode } from "jpeg-js";
 import {
+  attestVerifiedExtractionContinuity,
   createExtractionManifest,
   type ExtractedFrame,
   type ExtractionManifest,
@@ -185,6 +186,8 @@ export class LocalFrameExtraction {
         batchId,
       );
       const manifest = createExtractionManifest({ ...input, frames });
+      if (manifest.mode === "verified")
+        attestVerifiedExtractionContinuity(manifest, evidence.scenes);
       await publishFrameSet(staging, published);
       return manifest;
     } catch (error) {

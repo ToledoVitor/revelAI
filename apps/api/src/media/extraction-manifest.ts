@@ -14,6 +14,36 @@ type ManifestFrame = Readonly<{
   reference: string;
 }>;
 
+type VerifiedExtractionFrame = Readonly<{
+  ordinal: number;
+  reference: string;
+  sourceSha256: string;
+}>;
+
+/**
+ * Opaque C5 capability. Its associated bytes are never serialized into a
+ * manifest; C6 can only prove a read against this exact, locally issued
+ * extraction through the helpers below.
+ */
+export type VerifiedExtractionCapability = Readonly<{
+  kind: "verified-extraction-capability";
+}>;
+
+type VerifiedExtractionData = Readonly<{
+  manifest: Extract<ExtractionManifest, Readonly<{ mode: "verified" }>>;
+  frames: readonly VerifiedExtractionFrame[];
+  continuityIdentity: string | null;
+}>;
+
+const verifiedExtractionCapabilities = new WeakMap<
+  Extract<ExtractionManifest, Readonly<{ mode: "verified" }>>,
+  VerifiedExtractionCapability
+>();
+const verifiedExtractionData = new WeakMap<
+  VerifiedExtractionCapability,
+  VerifiedExtractionData
+>();
+
 type ManifestBase = Readonly<{
   kind: "extraction-manifest";
   extractionVersion: "c5-frame-manifest-v1";
@@ -64,7 +94,7 @@ export function createExtractionManifest(
   const items = input.frames.map((frame, ordinal) => frameItem(frame, ordinal));
   if (input.mode === "verified") {
     assertVerifiedFrames(input.frames);
-    return freezeManifest({
+    const manifest = freezeManifest({
       kind: "extraction-manifest",
       extractionVersion: "c5-frame-manifest-v1",
       mode: "verified",
@@ -94,6 +124,8 @@ export function createExtractionManifest(
         )
         .digest("hex"),
     });
+    issueVerifiedExtractionCapability(manifest, input.frames);
+    return manifest;
   }
   assertFreeFrames(input.frames, input.probe.durationSeconds);
   return freezeManifest({
@@ -142,6 +174,117 @@ export function verifiedExtractionIdentity(
       }),
     )
     .digest("hex");
+}
+
+/** Returns the non-structural C5 capability for this exact in-memory result. */
+export function verifiedExtractionCapability(
+  manifest: Extract<ExtractionManifest, Readonly<{ mode: "verified" }>>,
+): VerifiedExtractionCapability {
+  const capability = verifiedExtractionCapabilities.get(manifest);
+  if (
+    !capability ||
+    verifiedExtractionData.get(capability)?.continuityIdentity === null
+  )
+    throw new Error("verified continuity evidence required");
+  return capability;
+}
+
+/**
+ * C5's scene-cut gate attaches its ordered, measured active-frame evidence to
+ * the exact materialized extraction. The manifest remains redacted; only the
+ * private capability retains the continuity identity.
+ */
+export function attestVerifiedExtractionContinuity(
+  manifest: Extract<ExtractionManifest, Readonly<{ mode: "verified" }>>,
+  active: readonly Readonly<{ timestampSeconds: number; score: number }>[],
+): void {
+  const capability = verifiedExtractionCapabilities.get(manifest);
+  const data = capability && verifiedExtractionData.get(capability);
+  if (!capability || !data || active.length !== 600)
+    throw new Error("invalid verified continuity evidence");
+  const expected = manifest.frames.items.slice(40);
+  if (
+    active.some(
+      (scene, index) =>
+        scene.timestampSeconds !== expected[index]!.timestampSeconds ||
+        !Number.isFinite(scene.score) ||
+        scene.score < 0 ||
+        scene.score >= 0.42 ||
+        (index > 0 &&
+          scene.timestampSeconds <= active[index - 1]!.timestampSeconds),
+    )
+  )
+    throw new Error("invalid verified continuity evidence");
+  verifiedExtractionData.set(
+    capability,
+    Object.freeze({
+      ...data,
+      continuityIdentity: createHash("sha256")
+        .update(
+          JSON.stringify(
+            active.map((scene) => [scene.timestampSeconds, scene.score]),
+          ),
+        )
+        .digest("hex"),
+    }),
+  );
+}
+
+/**
+ * Validates an OpaqueFrameReader byte read against the source frame C5
+ * materialized. A different reference, ordinal, or byte sequence is terminal
+ * evidence corruption, never a fresh extraction.
+ */
+export function assertVerifiedExtractionFrame(
+  capability: VerifiedExtractionCapability,
+  input: Readonly<{ ordinal: number; reference: string; bytes: Uint8Array }>,
+): string {
+  const data = verifiedExtractionData.get(capability);
+  const expected = data?.frames[input.ordinal];
+  if (
+    !expected ||
+    expected.reference !== input.reference ||
+    !(input.bytes instanceof Uint8Array) ||
+    createHash("sha256").update(input.bytes).digest("hex") !==
+      expected.sourceSha256
+  )
+    throw new Error("verified extraction frame mismatch");
+  return expected.sourceSha256;
+}
+
+/** Private continuity identity incorporated into the C5→C6 execution proof. */
+export function verifiedExtractionContinuityIdentity(
+  capability: VerifiedExtractionCapability,
+): string {
+  const identity = verifiedExtractionData.get(capability)?.continuityIdentity;
+  if (!identity) throw new Error("verified continuity evidence required");
+  return identity;
+}
+
+function issueVerifiedExtractionCapability(
+  manifest: Extract<ExtractionManifest, Readonly<{ mode: "verified" }>>,
+  frames: readonly ExtractedFrame[],
+): void {
+  const capability = Object.freeze({
+    kind: "verified-extraction-capability" as const,
+  });
+  const data: VerifiedExtractionData = Object.freeze({
+    manifest,
+    frames: Object.freeze(
+      frames.map((frame, ordinal) =>
+        Object.freeze({
+          ordinal,
+          reference: frame.reference,
+          sourceSha256: createHash("sha256")
+            .update(frame.rawBytes)
+            .digest("hex"),
+        }),
+      ),
+    ),
+    continuityIdentity: null,
+  });
+  verifiedExtractionCapabilities.set(manifest, capability);
+  verifiedExtractionData.set(capability, data);
 }
 
 /** Strict persisted-input boundary; manifests never carry local filesystem paths. */

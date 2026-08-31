@@ -1,5 +1,8 @@
 import { createDemoVisionProvider, type VisionProvider } from "@revelai/vision";
-import { createExtractionManifest } from "../media/extraction-manifest.js";
+import {
+  attestVerifiedExtractionContinuity,
+  createExtractionManifest,
+} from "../media/extraction-manifest.js";
 import { assembleVerifiedObservation } from "./observation-assembler.js";
 import {
   evaluateVerifiedIntegrity,
@@ -37,14 +40,21 @@ export async function verifiedCandidateFixture(
     })),
   });
   if (manifest.mode !== "verified") throw new Error("fixture must be verified");
+  attestVerifiedExtractionContinuity(
+    manifest,
+    manifest.frames.items.slice(40).map((frame) => ({
+      timestampSeconds: frame.timestampSeconds,
+      score: 0.1,
+    })),
+  );
   const evidence = await assembleVerifiedObservation({
     manifest,
     provider: fixtureProvider(provenance),
     calibrationSessionId: sessionId,
     calibrationNonce: nonce,
     frames: {
-      async readFrame() {
-        return Uint8Array.of(1);
+      async readFrame(reference) {
+        return Uint8Array.of(Number(reference.replace("frame_", "")) % 256);
       },
     },
   });

@@ -14,12 +14,15 @@ export type WallPassCanonicalContact = Readonly<{
   timestampMs: number;
   side: FootSide;
   sideConfidence: number;
+  /** C6 partition identity; legacy C3 fixtures are one implicit track. */
+  trackId?: number;
   outbound: CanonicalOutboundMovement;
 }>;
 
 export type WallPassCanonicalImpact = Readonly<{
   timestampMs: number;
   confidence: number;
+  trackId?: number;
 }>;
 
 export type WallPassCanonicalEvidence = Readonly<{
@@ -121,7 +124,9 @@ export function assertWallPassCanonicalEvidence(
       !isConfidenceAtLeast(
         contact.sideConfidence,
         WALL_PASS_V1_SCORE_RULE.confidence.minimumAnatomicalFoot,
-      )
+      ) ||
+      (contact.trackId !== undefined &&
+        (!Number.isSafeInteger(contact.trackId) || contact.trackId < 0))
     ) {
       invalidEvidence();
     }
@@ -139,7 +144,9 @@ export function assertWallPassCanonicalEvidence(
       !isConfidenceAtLeast(
         wallImpact.confidence,
         WALL_PASS_V1_SCORE_RULE.confidence.minimumBallAndAthlete,
-      )
+      ) ||
+      (wallImpact.trackId !== undefined &&
+        (!Number.isSafeInteger(wallImpact.trackId) || wallImpact.trackId < 0))
     ) {
       invalidEvidence();
     }

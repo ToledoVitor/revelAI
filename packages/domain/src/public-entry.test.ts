@@ -609,6 +609,22 @@ describe("wall-pass metrics and score", () => {
     expect(result.missedPasses).toBe(1);
   });
 
+  it("does not join a marker-loss contact and impact across track partitions", () => {
+    const result = evaluateWallPassV1({
+      contacts: [
+        { ...contact(4_000, "left", outbound()), trackId: 0 },
+        { ...contact(5_000, "right"), trackId: 1 },
+      ],
+      wallImpacts: [{ ...impact(4_800), trackId: 1 }],
+    });
+
+    expect(result).toMatchObject({
+      opportunities: 1,
+      missedPasses: 1,
+      metrics: { validPasses: 0 },
+    });
+  });
+
   it("accepts canonical confidence boundaries and rejects lower confidence", () => {
     expect(
       evaluateWallPassV1({

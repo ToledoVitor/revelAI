@@ -126,10 +126,13 @@ function findCompletedPasses(
       continue;
     }
 
-    const returnContact = evidence.contacts[index + 1];
+    const returnContact = evidence.contacts
+      .slice(index + 1)
+      .find((contact) => sameTrack(contact, startingContact));
     const nextWallImpact = findNextWallImpact(
       evidence.wallImpacts,
       startingContact.timestampMs,
+      startingContact,
     );
 
     if (
@@ -152,10 +155,20 @@ function findCompletedPasses(
 function findNextWallImpact(
   wallImpacts: readonly WallPassCanonicalImpact[],
   contactTimestampMs: number,
+  contact: WallPassCanonicalContact,
 ): WallPassCanonicalImpact | undefined {
   return wallImpacts.find(
-    (wallImpact) => wallImpact.timestampMs > contactTimestampMs,
+    (wallImpact) =>
+      wallImpact.timestampMs > contactTimestampMs &&
+      sameTrack(wallImpact, contact),
   );
+}
+
+function sameTrack(
+  left: Readonly<{ trackId?: number }>,
+  right: Readonly<{ trackId?: number }>,
+): boolean {
+  return (left.trackId ?? 0) === (right.trackId ?? 0);
 }
 
 function isCompletedPass(

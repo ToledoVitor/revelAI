@@ -12,9 +12,15 @@ import {
   isAssembledVerifiedEvidence,
   type VerifiedObservationEvidence,
 } from "@revelai/vision";
+import {
+  c5BoundEvidenceExecution,
+  isC5BoundVerifiedEvidence,
+} from "./verified-observation-execution.js";
+import { verifiedVisionRequestExecutionData } from "./frame-extractor.js";
 import { isMediaProbeAdmissible } from "../media/eligibility.js";
 import {
   parseExtractionManifest,
+  verifiedExtractionCapability,
   verifiedExtractionIdentity,
   type ExtractionManifest,
 } from "../media/extraction-manifest.js";
@@ -44,6 +50,10 @@ type CandidateData = Readonly<{
   scoreEvidence: VerifiedObservationEvidence["canonicalEvents"];
   provenance: VerifiedObservationEvidence["provenance"];
   calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1";
+  execution: Readonly<{
+    schedulerId: "verified-wall-pass-image-scheduler-v1";
+    samplingId: "wall-pass-v1-10fps-640-v1";
+  }>;
 }>;
 
 const verifiedCandidates = new WeakSet<object>();
@@ -87,6 +97,10 @@ export type PublicIntegrityDecision =
 export type CandidatePolicyFacts = Readonly<{
   provenance: VerifiedObservationEvidence["provenance"];
   calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1";
+  execution: Readonly<{
+    schedulerId: "verified-wall-pass-image-scheduler-v1";
+    samplingId: "wall-pass-v1-10fps-640-v1";
+  }>;
 }>;
 
 /** Rejects structural JSON: evidence must be C6's frozen, registered output. */
@@ -96,7 +110,9 @@ export function evaluateVerifiedIntegrity(input: unknown): IntegrityDecision {
   const manifest = parseManifest(parsed.manifest);
   if (!manifest || !isMediaProbeAdmissible("verified", manifest.probe))
     return invalid("video_not_continuous");
-  if (!sameBinding(parsed.evidence, manifest, parsed.expected))
+  const execution = c5BoundEvidenceExecution(parsed.evidence);
+  const executionData = verifiedVisionRequestExecutionData(execution);
+  if (!sameBinding(parsed.evidence, manifest, parsed.expected, executionData))
     return invalid("video_not_continuous");
   if (!hasVerifiedCalibration(parsed.evidence))
     return invalid("calibration_not_verified");
@@ -117,6 +133,10 @@ export function evaluateVerifiedIntegrity(input: unknown): IntegrityDecision {
       scoreEvidence: parsed.evidence.canonicalEvents,
       provenance: parsed.evidence.provenance,
       calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+      execution: Object.freeze({
+        schedulerId: executionData.schedulerId,
+        samplingId: executionData.samplingId,
+      }),
     }),
   );
   verifiedCandidates.add(candidate);
@@ -138,6 +158,7 @@ export function candidatePolicyFacts(
   return Object.freeze({
     provenance: data.provenance,
     calibrationEvidenceVersion: data.calibrationEvidenceVersion,
+    execution: data.execution,
   });
 }
 
@@ -189,7 +210,12 @@ function parseInput(value: unknown): Readonly<{
   )
     return null;
   const expected = parseExpected(value.expected);
-  if (!expected || !isAssembledVerifiedEvidence(value.evidence)) return null;
+  if (
+    !expected ||
+    !isAssembledVerifiedEvidence(value.evidence) ||
+    !isC5BoundVerifiedEvidence(value.evidence)
+  )
+    return null;
   return Object.freeze({
     expected,
     manifest: value.manifest as ExtractionManifest,
@@ -239,17 +265,36 @@ function parseManifest(
   value: unknown,
 ): Extract<ExtractionManifest, Readonly<{ mode: "verified" }>> | null {
   try {
-    const manifest = parseExtractionManifest(value);
-    return manifest.mode === "verified" ? manifest : null;
+    const parsed = parseExtractionManifest(value);
+    if (parsed.mode !== "verified" || !isVerifiedManifest(value)) return null;
+    verifiedExtractionCapability(value);
+    return value;
   } catch {
     return null;
   }
+}
+
+function isVerifiedManifest(
+  value: unknown,
+): value is Extract<ExtractionManifest, Readonly<{ mode: "verified" }>> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "mode" in value &&
+    value.mode === "verified"
+  );
 }
 
 function sameBinding(
   evidence: VerifiedObservationEvidence,
   manifest: Extract<ExtractionManifest, Readonly<{ mode: "verified" }>>,
   expected: ExpectedAttempt,
+  execution: Readonly<{
+    manifest: Extract<ExtractionManifest, Readonly<{ mode: "verified" }>>;
+    extractionIdentity: string;
+    schedulerId: "verified-wall-pass-image-scheduler-v1";
+    samplingId: "wall-pass-v1-10fps-640-v1";
+  }>,
 ): boolean {
   const binding = evidence.binding;
   return (
@@ -260,13 +305,17 @@ function sameBinding(
     binding.rawPreRollSha256 === expected.rawPreRollSha256 &&
     binding.calibrationSessionId === expected.calibrationSessionId &&
     binding.calibrationNonce === expected.calibrationNonce &&
+    manifest === execution.manifest &&
     manifest.attemptId === expected.attemptId &&
     manifest.generation === expected.generation &&
     manifest.mediaId === expected.mediaId &&
     manifest.mediaSha256 === expected.mediaSha256 &&
     manifest.rawPreRollSha256 === expected.rawPreRollSha256 &&
     binding.extractionVersion === manifest.extractionVersion &&
-    binding.extractionIdentity === verifiedExtractionIdentity(manifest)
+    binding.extractionIdentity === verifiedExtractionIdentity(manifest) &&
+    binding.executionIdentity === execution.extractionIdentity &&
+    binding.schedulerId === execution.schedulerId &&
+    binding.samplingId === execution.samplingId
   );
 }
 
@@ -313,7 +362,7 @@ function acceptedGeometry(
 ): boolean {
   return (
     geometry.valid &&
-    geometry.inlierCount >= 8 &&
+    geometry.inlierCount >= 4 &&
     geometry.medianReprojectionError !== null &&
     geometry.medianReprojectionError >= 0 &&
     geometry.medianReprojectionError <= MAX_MEDIAN_REPROJECTION_ERROR &&
@@ -341,10 +390,23 @@ function hasBoundCanonicalEvents(
   const activeByFrame = new Map(
     evidence.active.map((frame) => [frame.frameIndex, frame]),
   );
+  const expectedEvents = [
+    ...evidence.canonicalEvents.contacts.map((contact) => ({
+      kind: "contact" as const,
+      timestampMs: contact.timestampMs,
+      trackId: contact.trackId,
+    })),
+    ...evidence.canonicalEvents.wallImpacts.map((impact) => ({
+      kind: "wall-impact" as const,
+      timestampMs: impact.timestampMs,
+      trackId: impact.trackId,
+    })),
+  ];
+  if (evidence.eventGraph.length !== expectedEvents.length) return false;
   let prior = -1;
   const seen = new Set<string>();
   for (const event of evidence.eventGraph) {
-    const key = `${event.kind}:${event.timestampMs}`;
+    const key = `${event.kind}:${event.timestampMs}:${event.trackId}`;
     const frame = activeByFrame.get(event.frameIndex);
     if (
       event.timestampMs <= prior ||
@@ -353,27 +415,19 @@ function hasBoundCanonicalEvents(
       !Number.isSafeInteger(event.trackId) ||
       event.trackId < 0 ||
       !frame?.stable ||
-      !acceptedGeometry(frame.geometry)
+      !acceptedGeometry(frame.geometry) ||
+      !expectedEvents.some(
+        (expected) =>
+          expected.kind === event.kind &&
+          expected.timestampMs === event.timestampMs &&
+          expected.trackId === event.trackId,
+      )
     )
       return false;
     prior = event.timestampMs;
     seen.add(key);
   }
-  return (
-    evidence.canonicalEvents.contacts.every((contact) =>
-      evidence.eventGraph.some(
-        (event) =>
-          event.kind === "contact" && event.timestampMs === contact.timestampMs,
-      ),
-    ) &&
-    evidence.canonicalEvents.wallImpacts.every((impact) =>
-      evidence.eventGraph.some(
-        (event) =>
-          event.kind === "wall-impact" &&
-          event.timestampMs === impact.timestampMs,
-      ),
-    )
-  );
+  return seen.size === expectedEvents.length;
 }
 
 function longestUnstableRun(

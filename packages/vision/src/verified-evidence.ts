@@ -21,6 +21,7 @@ type CanonicalScoreEvidence = Readonly<{
     timestampMs: number;
     side: "left" | "right";
     sideConfidence: number;
+    trackId: number;
     outbound:
       | Readonly<{ kind: "not-outbound" }>
       | Readonly<{
@@ -29,7 +30,11 @@ type CanonicalScoreEvidence = Readonly<{
           observedWithinMs: number;
         }>;
   }>[];
-  wallImpacts: readonly Readonly<{ timestampMs: number; confidence: number }>[];
+  wallImpacts: readonly Readonly<{
+    timestampMs: number;
+    confidence: number;
+    trackId: number;
+  }>[];
 }>;
 
 export type VerifiedEvidenceBinding = Readonly<{
@@ -43,6 +48,10 @@ export type VerifiedEvidenceBinding = Readonly<{
   /** C5's immutable identity for the exact decoded extraction. */
   extractionVersion?: "c5-frame-manifest-v1";
   extractionIdentity?: string;
+  /** C5/C6 private execution identity, checked again by the API boundary. */
+  executionIdentity?: string;
+  schedulerId?: "verified-wall-pass-image-scheduler-v1";
+  samplingId?: "wall-pass-v1-10fps-640-v1";
 }>;
 
 export type VerifiedObservationEvidence = Readonly<{
@@ -172,20 +181,25 @@ export function assembleVerifiedEvidence(
           timestampMs: contact.timestampMs,
           side: contact.side,
           sideConfidence: contact.confidence,
+          trackId: contact.trackId,
           outbound: outboundMovement(ballTracks, contact),
         }),
       ),
     ),
     wallImpacts: Object.freeze(
       wallImpacts.map((impact) =>
-        Object.freeze({ timestampMs: impact.timestampMs, confidence: 0.7 }),
+        Object.freeze({
+          timestampMs: impact.timestampMs,
+          confidence: 0.7,
+          trackId: impact.trackId,
+        }),
       ),
     ),
   });
   const result: VerifiedObservationEvidence = Object.freeze({
     kind: "wall-pass-geometry-evidence-v1",
     binding: Object.freeze({ ...input.binding }),
-    provenance: batch.provenance,
+    provenance: freezeProvenance(batch.provenance),
     selectedReferenceFrameIndex: reference?.reference.frameIndex ?? null,
     referenceDistanceSums: reference?.distances ?? Object.freeze({}),
     preRoll: Object.freeze(preRoll),
@@ -241,6 +255,18 @@ function assertVerifiedBinding(binding: VerifiedEvidenceBinding): void {
     !/^[A-Za-z0-9_-]{43}$/.test(binding.calibrationNonce)
   )
     throw new Error("invalid verified evidence binding");
+  const executionFields = [
+    binding.executionIdentity,
+    binding.schedulerId,
+    binding.samplingId,
+  ];
+  if (
+    executionFields.some((value) => value !== undefined) &&
+    (!/^[a-f0-9]{64}$/.test(binding.executionIdentity ?? "") ||
+      binding.schedulerId !== "verified-wall-pass-image-scheduler-v1" ||
+      binding.samplingId !== "wall-pass-v1-10fps-640-v1")
+  )
+    throw new Error("invalid verified evidence execution binding");
 }
 
 function assertVerifiedTimeline(
@@ -626,6 +652,25 @@ function missedPass(
     deadlineAtMs: contact.timestampMs + 4000,
     side: contact.side,
   });
+}
+
+function freezeProvenance(
+  provenance: VerifiedVisionObservationBatch["provenance"],
+): VerifiedVisionObservationBatch["provenance"] {
+  return provenance.kind === "demo"
+    ? Object.freeze({
+        kind: "demo" as const,
+        fixtureId: provenance.fixtureId,
+        providerVersion: provenance.providerVersion,
+      })
+    : Object.freeze({
+        kind: "roboflow" as const,
+        workspaceId: provenance.workspaceId,
+        workflowId: provenance.workflowId,
+        workflowVersion: provenance.workflowVersion,
+        modelBundleId: provenance.modelBundleId,
+        providerVersion: provenance.providerVersion,
+      });
 }
 
 function longestRun(values: readonly boolean[]): number {

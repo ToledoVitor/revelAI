@@ -6,6 +6,7 @@ import type {
   CompetitivePolicyActivation,
   CompetitivePolicyTuple,
 } from "../repositories/competitive-policy-repository.js";
+import { CompetitivePolicyLookupUnavailableError } from "../repositories/competitive-policy-repository.js";
 import {
   candidatePolicyFacts,
   type VerifiedAttemptCandidate,
@@ -68,10 +69,17 @@ export async function evaluateCompetitiveEligibility(
   let activation: CompetitivePolicyActivation | null;
   try {
     activation = await input.repository.getActivePolicy(query);
-  } catch {
-    return temporaryCompetitivePolicyDecision();
+  } catch (error) {
+    return error instanceof CompetitivePolicyLookupUnavailableError
+      ? temporaryCompetitivePolicyDecision()
+      : experimental();
   }
-  return isCurrentExactPolicy(activation, query, input.clock.now())
+  return isCurrentExactPolicy(
+    activation,
+    query,
+    facts.execution,
+    input.clock.now(),
+  )
     ? eligible()
     : experimental();
 }
@@ -88,6 +96,10 @@ export function temporaryCompetitivePolicyDecision(): CompetitiveEligibilityDeci
 function isCurrentExactPolicy(
   activation: CompetitivePolicyActivation | null,
   query: CompetitivePolicyTuple,
+  execution: Readonly<{
+    schedulerId: "verified-wall-pass-image-scheduler-v1";
+    samplingId: "wall-pass-v1-10fps-640-v1";
+  }>,
   now: string,
 ): boolean {
   if (!activation || !isUtcTimestamp(now) || !sameTuple(activation, query))
@@ -103,6 +115,8 @@ function isCurrentExactPolicy(
     receipt.data.workflow.workflowVersion === activation.workflowVersion &&
     receipt.data.workflow.modelBundleId === activation.modelBundleId &&
     receipt.data.workflow.providerVersion === activation.providerVersion &&
+    receipt.data.scheduler.id === execution.schedulerId &&
+    receipt.data.sampling.id === execution.samplingId &&
     receipt.data.status === "passed" &&
     receipt.data.invalidatedAt === null &&
     receipt.data.invalidationReason === null &&

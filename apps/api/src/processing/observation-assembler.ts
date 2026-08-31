@@ -11,9 +11,12 @@ import {
   type ExtractionManifest,
 } from "../media/extraction-manifest.js";
 import {
+  bindVerifiedVisionRequestExecution,
   extractionManifestToVisionRequests,
+  verifiedVisionRequestExecution,
   type OpaqueFrameReader,
 } from "./frame-extractor.js";
+import { registerC5BoundVerifiedEvidence } from "./verified-observation-execution.js";
 
 export async function assembleFreeObservation(
   input: Readonly<{
@@ -57,6 +60,7 @@ export async function assembleVerifiedObservation(
     frames: input.frames,
     signal: input.signal,
   });
+  const execution = verifiedVisionRequestExecution(input.manifest, requests);
   const batch = await analyzeBatch(
     input.provider,
     requests,
@@ -65,7 +69,8 @@ export async function assembleVerifiedObservation(
   );
   if (batch.kind !== "verified-wall-pass")
     throw new Error("cross-kind observation batch");
-  return assembleVerifiedEvidence({
+  const executionData = bindVerifiedVisionRequestExecution(execution, batch);
+  const evidence = assembleVerifiedEvidence({
     batch,
     binding: {
       attemptId: input.manifest.attemptId,
@@ -77,6 +82,11 @@ export async function assembleVerifiedObservation(
       calibrationNonce: input.calibrationNonce,
       extractionVersion: input.manifest.extractionVersion,
       extractionIdentity: verifiedExtractionIdentity(input.manifest),
+      executionIdentity: executionData.extractionIdentity,
+      schedulerId: executionData.schedulerId,
+      samplingId: executionData.samplingId,
     },
   });
+  registerC5BoundVerifiedEvidence(evidence, execution);
+  return evidence;
 }
