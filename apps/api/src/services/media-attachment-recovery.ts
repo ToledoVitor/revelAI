@@ -70,10 +70,7 @@ export interface C8RecoveryRuntimeHandle {
 }
 
 /** One app composition owns one scheduler for one C4 repository instance. */
-const productionRuntimeByRepository = new WeakMap<
-  object,
-  C8RecoveryRuntimeHandle
->();
+const productionRuntimeByRepository = new WeakMap<object, C8RecoveryRuntime>();
 
 /**
  * Bounded durable compensation executor. C4 owns state transitions and C5
@@ -229,9 +226,17 @@ export function createC8RecoveryRuntime(
 ): C8RecoveryRuntimeHandle {
   const existing = productionRuntimeByRepository.get(input.repository);
   if (existing) return existing;
-  const runtime = new C8RecoveryRuntime(input);
-  productionRuntimeByRepository.set(input.repository, runtime);
+  const runtime = new C8RecoveryRuntime({
+    ...input,
+    onStopped: () => {
+      if (productionRuntimeByRepository.get(input.repository) === runtime)
+        productionRuntimeByRepository.delete(input.repository);
+    },
+  });
   runtime.start();
+  // Starting includes scheduler registration. A synchronous failure must not
+  // leave an inert runtime in the WeakMap for a later composition to inherit.
+  productionRuntimeByRepository.set(input.repository, runtime);
   return runtime;
 }
 
@@ -248,6 +253,7 @@ class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
   private scheduledHandle: unknown;
   private inFlight: Promise<void> | undefined;
   private stopping: Promise<void> | undefined;
+  private readonly onStopped: () => void;
 
   public constructor(
     input: Readonly<{
@@ -259,6 +265,7 @@ class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
       scheduler?: HourlyRecoveryScheduler;
       maxBatchSize: number;
       now?: () => string;
+      onStopped: () => void;
     }>,
   ) {
     if (!Number.isSafeInteger(input.maxBatchSize) || input.maxBatchSize < 1)
@@ -279,23 +286,29 @@ class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
     this.log = input.log;
     this.maxBatchSize = input.maxBatchSize;
     this.now = input.now ?? (() => new Date().toISOString());
+    this.onStopped = input.onStopped;
   }
 
-  public start(now = this.now()): () => void {
-    if (!this.started && !this.stopped) {
-      this.started = true;
-      this.startRun(now);
+  /** Start exactly once; successful registration is required before caching. */
+  public start(): void {
+    if (this.started || this.stopped) return;
+    this.started = true;
+    try {
+      this.startRun(this.now());
       this.scheduledHandle = this.scheduler?.everyHour(() => {
+        if (this.stopped) return;
         try {
           this.startRun(this.now());
         } catch {
           this.logRunFailure();
         }
       });
-    }
-    return () => {
+    } catch (error) {
+      // Immediate recovery is already contained by runSafely. Begin shutdown
+      // without awaiting it so startup still reports the scheduler failure.
       void this.stop();
-    };
+      throw error;
+    }
   }
 
   /** Shutdown first prevents new callbacks, then drains active recovery. */
@@ -310,7 +323,15 @@ class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
       } catch {
         this.logRunFailure();
       }
-    this.stopping = this.drain();
+    this.stopping = this.drain()
+      .catch(() => this.logRunFailure())
+      .then(() => {
+        try {
+          this.onStopped();
+        } catch {
+          this.logRunFailure();
+        }
+      });
     return this.stopping;
   }
 
@@ -326,9 +347,7 @@ class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
     | Readonly<{ kind: "skipped-overlap" }>
     | Readonly<{ kind: "skipped-stopped" }>
   > {
-    const operation = this.execute(now);
-    if (!this.inFlight) this.trackInFlight(operation);
-    return operation;
+    return this.execute(now);
   }
 
   private async execute(
@@ -368,22 +387,20 @@ class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
   }
 
   private startRun(now: string): void {
-    if (this.stopped || this.running) return;
+    if (this.stopped || this.running || this.inFlight) return;
     const run = this.runSafely(now);
     this.trackInFlight(run);
   }
 
   private trackInFlight(operation: Promise<unknown>): void {
-    const tracked = operation.then(
-      () => {
+    const tracked = operation
+      .then(
+        () => undefined,
+        () => this.logRunFailure(),
+      )
+      .then(() => {
         if (this.inFlight === tracked) this.inFlight = undefined;
-      },
-      () => {
-        // runSafely catches its own failure. Keep this branch as a final
-        // containment boundary if a future refactor changes that contract.
-        if (this.inFlight === tracked) this.inFlight = undefined;
-      },
-    );
+      });
     this.inFlight = tracked;
   }
 

@@ -190,6 +190,88 @@ describe("C8 recovery runtime", () => {
     expect(scheduled).toHaveLength(1);
     await first.stop();
   });
+
+  it("does not retain a failed startup and creates a fresh schedule after the caller drains stop", async () => {
+    const scheduled: Array<() => void> = [];
+    let unblock: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const repository = {
+      claimMediaDeliveryRedelivery: async () => {
+        await blocked;
+        return [];
+      },
+      acknowledgeMediaDeliveryRedelivery: async () => undefined,
+      releaseMediaDeliveryRedelivery: async () => undefined,
+      claimMediaAttachmentRecovery: async () => [],
+      rollbackMediaAttachment: async () => undefined,
+      acknowledgeMediaAttachmentCleanup: async () => undefined,
+      releaseMediaAttachmentRecovery: async () => undefined,
+    };
+    const common = {
+      repository,
+      queue: { enqueue: async () => undefined },
+      cleaner: { cleanup: async () => undefined },
+      log: { event: () => undefined },
+      maxBatchSize: 1,
+    };
+
+    expect(() =>
+      createC8RecoveryRuntime({
+        ...common,
+        scheduler: {
+          everyHour: () => {
+            throw new Error("scheduler unavailable");
+          },
+          cancel: () => undefined,
+        },
+      }),
+    ).toThrow("scheduler unavailable");
+
+    const first = createC8RecoveryRuntime({
+      ...common,
+      scheduler: {
+        everyHour: (task) => {
+          scheduled.push(task);
+          return { timer: scheduled.length };
+        },
+        cancel: () => undefined,
+      },
+    });
+    expect(scheduled).toHaveLength(1);
+
+    const stopping = first.stop();
+    expect(
+      createC8RecoveryRuntime({
+        ...common,
+        scheduler: {
+          everyHour: (task) => {
+            scheduled.push(task);
+            return { timer: scheduled.length };
+          },
+          cancel: () => undefined,
+        },
+      }),
+    ).toBe(first);
+
+    unblock!();
+    await stopping;
+
+    const restarted = createC8RecoveryRuntime({
+      ...common,
+      scheduler: {
+        everyHour: (task) => {
+          scheduled.push(task);
+          return { timer: scheduled.length };
+        },
+        cancel: () => undefined,
+      },
+    });
+    expect(restarted).not.toBe(first);
+    expect(scheduled).toHaveLength(2);
+    await restarted.stop();
+  });
 });
 
 function nextTurn(): Promise<void> {

@@ -49,17 +49,39 @@ import type {
   TerminalCandidate,
 } from "./attempt-repository.js";
 
-const c4SqliteRepositoryCapabilities = new WeakSet<object>();
+type AcceptedMediaCleanupClaim = Readonly<{
+  attemptId: string;
+  mediaId: string;
+  frameBatchId: string;
+}>;
 
-/** Runtime composition guard for C8's retention-backed local cleaner. */
-export function isC4SqliteRepositoryCapability(
-  value: unknown,
-): value is SQLiteAttemptRepository {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    c4SqliteRepositoryCapabilities.has(value)
-  );
+/**
+ * An opaque C4 authority whose implementation is closed over the exact raw
+ * database supplied at repository construction. It deliberately is not a
+ * repository method: mutable instances, inherited objects, and structural
+ * lookalikes cannot redirect a physical C5 cleanup decision.
+ */
+export type C4AcceptedMediaCleanupAuthority = Readonly<{
+  ownsExactAcceptedMediaCleanupPair(
+    input: AcceptedMediaCleanupClaim,
+  ): Promise<boolean>;
+}>;
+
+const c4AcceptedMediaCleanupAuthorities = new WeakMap<
+  object,
+  C4AcceptedMediaCleanupAuthority
+>();
+
+/**
+ * Narrow C8 composition resolver. The WeakMap identity check is the only way
+ * to obtain an authority and a returned authority remains bound to its own
+ * raw database rather than the caller's object graph.
+ */
+export function resolveC4AcceptedMediaCleanupAuthority(
+  repository: unknown,
+): C4AcceptedMediaCleanupAuthority | undefined {
+  if (typeof repository !== "object" || repository === null) return undefined;
+  return c4AcceptedMediaCleanupAuthorities.get(repository);
 }
 
 const MAX_RECOVERY_ATTEMPTS = Number.MAX_SAFE_INTEGER;
@@ -249,7 +271,10 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     )
       throw new Error("C5 handoff verifier is required from MediaPipeline.");
     this.handoffVerifier = input.handoffVerifier;
-    c4SqliteRepositoryCapabilities.add(this);
+    c4AcceptedMediaCleanupAuthorities.set(
+      this,
+      createC4AcceptedMediaCleanupAuthority(this.raw),
+    );
   }
 
   public async issueCalibrationSession(
@@ -819,37 +844,6 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     return this.transaction(() => {
       const delivery = this.deliveryRecovery(input);
       return delivery ? projectMediaDeliveryRecovery(delivery) : null;
-    });
-  }
-
-  /**
-   * C8's local cleaner can delete only a pair independently retained for the
-   * same attempt. It intentionally returns a boolean, never storage detail.
-   */
-  public async hasExactAcceptedMediaCleanupOwnership(
-    input: Readonly<{
-      attemptId: string;
-      mediaId: string;
-      frameBatchId: string;
-    }>,
-  ): Promise<boolean> {
-    return this.transaction(() => {
-      const row = this.raw
-        .prepare(
-          `SELECT
-             (SELECT COUNT(*) FROM media_retention_records
-               WHERE attempt_id = ? AND media_id = ?) AS originals,
-             (SELECT COUNT(*) FROM retention_cleanup_records
-               WHERE attempt_id = ? AND resource_id = ?
-                 AND resource_kind = 'frame') AS frames`,
-        )
-        .get(
-          input.attemptId,
-          input.mediaId,
-          input.attemptId,
-          input.frameBatchId,
-        ) as Readonly<{ originals: number; frames: number }>;
-      return row.originals === 1 && row.frames === 1;
     });
   }
 
@@ -1715,6 +1709,50 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       | undefined;
     return row ?? null;
   }
+}
+
+function createC4AcceptedMediaCleanupAuthority(
+  raw: SqliteDatabase["raw"],
+): C4AcceptedMediaCleanupAuthority {
+  const execute = raw.exec.bind(raw);
+  const query = raw.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM media_retention_records
+         WHERE attempt_id = ? AND media_id = ?) AS originals,
+       (SELECT COUNT(*) FROM retention_cleanup_records
+         WHERE attempt_id = ? AND resource_id = ?
+           AND resource_kind = 'frame') AS frames`,
+  );
+  const get = query.get.bind(query);
+
+  return Object.freeze({
+    async ownsExactAcceptedMediaCleanupPair(
+      input: AcceptedMediaCleanupClaim,
+    ): Promise<boolean> {
+      let began = false;
+      try {
+        execute("BEGIN IMMEDIATE");
+        began = true;
+        const row = get(
+          input.attemptId,
+          input.mediaId,
+          input.attemptId,
+          input.frameBatchId,
+        ) as Readonly<{ originals: number; frames: number }>;
+        execute("COMMIT");
+        began = false;
+        return row.originals === 1 && row.frames === 1;
+      } catch (error) {
+        if (began)
+          try {
+            execute("ROLLBACK");
+          } catch {
+            // The original query failure is the only useful authority result.
+          }
+        throw error;
+      }
+    },
+  });
 }
 
 function parseAttemptRow(row: unknown): AttemptRecord {

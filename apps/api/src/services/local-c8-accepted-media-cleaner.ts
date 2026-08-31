@@ -3,7 +3,7 @@ import {
   type LocalMediaStorage,
 } from "../storage/local-media-storage.js";
 import {
-  isC4SqliteRepositoryCapability,
+  resolveC4AcceptedMediaCleanupAuthority,
   type SQLiteAttemptRepository,
 } from "../repositories/sqlite-attempt-repository.js";
 import type { OpaqueAcceptedMediaCleaner } from "./media-attachment-recovery.js";
@@ -16,12 +16,13 @@ import type { OpaqueAcceptedMediaCleaner } from "./media-attachment-recovery.js"
 export function createLocalC8AcceptedMediaCleaner(
   input: Readonly<{
     storage: LocalMediaStorage;
-    ownership: SQLiteAttemptRepository;
+    repository: SQLiteAttemptRepository;
   }>,
 ): OpaqueAcceptedMediaCleaner {
   if (!isLocalMediaStorageCapability(input.storage))
     throw new Error("C8 cleaner requires a C5 local storage capability.");
-  if (!isC4SqliteRepositoryCapability(input.ownership))
+  const ownership = resolveC4AcceptedMediaCleanupAuthority(input.repository);
+  if (!ownership)
     throw new Error("C8 cleaner requires a C4 repository capability.");
   return Object.freeze({
     cleanup: async (
@@ -31,8 +32,7 @@ export function createLocalC8AcceptedMediaCleaner(
         frameBatchId: string;
       }>,
     ) => {
-      const owned =
-        await input.ownership.hasExactAcceptedMediaCleanupOwnership(claim);
+      const owned = await ownership.ownsExactAcceptedMediaCleanupPair(claim);
       if (!owned) throw new Error("C8 cleaner ownership mismatch.");
       const outcomes = await Promise.allSettled([
         input.storage.delete(claim.mediaId),
