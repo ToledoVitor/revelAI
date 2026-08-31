@@ -299,6 +299,77 @@ describe("local C8 accepted-media cleaner", () => {
     otherDatabase.close();
   });
 
+  it("snapshots an owned claim before its authority await can redirect physical cleanup", async () => {
+    const fixture = await createOwnedCleanupPairFixture();
+    const cleaner = createLocalC8AcceptedMediaCleaner({
+      storage: fixture.storage,
+      repository: fixture.repository,
+    });
+    const claim = {
+      attemptId: fixture.attemptId,
+      mediaId: fixture.owned.mediaId,
+      frameBatchId: fixture.owned.frameBatchId,
+    };
+
+    const cleanup = cleaner.cleanup(claim);
+    claim.mediaId = fixture.victim.mediaId;
+    claim.frameBatchId = fixture.victim.frameBatchId;
+    await cleanup;
+
+    await expectOwnedPairRemoved(fixture.root, fixture.owned);
+    await expectOwnedPairPresent(fixture.root, fixture.victim);
+    fixture.database.close();
+  });
+
+  it("captures the factory-issued storage instead of a later mutable input replacement", async () => {
+    const fixture = await createOwnedCleanupPairFixture();
+    const input = {
+      storage: fixture.storage,
+      repository: fixture.repository,
+    };
+    const cleaner = createLocalC8AcceptedMediaCleaner(input);
+    const redirectedRoot = join(fixture.directory, "redirected-storage");
+    const redirectedStorage = createLocalMediaStorage({
+      root: redirectedRoot,
+      ids: { next: () => fixture.owned.mediaId },
+      prober: {
+        probe: async () => ({
+          container: "mp4" as const,
+          durationSeconds: 1,
+          displayWidth: 1280,
+          displayHeight: 720,
+          nominalFps: 30,
+          codec: "h264",
+          sourceRotationDegrees: 0 as const,
+        }),
+      },
+    });
+    await redirectedStorage.initialize();
+    await writeStoredPair(redirectedRoot, fixture.owned, "redirected victim");
+    input.storage = redirectedStorage;
+
+    await cleaner.cleanup({
+      attemptId: fixture.attemptId,
+      mediaId: fixture.owned.mediaId,
+      frameBatchId: fixture.owned.frameBatchId,
+    });
+
+    await expectOwnedPairRemoved(fixture.root, fixture.owned);
+    await expect(
+      readFile(
+        join(redirectedRoot, "originals", fixture.owned.mediaId, "payload"),
+        "utf8",
+      ),
+    ).resolves.toBe("redirected victim");
+    await expect(
+      readFile(
+        join(redirectedRoot, "frames", fixture.owned.frameBatchId, "frame.jpg"),
+        "utf8",
+      ),
+    ).resolves.toBe("redirected victim");
+    fixture.database.close();
+  });
+
   it("cleans the exact SQLite-owned C5 original and frame batch, then resolves the durable recovery fact", async () => {
     const directory = await mkdtemp(join(tmpdir(), "revelai-c8-cleaner-real-"));
     directories.push(directory);
@@ -392,4 +463,106 @@ function forgedPrepare(
       return Object.freeze({ get: () => ({ originals: 1, frames: 1 }) });
     return originalPrepare.call(raw, sql);
   };
+}
+
+async function createOwnedCleanupPairFixture(): Promise<{
+  directory: string;
+  root: string;
+  database: ReturnType<typeof openSqliteDatabase>;
+  repository: SQLiteAttemptRepository;
+  storage: ReturnType<typeof createC5PipelineTestSupport>["storage"];
+  attemptId: string;
+  owned: Readonly<{ mediaId: string; frameBatchId: string }>;
+  victim: Readonly<{ mediaId: string; frameBatchId: string }>;
+}> {
+  const directory = await mkdtemp(
+    join(tmpdir(), "revelai-c8-cleaner-snapshot-"),
+  );
+  directories.push(directory);
+  const root = join(directory, "media");
+  const database = openSqliteDatabase(join(directory, "api.sqlite"));
+  const now = "2030-01-15T12:00:00.000Z";
+  const attemptId = "11111111-1111-4111-8111-111111111111";
+  const owned = Object.freeze({
+    mediaId: "22222222-2222-4222-8222-222222222222",
+    frameBatchId: "33333333-3333-4333-8333-333333333333",
+  });
+  const victim = Object.freeze({
+    mediaId: "44444444-4444-4444-8444-444444444444",
+    frameBatchId: "55555555-5555-4555-8555-555555555555",
+  });
+  const c5 = createC5PipelineTestSupport({ root });
+  const repository = new SQLiteAttemptRepository({
+    database,
+    clock: { now: () => now },
+    ids: { next: () => "66666666-6666-4666-8666-666666666666" },
+    handoffVerifier: c5.handoffVerifier,
+  });
+  await c5.storage.initialize();
+  await repository.createAttempt({
+    id: attemptId,
+    athleteId: "77777777-7777-4777-8777-777777777777",
+    input: { mode: "free" },
+  });
+  database.raw
+    .prepare(
+      "INSERT INTO media_retention_records (media_id, attempt_id, metadata_json, delete_at, created_at) VALUES (?, ?, '{}', ?, ?)",
+    )
+    .run(owned.mediaId, attemptId, "2030-01-16T12:00:00.000Z", now);
+  database.raw
+    .prepare(
+      "INSERT INTO retention_cleanup_records (resource_id, attempt_id, resource_kind, delete_at, created_at) VALUES (?, ?, 'frame', ?, ?)",
+    )
+    .run(owned.frameBatchId, attemptId, "2030-01-16T12:00:00.000Z", now);
+  await Promise.all([
+    writeStoredPair(root, owned, "owned"),
+    writeStoredPair(root, victim, "victim"),
+  ]);
+  return {
+    directory,
+    root,
+    database,
+    repository,
+    storage: c5.storage,
+    attemptId,
+    owned,
+    victim,
+  };
+}
+
+async function writeStoredPair(
+  root: string,
+  pair: Readonly<{ mediaId: string; frameBatchId: string }>,
+  content: string,
+): Promise<void> {
+  await mkdir(join(root, "originals", pair.mediaId));
+  await mkdir(join(root, "frames", pair.frameBatchId));
+  await Promise.all([
+    writeFile(join(root, "originals", pair.mediaId, "payload"), content),
+    writeFile(join(root, "frames", pair.frameBatchId, "frame.jpg"), content),
+  ]);
+}
+
+async function expectOwnedPairRemoved(
+  root: string,
+  pair: Readonly<{ mediaId: string; frameBatchId: string }>,
+): Promise<void> {
+  await expect(
+    readFile(join(root, "originals", pair.mediaId, "payload"), "utf8"),
+  ).rejects.toThrow();
+  await expect(
+    readFile(join(root, "frames", pair.frameBatchId, "frame.jpg"), "utf8"),
+  ).rejects.toThrow();
+}
+
+async function expectOwnedPairPresent(
+  root: string,
+  pair: Readonly<{ mediaId: string; frameBatchId: string }>,
+): Promise<void> {
+  await expect(
+    readFile(join(root, "originals", pair.mediaId, "payload"), "utf8"),
+  ).resolves.toBe("victim");
+  await expect(
+    readFile(join(root, "frames", pair.frameBatchId, "frame.jpg"), "utf8"),
+  ).resolves.toBe("victim");
 }

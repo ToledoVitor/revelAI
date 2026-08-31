@@ -1909,13 +1909,11 @@ describe("SQLiteAttemptRepository", () => {
     expect(() => restarted.decode(cursor)).toThrow(
       expect.objectContaining({ code: "invalid_input" }),
     );
-    let tamperError: unknown;
-    try {
-      codec.decode(`${cursor.slice(0, -1)}A`);
-    } catch (error) {
-      tamperError = error;
-    }
-    expect(tamperError).toMatchObject({ code: "invalid_input" });
+    const tampered = tamperCanonicalAesGcmCursor(cursor);
+    expect(tampered).not.toEqual(cursor);
+    expect(() => codec.decode(tampered)).toThrow(
+      expect.objectContaining({ code: "invalid_input" }),
+    );
     for (const malformed of ["A", "AAAA", `${cursor}!`, `${cursor}=`]) {
       expect(() => codec.decode(malformed)).toThrow(
         expect.objectContaining({ code: "invalid_input" }),
@@ -1957,7 +1955,7 @@ describe("SQLiteAttemptRepository", () => {
       "AAAA",
       `${cursor}!`,
       `${cursor}=`,
-      `${cursor.slice(0, -1)}A`,
+      tamperCanonicalAesGcmCursor(cursor),
       Buffer.from(JSON.stringify(payload)).toString("base64url"),
     ]) {
       expect(() => codec.decode(malformed)).toThrow(
@@ -5618,3 +5616,12 @@ describe("SQLiteAttemptRepository", () => {
     expect(() => insert(1, 9_007_199_254_740_992)).toThrow();
   });
 });
+
+function tamperCanonicalAesGcmCursor(cursor: string): string {
+  const encoded = Buffer.from(cursor, "base64url");
+  if (encoded.length <= 12) throw new Error("cursor envelope is incomplete");
+  encoded[12] = encoded[12]! ^ 1;
+  const tampered = encoded.toString("base64url");
+  if (tampered === cursor) throw new Error("cursor tampering was ineffective");
+  return tampered;
+}

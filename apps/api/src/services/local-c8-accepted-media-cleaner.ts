@@ -19,7 +19,8 @@ export function createLocalC8AcceptedMediaCleaner(
     repository: SQLiteAttemptRepository;
   }>,
 ): OpaqueAcceptedMediaCleaner {
-  if (!isLocalMediaStorageCapability(input.storage))
+  const storage = input.storage;
+  if (!isLocalMediaStorageCapability(storage))
     throw new Error("C8 cleaner requires a C5 local storage capability.");
   const ownership = resolveC4AcceptedMediaCleanupAuthority(input.repository);
   if (!ownership)
@@ -32,14 +33,39 @@ export function createLocalC8AcceptedMediaCleaner(
         frameBatchId: string;
       }>,
     ) => {
-      const owned = await ownership.ownsExactAcceptedMediaCleanupPair(claim);
+      const snapshot = snapshotCleanupClaim(claim);
+      const owned = await ownership.ownsExactAcceptedMediaCleanupPair(snapshot);
       if (!owned) throw new Error("C8 cleaner ownership mismatch.");
       const outcomes = await Promise.allSettled([
-        input.storage.delete(claim.mediaId),
-        input.storage.deleteFrame(claim.frameBatchId),
+        storage.delete(snapshot.mediaId),
+        storage.deleteFrame(snapshot.frameBatchId),
       ]);
       if (outcomes.some((outcome) => outcome.status === "rejected"))
         throw new Error("C8 cleaner physical cleanup failed.");
     },
   });
+}
+
+function snapshotCleanupClaim(
+  claim: Readonly<{
+    attemptId: string;
+    mediaId: string;
+    frameBatchId: string;
+  }>,
+): Readonly<{ attemptId: string; mediaId: string; frameBatchId: string }> {
+  const attemptId = requireOpaqueUuid(claim.attemptId);
+  const mediaId = requireOpaqueUuid(claim.mediaId);
+  const frameBatchId = requireOpaqueUuid(claim.frameBatchId);
+  return Object.freeze({ attemptId, mediaId, frameBatchId });
+}
+
+function requireOpaqueUuid(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+  )
+    throw new Error("C8 cleaner cleanup identifiers must be UUIDs.");
+  return value;
 }
