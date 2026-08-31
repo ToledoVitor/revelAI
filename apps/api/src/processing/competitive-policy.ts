@@ -2,6 +2,14 @@ import {
   FailureMessageByCode,
   WorkflowBenchmarkReceiptSchema,
 } from "@revelai/contracts";
+import type {
+  CompetitivePolicyActivation,
+  CompetitivePolicyTuple,
+} from "../repositories/competitive-policy-repository.js";
+import {
+  candidatePolicyFacts,
+  type VerifiedAttemptCandidate,
+} from "./integrity-evaluator.js";
 
 export type CompetitiveEligibilityDecision =
   | Readonly<{
@@ -22,45 +30,48 @@ export type CompetitiveEligibilityDecision =
     }>;
 
 export type CompetitivePolicyLookup = Readonly<{
-  getActivePolicy(input: CompetitivePolicyQuery): Promise<unknown>;
+  getActivePolicy(
+    input: CompetitivePolicyTuple,
+  ): Promise<CompetitivePolicyActivation | null>;
 }>;
-
-export type CompetitivePolicyQuery = Readonly<{
-  workspaceId: string;
-  workflowId: "revelai-wall-pass-geometry-v1";
-  workflowVersion: "1.0.0";
-  modelBundleId: string;
-  providerVersion: string;
-  calibrationEvidenceVersion: string;
-  challengeId: "wall-pass";
-  challengeVersion: 1;
-  ruleVersion: "wall-pass-v1-score-1";
-}>;
-
-type ParsedInput = Readonly<{
-  query: CompetitivePolicyQuery;
-  now: string;
-  repository: CompetitivePolicyLookup;
-}>;
+export type TrustedClock = Readonly<{ now(): string }>;
 
 /**
- * Pure policy boundary: provenance selects a tuple, repository selects an
- * approved record, and this function independently checks every returned fact.
+ * Ranking is only reachable from the opaque valid integrity candidate. Demo
+ * candidates are deliberately terminally noncompetitive and perform no lookup.
  */
 export async function evaluateCompetitiveEligibility(
-  input: unknown,
+  input: Readonly<{
+    candidate: VerifiedAttemptCandidate;
+    repository: CompetitivePolicyLookup;
+    clock: TrustedClock;
+  }>,
 ): Promise<CompetitiveEligibilityDecision> {
-  if (isFreeInput(input)) return experimental();
-  if (isDemoInput(input)) return demo();
-  const parsed = parseVerifiedRoboflowInput(input);
-  if (!parsed) return experimental();
-  let candidate: unknown;
+  let facts;
   try {
-    candidate = await parsed.repository.getActivePolicy(parsed.query);
+    facts = candidatePolicyFacts(input.candidate);
+  } catch {
+    return experimental();
+  }
+  if (facts.provenance.kind === "demo") return demo();
+  const query: CompetitivePolicyTuple = Object.freeze({
+    workspaceId: facts.provenance.workspaceId,
+    workflowId: facts.provenance.workflowId,
+    workflowVersion: facts.provenance.workflowVersion,
+    modelBundleId: facts.provenance.modelBundleId,
+    providerVersion: facts.provenance.providerVersion,
+    calibrationEvidenceVersion: facts.calibrationEvidenceVersion,
+    challengeId: "wall-pass",
+    challengeVersion: 1,
+    ruleVersion: "wall-pass-v1-score-1",
+  });
+  let activation: CompetitivePolicyActivation | null;
+  try {
+    activation = await input.repository.getActivePolicy(query);
   } catch {
     return temporaryCompetitivePolicyDecision();
   }
-  return isCurrentExactPolicy(candidate, parsed.query, parsed.now)
+  return isCurrentExactPolicy(activation, query, input.clock.now())
     ? eligible()
     : experimental();
 }
@@ -74,6 +85,55 @@ export function temporaryCompetitivePolicyDecision(): CompetitiveEligibilityDeci
   });
 }
 
+function isCurrentExactPolicy(
+  activation: CompetitivePolicyActivation | null,
+  query: CompetitivePolicyTuple,
+  now: string,
+): boolean {
+  if (!activation || !isUtcTimestamp(now) || !sameTuple(activation, query))
+    return false;
+  const receipt = WorkflowBenchmarkReceiptSchema.safeParse(activation.receipt);
+  if (!receipt.success) return false;
+  return (
+    receipt.data.id === activation.receiptId &&
+    receipt.data.receiptSha256 === activation.receiptSha256 &&
+    receipt.data.schemaVersion === activation.receiptSchemaVersion &&
+    receipt.data.workflow.workspaceId === activation.workspaceId &&
+    receipt.data.workflow.workflowId === activation.workflowId &&
+    receipt.data.workflow.workflowVersion === activation.workflowVersion &&
+    receipt.data.workflow.modelBundleId === activation.modelBundleId &&
+    receipt.data.workflow.providerVersion === activation.providerVersion &&
+    receipt.data.status === "passed" &&
+    receipt.data.invalidatedAt === null &&
+    receipt.data.invalidationReason === null &&
+    Date.parse(receipt.data.runAt) <= Date.parse(now) &&
+    Date.parse(now) < Date.parse(receipt.data.validUntil)
+  );
+}
+
+function sameTuple(
+  activation: CompetitivePolicyActivation,
+  query: CompetitivePolicyTuple,
+): boolean {
+  return (
+    activation.workspaceId === query.workspaceId &&
+    activation.workflowId === query.workflowId &&
+    activation.workflowVersion === query.workflowVersion &&
+    activation.modelBundleId === query.modelBundleId &&
+    activation.providerVersion === query.providerVersion &&
+    activation.calibrationEvidenceVersion ===
+      query.calibrationEvidenceVersion &&
+    activation.challengeId === query.challengeId &&
+    activation.challengeVersion === query.challengeVersion &&
+    activation.ruleVersion === query.ruleVersion
+  );
+}
+function isUtcTimestamp(value: string): boolean {
+  return (
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
+    Number.isFinite(Date.parse(value))
+  );
+}
 function eligible(): CompetitiveEligibilityDecision {
   return Object.freeze({
     kind: "competitive-eligible",
@@ -81,7 +141,6 @@ function eligible(): CompetitiveEligibilityDecision {
     competitiveEligible: true,
   });
 }
-
 function demo(): CompetitiveEligibilityDecision {
   return Object.freeze({
     kind: "competitive-ineligible",
@@ -89,196 +148,10 @@ function demo(): CompetitiveEligibilityDecision {
     competitiveEligible: false,
   });
 }
-
 function experimental(): CompetitiveEligibilityDecision {
   return Object.freeze({
     kind: "competitive-ineligible",
     competitiveStatus: "experimental",
     competitiveEligible: false,
   });
-}
-
-function isFreeInput(value: unknown): boolean {
-  return isRecord(value) && value.mode === "free";
-}
-
-function isDemoInput(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    value.mode === "verified" &&
-    isRecord(value.provenance) &&
-    value.provenance.kind === "demo"
-  );
-}
-
-function parseVerifiedRoboflowInput(value: unknown): ParsedInput | null {
-  if (
-    !hasExactKeys(value, [
-      "mode",
-      "provenance",
-      "calibrationEvidenceVersion",
-      "challengeId",
-      "challengeVersion",
-      "ruleVersion",
-      "now",
-      "repository",
-    ]) ||
-    value.mode !== "verified" ||
-    !hasExactKeys(value.provenance, [
-      "kind",
-      "workspaceId",
-      "workflowId",
-      "workflowVersion",
-      "modelBundleId",
-      "providerVersion",
-    ]) ||
-    value.provenance.kind !== "roboflow" ||
-    !isNonEmptyString(value.provenance.workspaceId) ||
-    value.provenance.workflowId !== "revelai-wall-pass-geometry-v1" ||
-    value.provenance.workflowVersion !== "1.0.0" ||
-    !isNonEmptyString(value.provenance.modelBundleId) ||
-    !isNonEmptyString(value.provenance.providerVersion) ||
-    !isNonEmptyString(value.calibrationEvidenceVersion) ||
-    value.challengeId !== "wall-pass" ||
-    value.challengeVersion !== 1 ||
-    value.ruleVersion !== "wall-pass-v1-score-1" ||
-    !isUtcTimestamp(value.now) ||
-    !isLookup(value.repository)
-  )
-    return null;
-  return Object.freeze({
-    query: Object.freeze({
-      workspaceId: value.provenance.workspaceId,
-      workflowId: value.provenance.workflowId,
-      workflowVersion: value.provenance.workflowVersion,
-      modelBundleId: value.provenance.modelBundleId,
-      providerVersion: value.provenance.providerVersion,
-      calibrationEvidenceVersion: value.calibrationEvidenceVersion,
-      challengeId: "wall-pass",
-      challengeVersion: 1,
-      ruleVersion: "wall-pass-v1-score-1",
-    }),
-    now: value.now,
-    repository: value.repository,
-  });
-}
-
-function isCurrentExactPolicy(
-  value: unknown,
-  query: CompetitivePolicyQuery,
-  now: string,
-): boolean {
-  if (
-    !hasExactKeys(value, [
-      "id",
-      "workspaceId",
-      "workflowId",
-      "workflowVersion",
-      "modelBundleId",
-      "providerVersion",
-      "calibrationEvidenceVersion",
-      "challengeId",
-      "challengeVersion",
-      "ruleVersion",
-      "receiptId",
-      "receiptSha256",
-      "receiptSchemaVersion",
-      "receipt",
-    ]) ||
-    !isUuid(value.id) ||
-    !isNonEmptyString(value.workspaceId) ||
-    value.workflowId !== "revelai-wall-pass-geometry-v1" ||
-    value.workflowVersion !== "1.0.0" ||
-    !isNonEmptyString(value.modelBundleId) ||
-    !isNonEmptyString(value.providerVersion) ||
-    !isNonEmptyString(value.calibrationEvidenceVersion) ||
-    value.challengeId !== "wall-pass" ||
-    value.challengeVersion !== 1 ||
-    value.ruleVersion !== "wall-pass-v1-score-1" ||
-    !isUuid(value.receiptId) ||
-    !isDigest(value.receiptSha256) ||
-    value.receiptSchemaVersion !== "workflow-benchmark-receipt-v1" ||
-    !sameQueryTuple(value, query)
-  )
-    return false;
-  const receipt = WorkflowBenchmarkReceiptSchema.safeParse(value.receipt);
-  if (!receipt.success) return false;
-  return (
-    receipt.data.id === value.receiptId &&
-    receipt.data.receiptSha256 === value.receiptSha256 &&
-    receipt.data.schemaVersion === value.receiptSchemaVersion &&
-    receipt.data.workflow.workspaceId === value.workspaceId &&
-    receipt.data.workflow.workflowId === value.workflowId &&
-    receipt.data.workflow.workflowVersion === value.workflowVersion &&
-    receipt.data.workflow.modelBundleId === value.modelBundleId &&
-    receipt.data.workflow.providerVersion === value.providerVersion &&
-    receipt.data.status === "passed" &&
-    receipt.data.invalidatedAt === null &&
-    receipt.data.invalidationReason === null &&
-    Date.parse(receipt.data.validUntil) > Date.parse(now)
-  );
-}
-
-function sameQueryTuple(
-  policy: Record<string, unknown>,
-  query: CompetitivePolicyQuery,
-): boolean {
-  return (
-    policy.workspaceId === query.workspaceId &&
-    policy.workflowId === query.workflowId &&
-    policy.workflowVersion === query.workflowVersion &&
-    policy.modelBundleId === query.modelBundleId &&
-    policy.providerVersion === query.providerVersion &&
-    policy.calibrationEvidenceVersion === query.calibrationEvidenceVersion &&
-    policy.challengeId === query.challengeId &&
-    policy.challengeVersion === query.challengeVersion &&
-    policy.ruleVersion === query.ruleVersion
-  );
-}
-
-function isLookup(value: unknown): value is CompetitivePolicyLookup {
-  return isRecord(value) && typeof value.getActivePolicy === "function";
-}
-
-function hasExactKeys(
-  value: unknown,
-  expected: readonly string[],
-): value is Record<string, unknown> {
-  if (!isRecord(value)) return false;
-  const keys = Object.keys(value).sort();
-  const expectedKeys = [...expected].sort();
-  return (
-    keys.length === expectedKeys.length &&
-    keys.every((key, index) => key === expectedKeys[index])
-  );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
-}
-
-function isUuid(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      value,
-    )
-  );
-}
-
-function isDigest(value: unknown): value is string {
-  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
-}
-
-function isUtcTimestamp(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const milliseconds = Date.parse(value);
-  return (
-    Number.isFinite(milliseconds) &&
-    new Date(milliseconds).toISOString() === value
-  );
 }

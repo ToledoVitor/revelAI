@@ -77,6 +77,7 @@ export {
 } from "./geometry.js";
 export {
   assembleVerifiedEvidence,
+  isAssembledVerifiedEvidence,
   type VerifiedEvidenceBinding,
   type VerifiedObservationEvidence,
 } from "./verified-evidence.js";

@@ -6,12 +6,12 @@ import { describe, expect, it } from "vitest";
 const processingDirectory = resolve(import.meta.dirname);
 const ownedModules = ["integrity-evaluator.ts", "competitive-policy.ts"];
 const forbiddenImport =
-  /(?:providers|scheduler|storage|local-media|route|leaderboard|sqlite|scoring|ranking|@revelai\/domain)/i;
+  /(?:providers|scheduler|storage|local-media|route|leaderboard|sqlite|scoring|ranking)/i;
 const forbiddenIdentifier =
-  /(?:VisionProvider|fetch|http|finalizeTerminalResult|leaderboard|scoreWallPass|rank)/;
+  /(?:VisionProvider|fetch|http|finalizeTerminalResult|leaderboard|scoreWallPass)/;
 
 describe("C7 decision-layer boundary", () => {
-  it("has no network, storage, route, leaderboard, or scoring dependency", async () => {
+  it("has no network, storage, route, or leaderboard dependency and scores only through the opaque seam", async () => {
     for (const filename of ownedModules) {
       const source = ts.createSourceFile(
         filename,
@@ -38,6 +38,18 @@ describe("C7 decision-layer boundary", () => {
       expect(identifiers).not.toEqual(
         expect.arrayContaining([expect.stringMatching(forbiddenIdentifier)]),
       );
+      if (filename === "integrity-evaluator.ts") {
+        expect(identifiers).toEqual(
+          expect.arrayContaining([
+            "VerifiedAttemptCandidate",
+            "evaluateWallPassV1",
+          ]),
+        );
+      }
+      if (filename === "competitive-policy.ts")
+        expect(identifiers).toEqual(
+          expect.arrayContaining(["VerifiedAttemptCandidate"]),
+        );
     }
   });
 });

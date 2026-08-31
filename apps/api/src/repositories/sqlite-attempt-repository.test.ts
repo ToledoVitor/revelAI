@@ -3195,8 +3195,7 @@ describe("SQLiteAttemptRepository", () => {
       clock: fixture.clock,
     });
     const tuple = {
-      workspaceId:
-        passingWorkflowBenchmarkReceiptFixture.workflow.workspaceId,
+      workspaceId: passingWorkflowBenchmarkReceiptFixture.workflow.workspaceId,
       modelBundleId:
         passingWorkflowBenchmarkReceiptFixture.workflow.modelBundleId,
       workflowId: passingWorkflowBenchmarkReceiptFixture.workflow.workflowId,
@@ -3439,8 +3438,7 @@ describe("SQLiteAttemptRepository", () => {
       receiptSha256: passingWorkflowBenchmarkReceiptFixture.receiptSha256,
       receiptSchemaVersion:
         passingWorkflowBenchmarkReceiptFixture.schemaVersion,
-      workspaceId:
-        passingWorkflowBenchmarkReceiptFixture.workflow.workspaceId,
+      workspaceId: passingWorkflowBenchmarkReceiptFixture.workflow.workspaceId,
       modelBundleId:
         passingWorkflowBenchmarkReceiptFixture.workflow.modelBundleId,
       workflowId: passingWorkflowBenchmarkReceiptFixture.workflow.workflowId,
@@ -3587,8 +3585,7 @@ describe("SQLiteAttemptRepository", () => {
       receiptSha256: passingWorkflowBenchmarkReceiptFixture.receiptSha256,
       receiptSchemaVersion:
         passingWorkflowBenchmarkReceiptFixture.schemaVersion,
-      workspaceId:
-        passingWorkflowBenchmarkReceiptFixture.workflow.workspaceId,
+      workspaceId: passingWorkflowBenchmarkReceiptFixture.workflow.workspaceId,
       modelBundleId:
         passingWorkflowBenchmarkReceiptFixture.workflow.modelBundleId,
       workflowId: passingWorkflowBenchmarkReceiptFixture.workflow.workflowId,
@@ -3625,8 +3622,7 @@ describe("SQLiteAttemptRepository", () => {
       receiptSha256: passingWorkflowBenchmarkReceiptFixture.receiptSha256,
       receiptSchemaVersion:
         passingWorkflowBenchmarkReceiptFixture.schemaVersion,
-      workspaceId:
-        passingWorkflowBenchmarkReceiptFixture.workflow.workspaceId,
+      workspaceId: passingWorkflowBenchmarkReceiptFixture.workflow.workspaceId,
       modelBundleId:
         passingWorkflowBenchmarkReceiptFixture.workflow.modelBundleId,
       workflowId: passingWorkflowBenchmarkReceiptFixture.workflow.workflowId,

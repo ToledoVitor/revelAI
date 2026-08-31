@@ -114,6 +114,36 @@ export function createExtractionManifest(
   });
 }
 
+/**
+ * Stable, path-free identity for the exact C5 decoded sequence. It binds the
+ * source frame references and sampling timeline without exposing either to a
+ * public decision.
+ */
+export function verifiedExtractionIdentity(
+  manifest: Extract<ExtractionManifest, Readonly<{ mode: "verified" }>>,
+): string {
+  const parsed = parseExtractionManifest(manifest);
+  if (parsed.mode !== "verified")
+    throw new Error("Verified extraction required.");
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        extractionVersion: parsed.extractionVersion,
+        attemptId: parsed.attemptId,
+        generation: parsed.generation,
+        mediaId: parsed.mediaId,
+        mediaSha256: parsed.mediaSha256,
+        rawPreRollSha256: parsed.rawPreRollSha256,
+        frames: parsed.frames.items.map((frame) => [
+          frame.ordinal,
+          frame.timestampSeconds,
+          frame.reference,
+        ]),
+      }),
+    )
+    .digest("hex");
+}
+
 /** Strict persisted-input boundary; manifests never carry local filesystem paths. */
 export function parseExtractionManifest(value: unknown): ExtractionManifest {
   if (!isRecord(value)) throw new Error("Invalid extraction manifest.");

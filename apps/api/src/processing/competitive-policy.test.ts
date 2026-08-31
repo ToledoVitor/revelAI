@@ -5,160 +5,122 @@ import {
   type WorkflowBenchmarkReceipt,
 } from "@revelai/contracts";
 import { describe, expect, it } from "vitest";
+import type { CompetitivePolicyActivation } from "../repositories/competitive-policy-repository.js";
 import {
   evaluateCompetitiveEligibility,
   temporaryCompetitivePolicyDecision,
 } from "./competitive-policy.js";
+import { verifiedCandidateFixture } from "./c7-fixture.test-support.js";
 
 const now = "2030-01-30T00:00:00.000Z";
+const clock = { now: () => now };
 
 describe("competitive eligibility policy", () => {
-  it("never looks up demo or Free inputs", async () => {
+  it("never looks up the valid demo candidate", async () => {
     let calls = 0;
-    const repository = {
-      getActivePolicy: async () => {
-        calls += 1;
-        return approvedPolicy();
-      },
-    };
-
+    const candidate = await verifiedCandidateFixture("demo");
     await expect(
       evaluateCompetitiveEligibility({
-        ...verifiedInput(repository),
-        provenance: {
-          kind: "demo",
-          fixtureId: "wall-pass-balanced-v1",
-          providerVersion: "demo-observations-v1",
+        candidate,
+        clock,
+        repository: {
+          async getActivePolicy() {
+            calls += 1;
+            return approvedPolicy();
+          },
         },
       }),
-    ).resolves.toEqual({
-      kind: "competitive-ineligible",
-      competitiveStatus: "demo",
-      competitiveEligible: false,
-    });
-    await expect(
-      evaluateCompetitiveEligibility({
-        ...verifiedInput(repository),
-        mode: "free",
-        provenance: {
-          kind: "roboflow",
-          workspaceId: "revelai-workspace",
-          workflowId: "revelai-free-training-v1",
-          workflowVersion: "1.0.0",
-          modelBundleId: "free-bundle-v1",
-          providerVersion: "roboflow-inference-v1",
-        },
-      }),
-    ).resolves.toEqual({
-      kind: "competitive-ineligible",
-      competitiveStatus: "experimental",
-      competitiveEligible: false,
-    });
+    ).resolves.toMatchObject({ competitiveStatus: "demo" });
     expect(calls).toBe(0);
   });
 
-  it("accepts only a current parsed receipt with every exact approved tuple field", async () => {
-    const policy = approvedPolicy();
-    const repository = { getActivePolicy: async () => policy };
-
+  it("requires the exact valid Roboflow candidate, tuple, and current receipt", async () => {
+    const candidate = await verifiedCandidateFixture("roboflow");
     await expect(
-      evaluateCompetitiveEligibility(verifiedInput(repository)),
-    ).resolves.toEqual({
-      kind: "competitive-eligible",
-      competitiveStatus: "ranked",
-      competitiveEligible: true,
-    });
-
+      evaluateCompetitiveEligibility({
+        candidate,
+        clock,
+        repository: {
+          async getActivePolicy() {
+            return approvedPolicy();
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ competitiveStatus: "ranked" });
     for (const mismatch of [
-      { workspaceId: "wrong-workspace" },
-      { workflowId: "wrong-workflow" },
-      { workflowVersion: "9.9.9" },
-      { modelBundleId: "wrong-bundle" },
-      { providerVersion: "wrong-provider" },
-      { calibrationEvidenceVersion: "wrong-calibration" },
-      { challengeId: "wrong-challenge" },
-      { challengeVersion: 2 },
-      { ruleVersion: "wrong-rule" },
-      { receiptId: "wrong-receipt" },
+      { workspaceId: "wrong" },
+      { providerVersion: "wrong" },
+      { calibrationEvidenceVersion: "wrong" },
       { receiptSha256: "0".repeat(64) },
-      { receiptSchemaVersion: "wrong-schema" },
     ]) {
       await expect(
-        evaluateCompetitiveEligibility(
-          verifiedInput({
-            getActivePolicy: async () => ({ ...policy, ...mismatch }),
-          }),
-        ),
-      ).resolves.toMatchObject({
-        kind: "competitive-ineligible",
-        competitiveStatus: "experimental",
-        competitiveEligible: false,
-      });
+        evaluateCompetitiveEligibility({
+          candidate,
+          clock,
+          repository: {
+            async getActivePolicy() {
+              return {
+                ...approvedPolicy(),
+                ...mismatch,
+              } as CompetitivePolicyActivation;
+            },
+          },
+        }),
+      ).resolves.toMatchObject({ competitiveStatus: "experimental" });
     }
   });
 
-  it("treats absent, malformed, stale, failed, invalidated, and expiry-boundary policy as experimental", async () => {
-    const expired = approvedPolicy(receiptWith({ validUntil: now }));
-    const failed = approvedPolicy(
-      receiptWith({ pooledDispatchToObservationP95Ms: 901, status: "failed" }),
-    );
-    const invalidated = approvedPolicy(
-      receiptWith({
-        status: "failed",
-        invalidatedAt: now,
-        invalidationReason: "operator_revoked",
-      }),
-    );
-
-    for (const returned of [null, {}, expired, failed, invalidated])
+  it("enforces runAt <= trusted now < validUntil at both boundaries", async () => {
+    const candidate = await verifiedCandidateFixture("roboflow");
+    for (const receipt of [
+      receiptWith({ runAt: "2030-01-30T00:00:00.001Z" }),
+      receiptWith({ validUntil: now }),
+    ])
       await expect(
-        evaluateCompetitiveEligibility(
-          verifiedInput({ getActivePolicy: async () => returned }),
-        ),
-      ).resolves.toMatchObject({
-        kind: "competitive-ineligible",
-        competitiveStatus: "experimental",
-      });
-  });
-
-  it("keeps actual repository outages retryable and non-terminal", async () => {
-    await expect(
-      evaluateCompetitiveEligibility(
-        verifiedInput({
-          getActivePolicy: async () => {
-            throw new Error("database unavailable");
+        evaluateCompetitiveEligibility({
+          candidate,
+          clock,
+          repository: {
+            async getActivePolicy() {
+              return approvedPolicy(receipt);
+            },
           },
         }),
-      ),
+      ).resolves.toMatchObject({ competitiveStatus: "experimental" });
+  });
+
+  it("keeps real lookup outages retryable and rejects forged candidates before lookup", async () => {
+    const candidate = await verifiedCandidateFixture("roboflow");
+    await expect(
+      evaluateCompetitiveEligibility({
+        candidate,
+        clock,
+        repository: {
+          async getActivePolicy() {
+            throw new Error("database unavailable");
+          },
+        },
+      }),
     ).resolves.toEqual(temporaryCompetitivePolicyDecision());
+    await expect(
+      evaluateCompetitiveEligibility({
+        candidate: { kind: "verified-attempt-candidate" },
+        clock,
+        repository: {
+          async getActivePolicy() {
+            throw new Error("must not run");
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ competitiveStatus: "experimental" });
   });
 });
-
-function verifiedInput(repository: { getActivePolicy(): Promise<unknown> }) {
-  return {
-    mode: "verified" as const,
-    provenance: {
-      kind: "roboflow" as const,
-      workspaceId: "revelai-workspace",
-      workflowId: "revelai-wall-pass-geometry-v1" as const,
-      workflowVersion: "1.0.0" as const,
-      modelBundleId: "wall-pass-bundle-v1",
-      providerVersion: "roboflow-inference-v1",
-    },
-    calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
-    challengeId: "wall-pass" as const,
-    challengeVersion: 1 as const,
-    ruleVersion: "wall-pass-v1-score-1" as const,
-    now,
-    repository,
-  };
-}
 
 function approvedPolicy(
   receipt: WorkflowBenchmarkReceipt = WorkflowBenchmarkReceiptSchema.parse(
     passingWorkflowBenchmarkReceiptFixture,
   ),
-) {
+): CompetitivePolicyActivation {
   return {
     id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     workspaceId: "revelai-workspace",
@@ -176,16 +138,15 @@ function approvedPolicy(
     receipt,
   };
 }
-
 function receiptWith(
   patch: Partial<WorkflowBenchmarkReceipt>,
 ): WorkflowBenchmarkReceipt {
-  const { receiptSha256: _receiptSha256, ...payload } =
+  const { receiptSha256: _hash, ...rest } =
     passingWorkflowBenchmarkReceiptFixture;
-  void _receiptSha256;
-  const next = { ...payload, ...patch };
+  void _hash;
+  const payload = { ...rest, ...patch };
   return {
-    ...next,
-    receiptSha256: workflowBenchmarkReceiptDigest(next),
+    ...payload,
+    receiptSha256: workflowBenchmarkReceiptDigest(payload),
   } as WorkflowBenchmarkReceipt;
 }

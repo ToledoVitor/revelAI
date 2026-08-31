@@ -16,6 +16,22 @@ const CALIBRATION_CONFIDENCE = 0.8;
 const TRACKING_CONFIDENCE = 0.7;
 const FOOT_CONFIDENCE = 0.65;
 
+type CanonicalScoreEvidence = Readonly<{
+  contacts: readonly Readonly<{
+    timestampMs: number;
+    side: "left" | "right";
+    sideConfidence: number;
+    outbound:
+      | Readonly<{ kind: "not-outbound" }>
+      | Readonly<{
+          kind: "outbound";
+          movementTowardWallMeters: number;
+          observedWithinMs: number;
+        }>;
+  }>[];
+  wallImpacts: readonly Readonly<{ timestampMs: number; confidence: number }>[];
+}>;
+
 export type VerifiedEvidenceBinding = Readonly<{
   attemptId: string;
   generation: number;
@@ -24,6 +40,9 @@ export type VerifiedEvidenceBinding = Readonly<{
   rawPreRollSha256: string;
   calibrationSessionId: string;
   calibrationNonce: string;
+  /** C5's immutable identity for the exact decoded extraction. */
+  extractionVersion?: "c5-frame-manifest-v1";
+  extractionIdentity?: string;
 }>;
 
 export type VerifiedObservationEvidence = Readonly<{
@@ -76,7 +95,27 @@ export type VerifiedObservationEvidence = Readonly<{
         side: "left" | "right";
       }>
   )[];
+  /** C6-produced, ordered score input. C7 never accepts caller-authored rows. */
+  canonicalEvents: CanonicalScoreEvidence;
+  eventGraph: readonly Readonly<{
+    kind: "contact" | "wall-impact";
+    timestampMs: number;
+    frameIndex: number;
+    trackId: number;
+    homographyFrameIndex: number;
+  }>[];
 }>;
+
+const assembledEvidence = new WeakSet<object>();
+
+/** Runtime capability check used by the API integrity boundary. */
+export function isAssembledVerifiedEvidence(
+  value: unknown,
+): value is VerifiedObservationEvidence {
+  return (
+    typeof value === "object" && value !== null && assembledEvidence.has(value)
+  );
+}
 
 export function assembleVerifiedEvidence(
   input: Readonly<{
@@ -126,7 +165,24 @@ export function assembleVerifiedEvidence(
     wallImpacts,
     ballTracks,
   );
-  return Object.freeze({
+  const canonicalEvents = Object.freeze({
+    contacts: Object.freeze(
+      contactCandidates.map((contact) =>
+        Object.freeze({
+          timestampMs: contact.timestampMs,
+          side: contact.side,
+          sideConfidence: contact.confidence,
+          outbound: outboundMovement(ballTracks, contact),
+        }),
+      ),
+    ),
+    wallImpacts: Object.freeze(
+      wallImpacts.map((impact) =>
+        Object.freeze({ timestampMs: impact.timestampMs, confidence: 0.7 }),
+      ),
+    ),
+  });
+  const result: VerifiedObservationEvidence = Object.freeze({
     kind: "wall-pass-geometry-evidence-v1",
     binding: Object.freeze({ ...input.binding }),
     provenance: batch.provenance,
@@ -139,7 +195,38 @@ export function assembleVerifiedEvidence(
     contacts: Object.freeze(contacts),
     wallImpacts: Object.freeze(wallImpacts),
     passEvidence: Object.freeze(passEvidence),
+    canonicalEvents,
+    eventGraph: Object.freeze(
+      [
+        ...contactCandidates.map((contact) => {
+          const frameIndex = ordered.find(
+            (frame) => frame.timestampMs === contact.timestampMs,
+          )!.frameIndex;
+          return Object.freeze({
+            kind: "contact" as const,
+            timestampMs: contact.timestampMs,
+            frameIndex,
+            trackId: contact.trackId,
+            homographyFrameIndex: frameIndex,
+          });
+        }),
+        ...wallImpacts.map((impact) => {
+          const frameIndex = ordered.find(
+            (frame) => frame.timestampMs === impact.timestampMs,
+          )!.frameIndex;
+          return Object.freeze({
+            kind: "wall-impact" as const,
+            timestampMs: impact.timestampMs,
+            frameIndex,
+            trackId: impact.trackId,
+            homographyFrameIndex: frameIndex,
+          });
+        }),
+      ].sort((left, right) => left.timestampMs - right.timestampMs),
+    ),
   });
+  assembledEvidence.add(result);
+  return result;
 }
 
 function assertVerifiedBinding(binding: VerifiedEvidenceBinding): void {
@@ -502,6 +589,32 @@ function hasOutboundMotion(
       ball.timestampMs - contact.timestampMs <= 700 &&
       contact.point.y - ball.point.y >= 0.25,
   );
+}
+
+function outboundMovement(
+  tracks: readonly BallTrack[],
+  contact: Readonly<{
+    timestampMs: number;
+    point: GroundPoint;
+    trackId: number;
+  }>,
+) {
+  const track = tracks.find(
+    (candidate) => candidate.trackId === contact.trackId,
+  );
+  const sample = track?.samples.find(
+    (ball) =>
+      ball.timestampMs > contact.timestampMs &&
+      ball.timestampMs - contact.timestampMs <= 700 &&
+      contact.point.y - ball.point.y >= 0.25,
+  );
+  return sample
+    ? Object.freeze({
+        kind: "outbound" as const,
+        movementTowardWallMeters: contact.point.y - sample.point.y,
+        observedWithinMs: sample.timestampMs - contact.timestampMs,
+      })
+    : Object.freeze({ kind: "not-outbound" as const });
 }
 
 function missedPass(

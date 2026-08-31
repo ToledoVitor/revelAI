@@ -6,7 +6,10 @@ import {
   type VisionProvider,
 } from "@revelai/vision";
 import type { FreeInsight } from "@revelai/contracts";
-import type { ExtractionManifest } from "../media/extraction-manifest.js";
+import {
+  verifiedExtractionIdentity,
+  type ExtractionManifest,
+} from "../media/extraction-manifest.js";
 import {
   extractionManifestToVisionRequests,
   type OpaqueFrameReader,
@@ -72,6 +75,8 @@ export async function assembleVerifiedObservation(
       rawPreRollSha256: input.manifest.rawPreRollSha256,
       calibrationSessionId: input.calibrationSessionId,
       calibrationNonce: input.calibrationNonce,
+      extractionVersion: input.manifest.extractionVersion,
+      extractionIdentity: verifiedExtractionIdentity(input.manifest),
     },
   });
 }
