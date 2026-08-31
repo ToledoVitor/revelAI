@@ -1,70 +1,41 @@
 import type { AnalysisJob, AnalysisQueue } from "../queue/analysis-queue.js";
 import { QueueUnavailableError } from "../queue/analysis-queue.js";
-import type { DurableProcessingContext } from "../media/extraction-manifest.js";
-import type { AcceptedMediaCleanup } from "../media/media-pipeline.js";
-import type {
-  MediaUploadContext,
-  StoredMediaAttachment,
-} from "../repositories/attempt-repository.js";
+import type { AcceptedMediaHandoff } from "../media/accepted-media-handoff.js";
 
+/** C8's sole post-C5 attach port; C4 owns every state transition. */
 export type AttachmentRepository = Readonly<{
-  attachValidatedMedia(
-    input: Readonly<{
-      attemptId: string;
-      athleteId: string;
-      media: StoredMediaAttachment;
-    }>,
+  attachPreparedMedia(
+    input: Readonly<{ accepted: AcceptedMediaHandoff }>,
   ): Promise<AnalysisJob>;
   rollbackMediaAttachment(
-    input: Readonly<{
-      attemptId: string;
-      generation: number;
-    }>,
+    input: Readonly<{ attemptId: string; generation: number }>,
+  ): Promise<void>;
+  recoverMediaAttachment(
+    input: Readonly<{ attemptId: string; generation: number }>,
   ): Promise<void>;
 }>;
-
-/** C8's post-C5 attachment seam; C4 remains the source of truth. */
-export type PreparedAttachmentRepository = AttachmentRepository &
-  Readonly<{
-    attachPreparedMedia(
-      input: Readonly<{
-        context: MediaUploadContext;
-        media: StoredMediaAttachment;
-        processingContext: DurableProcessingContext;
-      }>,
-    ): Promise<AnalysisJob>;
-  }>;
 
 export interface AttemptServiceLog {
   event(
     event: Readonly<{
-      category: "media_attachment_cleanup_failed";
+      category:
+        | "media_attachment_cleanup_failed"
+        | "media_attachment_recovery_failed";
       attempt: string;
       generation: number;
     }>,
   ): void;
 }
 
-export class MediaAttachmentCleanupError extends Error {
-  public readonly code = "media_attachment_cleanup_failed" as const;
-
-  public constructor() {
-    super("media_attachment_cleanup_failed");
-    this.name = "MediaAttachmentCleanupError";
-  }
-}
-
-/** Coordinates durable attachment with identifier delivery; queue never rolls state back. */
+/** Coordinates one accepted C5 handoff with identifier-only queue delivery. */
 export class AttemptService {
-  private readonly repository:
-    | AttachmentRepository
-    | PreparedAttachmentRepository;
+  private readonly repository: AttachmentRepository;
   private readonly queue: AnalysisQueue;
   private readonly log: AttemptServiceLog | undefined;
 
   public constructor(
     input: Readonly<{
-      repository: AttachmentRepository | PreparedAttachmentRepository;
+      repository: AttachmentRepository;
       queue: AnalysisQueue;
       log?: AttemptServiceLog;
     }>,
@@ -74,77 +45,75 @@ export class AttemptService {
     this.log = input.log;
   }
 
-  public async attachValidatedMedia(
-    input: Readonly<{
-      attemptId: string;
-      athleteId: string;
-      media: StoredMediaAttachment;
-    }>,
+  public async attachAcceptedMedia(
+    input: Readonly<{ accepted: AcceptedMediaHandoff }>,
   ): Promise<AnalysisJob> {
-    if (!(await this.queue.isAvailable())) throw new QueueUnavailableError();
-    const job = await this.repository.attachValidatedMedia(input);
+    let job: AnalysisJob | undefined;
     try {
+      if (!(await this.queue.isAvailable())) throw new QueueUnavailableError();
+      job = await this.repository.attachPreparedMedia({
+        accepted: input.accepted,
+      });
       await this.queue.enqueue(job);
       return job;
     } catch (error) {
-      await this.repository.rollbackMediaAttachment({
-        attemptId: input.attemptId,
-        generation: job.generation,
-      });
+      await this.compensate(input.accepted, job);
+      // Queue availability/delivery never leaks storage, database, or driver
+      // error details through the public classification.
       if (error instanceof QueueUnavailableError) throw error;
-      throw new QueueUnavailableError();
+      if (job) throw new QueueUnavailableError();
+      throw error;
     }
   }
 
-  /**
-   * Attaches C5's one accepted media result, then either queues exactly that
-   * generation or returns the database to awaiting-upload before C5 deletes
-   * the original/frame bytes. The cleanup capability never reveals a path.
-   */
-  public async attachPreparedMedia(
-    input: Readonly<{
-      context: MediaUploadContext;
-      media: StoredMediaAttachment;
-      processingContext: DurableProcessingContext;
-      cleanup: AcceptedMediaCleanup;
-    }>,
-  ): Promise<AnalysisJob> {
-    if (!(await this.queue.isAvailable())) throw new QueueUnavailableError();
-    const repository = this.preparedRepository();
-    const job = await repository.attachPreparedMedia({
-      context: input.context,
-      media: input.media,
-      processingContext: input.processingContext,
-    });
-    try {
-      await this.queue.enqueue(job);
-      return job;
-    } catch (error) {
-      await repository.rollbackMediaAttachment({
-        attemptId: input.context.attemptId,
+  private async compensate(
+    accepted: AcceptedMediaHandoff,
+    job: AnalysisJob | undefined,
+  ): Promise<void> {
+    const cleanup = accepted.cleanup.cleanup();
+    if (!job) {
+      const [result] = await Promise.allSettled([cleanup]);
+      if (result.status === "rejected")
+        this.logCleanup(accepted, accepted.context.generation);
+      return;
+    }
+    const [rollbackResult, cleanupResult] = await Promise.allSettled([
+      this.repository.rollbackMediaAttachment({
+        attemptId: accepted.context.attemptId,
         generation: job.generation,
-      });
-      try {
-        await input.cleanup.cleanup();
-      } catch {
+      }),
+      cleanup,
+    ]);
+    if (cleanupResult.status === "rejected")
+      this.logCleanup(accepted, job.generation);
+    if (rollbackResult.status === "rejected") {
+      const [recovery] = await Promise.allSettled([
+        this.repository.recoverMediaAttachment({
+          attemptId: accepted.context.attemptId,
+          generation: job.generation,
+        }),
+      ]);
+      // A recovery request is deliberately attempted even if C5 deletion
+      // failed; it makes the retention fact durable without restoring SQL.
+      if (recovery.status === "rejected")
         this.log?.event(
           Object.freeze({
-            category: "media_attachment_cleanup_failed" as const,
-            attempt: redactAttempt(input.context.attemptId),
+            category: "media_attachment_recovery_failed" as const,
+            attempt: redactAttempt(accepted.context.attemptId),
             generation: job.generation,
           }),
         );
-        throw new MediaAttachmentCleanupError();
-      }
-      if (error instanceof QueueUnavailableError) throw error;
-      throw new QueueUnavailableError();
     }
   }
 
-  private preparedRepository(): PreparedAttachmentRepository {
-    if (!("attachPreparedMedia" in this.repository))
-      throw new Error("Prepared attachment repository is required.");
-    return this.repository;
+  private logCleanup(accepted: AcceptedMediaHandoff, generation: number): void {
+    this.log?.event(
+      Object.freeze({
+        category: "media_attachment_cleanup_failed" as const,
+        attempt: redactAttempt(accepted.context.attemptId),
+        generation,
+      }),
+    );
   }
 }
 

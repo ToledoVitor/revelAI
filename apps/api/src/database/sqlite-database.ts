@@ -646,13 +646,23 @@ const migrations: readonly Migration[] = [
     afterApply: upgradeCompetitivePolicyEvidenceVersionsV15,
   },
   {
-    // C8 persists only the C5-issued path-free processing context. The
-    // opaque C5/C6/C7 capabilities are deliberately recreated in-process.
+    // C8 persists only a C5-issued storage receipt reference. Source digest
+    // and receipt facts live in independent columns so mutable context JSON
+    // can never become its own authority. Contextless pre-v16 active uploads
+    // are fail-safely reset for a fresh upload; their old retention facts stay
+    // due, and their generation can never be claimed again.
     version: 16,
     sql: `
       ALTER TABLE attempts
       ADD COLUMN processing_context_json TEXT;
+      ALTER TABLE attempts
+      ADD COLUMN media_sha256 TEXT;
+      ALTER TABLE attempts
+      ADD COLUMN processing_receipt_id TEXT;
+      ALTER TABLE attempts
+      ADD COLUMN processing_receipt_sha256 TEXT;
     `,
+    afterApply: resetLegacyProcessingRowsV16,
   },
 ];
 
@@ -847,6 +857,14 @@ function bindCompetitivePolicyWorkspacesV14(raw: Database.Database): void {
  * predecessor is upgraded only after its old canonical digest verifies; the
  * new canonical receipt hash and every linked policy hash move atomically.
  */
+function resetLegacyProcessingRowsV16(raw: Database.Database): void {
+  raw
+    .prepare(
+      "UPDATE attempts SET media_json = NULL, media_sha256 = NULL, processing_context_json = NULL, processing_receipt_id = NULL, processing_receipt_sha256 = NULL, status = 'awaiting-upload', processing_generation = processing_generation + 1, processing_lease_id = NULL, processing_lease_expires_at = NULL WHERE deletion_state = 'active' AND status IN ('uploaded', 'processing')",
+    )
+    .run();
+}
+
 function upgradeCompetitivePolicyEvidenceVersionsV15(
   raw: Database.Database,
 ): void {

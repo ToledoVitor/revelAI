@@ -10,6 +10,7 @@ import {
   rankWallPassV1Cohort,
   type WallPassRankableResult as DomainWallPassRankableResult,
 } from "@revelai/domain";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import type { AnalysisJob } from "../queue/analysis-queue.js";
 import {
   originalOrFrameDeleteAt,
@@ -19,6 +20,10 @@ import {
   parseDurableProcessingContext,
   type DurableProcessingContext,
 } from "../media/extraction-manifest.js";
+import {
+  isAcceptedMediaHandoff,
+  type AcceptedMediaHandoff,
+} from "../media/accepted-media-handoff.js";
 import type { SqliteDatabase } from "../database/sqlite-database.js";
 import { isStoredMediaAttachment } from "./attempt-repository.js";
 import type {
@@ -36,11 +41,12 @@ import type {
   MediaUploadContext,
   PersistedProcessingContext,
   StoredMedia,
-  StoredMediaAttachment,
   TerminalCandidate,
 } from "./attempt-repository.js";
 
 const MAX_RECOVERY_ATTEMPTS = Number.MAX_SAFE_INTEGER;
+const CLEAR_ATTACHED_MEDIA_COLUMNS =
+  "media_json = NULL, media_sha256 = NULL, processing_context_json = NULL, processing_receipt_id = NULL, processing_receipt_sha256 = NULL";
 
 type AttemptRow = Readonly<{
   id: string;
@@ -72,6 +78,22 @@ type UploadPreparationRow = Readonly<{
   processing_generation: number;
 }>;
 
+type ProcessingAuthorityRow = Readonly<{
+  id: string;
+  athlete_id: string;
+  mode: "free" | "verified";
+  challenge_id: "wall-pass" | null;
+  challenge_version: 1 | null;
+  calibration_session_id: string | null;
+  calibration_nonce: string | null;
+  media_json: string | null;
+  media_sha256: string | null;
+  processing_context_json: string | null;
+  processing_receipt_id: string | null;
+  processing_receipt_sha256: string | null;
+  processing_generation: number;
+}>;
+
 type TerminalResultRow = Readonly<{
   id: string;
   lease_id: string;
@@ -87,6 +109,28 @@ export interface Clock {
 export interface IdGenerator {
   next(): string;
 }
+
+/**
+ * A server-owned live-page cursor. The implementation deliberately makes no
+ * attempt identifier recoverable by a client. Production's process-random
+ * key invalidates old cursors after a restart; deployments that need durable
+ * cursors can inject their managed codec at composition time.
+ */
+export interface LiveLeaderboardCursorCodec {
+  encode(value: LiveLeaderboardCursorPayload): string;
+  decode(cursor: string): LiveLeaderboardCursorPayload;
+}
+
+export type LiveLeaderboardCursorPayload = Readonly<{
+  version: 2;
+  challengeId: "wall-pass";
+  challengeVersion: 1;
+  ruleVersion: "wall-pass-v1-score-1";
+  calculatedAt: string;
+  score: number;
+  completedAt: string;
+  attemptId: string;
+}>;
 
 export class RepositoryError extends Error {
   public constructor(
@@ -113,17 +157,21 @@ export class SQLiteAttemptRepository implements AttemptRepository {
   private readonly raw;
   private readonly clock: Clock;
   private readonly ids: IdGenerator;
+  private readonly liveLeaderboardCursor: LiveLeaderboardCursorCodec;
 
   public constructor(
     input: Readonly<{
       database: SqliteDatabase;
       clock: Clock;
       ids: IdGenerator;
+      liveLeaderboardCursor?: LiveLeaderboardCursorCodec;
     }>,
   ) {
     this.raw = input.database.raw;
     this.clock = input.clock;
     this.ids = input.ids;
+    this.liveLeaderboardCursor =
+      input.liveLeaderboardCursor ?? processLiveLeaderboardCursorCodec;
   }
 
   public async issueCalibrationSession(
@@ -333,22 +381,26 @@ export class SQLiteAttemptRepository implements AttemptRepository {
 
   public async attachPreparedMedia(
     input: Readonly<{
-      context: MediaUploadContext;
-      media: StoredMediaAttachment;
-      processingContext: DurableProcessingContext;
+      accepted: AcceptedMediaHandoff;
     }>,
   ): Promise<AnalysisJob> {
     return this.transaction(() => {
+      if (!isAcceptedMediaHandoff(input.accepted))
+        throw new RepositoryError("invalid_input");
+      const { context: acceptedContext, storedMedia: acceptedMedia } =
+        input.accepted;
       const processingContext = parseDurableProcessingContext(
-        input.processingContext,
+        input.accepted.processingContext,
       );
+      if (processingContext.kind !== "c5-durable-processing-context-v2")
+        throw new RepositoryError("invalid_input");
       let context: MediaUploadContext;
       try {
-        context = parsePersistedUploadContext(input.context);
+        context = parsePersistedUploadContext(acceptedContext);
       } catch {
         throw new RepositoryError("invalid_input");
       }
-      const media = projectStoredMedia(input.media);
+      const media = projectStoredMedia(acceptedMedia);
       assertTransitionMedia(media);
       if (media.uploadedAt !== context.uploadedAt)
         throw new RepositoryError("invalid_input");
@@ -369,10 +421,10 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       if (!sameUploadContext(expected, context))
         throw new RepositoryError("invalid_attempt_transition");
       if (
-        processingContext.manifest.attemptId !== context.attemptId ||
-        processingContext.manifest.generation !== context.generation ||
-        processingContext.manifest.mode !== context.mode ||
-        processingContext.manifest.mediaId !== media.id
+        input.accepted.sourceSha256.length !== 64 ||
+        !/^[a-f0-9]{64}$/i.test(input.accepted.sourceSha256) ||
+        processingContext.receipt.frameBatchId.length !== 36 ||
+        processingContext.receipt.sha256.length !== 64
       )
         throw new RepositoryError("invalid_input");
       if (row.media_json !== null)
@@ -382,11 +434,18 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       const now = this.clock.now();
       const updated = this.raw
         .prepare(
-          "UPDATE attempts SET media_json = ?, processing_context_json = ?, status = 'uploaded', processing_generation = ?, updated_at = ? WHERE id = ? AND athlete_id = ? AND status = 'awaiting-upload' AND deletion_state = 'active' AND processing_generation = ?",
+          "UPDATE attempts SET media_json = ?, media_sha256 = ?, processing_context_json = ?, processing_receipt_id = ?, processing_receipt_sha256 = ?, status = 'uploaded', processing_generation = ?, updated_at = ? WHERE id = ? AND athlete_id = ? AND status = 'awaiting-upload' AND deletion_state = 'active' AND processing_generation = ?",
         )
         .run(
           stableJson(media),
-          stableJson({ upload: expected, processing: processingContext }),
+          input.accepted.sourceSha256,
+          stableJson({
+            upload: expected,
+            processing: processingContext,
+            sourceSha256: input.accepted.sourceSha256,
+          }),
+          processingContext.receipt.frameBatchId,
+          processingContext.receipt.sha256,
           context.generation,
           now,
           context.attemptId,
@@ -425,67 +484,6 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     });
   }
 
-  public async attachValidatedMedia(
-    input: Readonly<{
-      attemptId: string;
-      athleteId: string;
-      media: StoredMediaAttachment;
-    }>,
-  ): Promise<AnalysisJob> {
-    return this.transaction(() => {
-      // Do not serialize caller object shape. C5's rich acceptance result
-      // contains probe/hash/manifest evidence, while this repository persists
-      // only its exact six-field attachment. Runtime projection also protects
-      // this SQL boundary from unchecked JavaScript callers.
-      const media = projectStoredMedia(input.media);
-      assertTransitionMedia(media);
-      const row = this.mustGetScopedAttempt(input.attemptId, input.athleteId);
-      const attempt = parseAttemptRow(row);
-      if (attempt.media !== null)
-        throw new RepositoryError("duplicate_media_upload");
-      if (attempt.status !== "awaiting-upload")
-        throw new RepositoryError("invalid_attempt_transition");
-      const now = this.clock.now();
-      this.raw
-        .prepare(
-          "UPDATE attempts SET media_json = ?, status = 'uploaded', processing_generation = ?, updated_at = ? WHERE id = ? AND athlete_id = ? AND status = 'awaiting-upload' AND deletion_state = 'active'",
-        )
-        .run(
-          stableJson(media),
-          row.processing_generation + 1,
-          now,
-          input.attemptId,
-          input.athleteId,
-        );
-      this.raw
-        .prepare(
-          "INSERT INTO media_retention_records (media_id, attempt_id, metadata_json, delete_at, created_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .run(media.id, input.attemptId, stableJson(media), media.deleteAt, now);
-      const acknowledged = this.raw
-        .prepare(
-          "DELETE FROM retention_cleanup_records WHERE resource_id = ? AND attempt_id = ? AND resource_kind = 'temporary' AND delete_at = ?",
-        )
-        .run(
-          media.transition.resourceId,
-          input.attemptId,
-          media.transition.deleteAt,
-        );
-      if (acknowledged.changes !== 1)
-        throw new RepositoryError("invalid_input");
-      this.event(
-        input.attemptId,
-        row.processing_generation + 1,
-        "media-attached",
-        now,
-      );
-      return Object.freeze({
-        attemptId: input.attemptId,
-        generation: row.processing_generation + 1,
-      });
-    });
-  }
-
   public async rollbackMediaAttachment(
     input: Readonly<{
       attemptId: string;
@@ -510,14 +508,55 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       const now = this.clock.now();
       this.raw
         .prepare(
-          "UPDATE attempts SET media_json = NULL, processing_context_json = NULL, status = 'awaiting-upload', updated_at = ? WHERE id = ? AND status = 'uploaded' AND processing_generation = ? AND deletion_state = 'active'",
+          `UPDATE attempts SET ${CLEAR_ATTACHED_MEDIA_COLUMNS}, status = 'awaiting-upload', updated_at = ? WHERE id = ? AND status = 'uploaded' AND processing_generation = ? AND deletion_state = 'active'`,
         )
         .run(now, input.attemptId, input.generation);
+      this.raw
+        .prepare(
+          "UPDATE media_retention_records SET cleanup_requested_at = ? WHERE attempt_id = ?",
+        )
+        .run(now, input.attemptId);
       // Queue delivery is not an authority to lose physical-byte coverage.
       // Keep the original +23h retention fact while the attempt returns to
       // awaiting-upload. C8 may delete and acknowledge it later; a crash or
       // failed delete leaves it due for the scavenger.
       this.event(input.attemptId, input.generation, "media-rolled-back", now);
+    });
+  }
+
+  public async recoverMediaAttachment(
+    input: Readonly<{ attemptId: string; generation: number }>,
+  ): Promise<void> {
+    await this.transaction(() => {
+      const now = this.clock.now();
+      // A second, independent durable recovery attempt: mark the C5-owned
+      // original/frame cleanup fact due even if the first exact rollback was
+      // interrupted. It never restores an attachment.
+      const row = this.raw
+        .prepare(
+          "SELECT media_json FROM attempts WHERE id = ? AND deletion_state = 'active' AND status IN ('uploaded', 'processing') AND processing_generation = ?",
+        )
+        .get(input.attemptId, input.generation) as
+        | Readonly<{ media_json: string | null }>
+        | undefined;
+      if (!row?.media_json) return;
+      const media = parseStoredMedia(row.media_json);
+      this.raw
+        .prepare(
+          "UPDATE media_retention_records SET cleanup_requested_at = ? WHERE attempt_id = ? AND media_id = ?",
+        )
+        .run(now, input.attemptId, media.id);
+      this.raw
+        .prepare(
+          `UPDATE attempts SET ${CLEAR_ATTACHED_MEDIA_COLUMNS}, status = 'awaiting-upload', processing_lease_id = NULL, processing_lease_expires_at = NULL, updated_at = ? WHERE id = ? AND deletion_state = 'active' AND status IN ('uploaded', 'processing') AND processing_generation = ?`,
+        )
+        .run(now, input.attemptId, input.generation);
+      this.event(
+        input.attemptId,
+        input.generation,
+        "media-recovery-requested",
+        now,
+      );
     });
   }
 
@@ -527,18 +566,22 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     return this.transaction(() => {
       const row = this.raw
         .prepare(
-          "SELECT id, mode, status, deletion_state, processing_generation, processing_lease_expires_at FROM attempts WHERE id = ?",
+          `SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version,
+                  a.calibration_session_id, c.nonce AS calibration_nonce, a.media_json,
+                  a.media_sha256, a.processing_context_json, a.processing_receipt_id,
+                  a.processing_receipt_sha256, a.status, a.deletion_state,
+                  a.processing_generation, a.processing_lease_expires_at
+             FROM attempts a LEFT JOIN calibration_sessions c ON c.id = a.calibration_session_id
+            WHERE a.id = ?`,
         )
         .get(job.attemptId) as
-        | Pick<
-            AttemptRow,
-            | "id"
-            | "mode"
-            | "status"
-            | "deletion_state"
-            | "processing_generation"
-            | "processing_lease_expires_at"
-          >
+        | (ProcessingAuthorityRow &
+            Readonly<{
+              status: AttemptRecord["status"];
+              deletion_state: "active" | "tombstoned";
+              processing_generation: number;
+              processing_lease_expires_at: string | null;
+            }>)
         | undefined;
       if (!row || row.deletion_state !== "active") return null;
       const recovery = this.raw
@@ -556,6 +599,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
           row.processing_lease_expires_at !== null &&
           row.processing_lease_expires_at <= now);
       if (!canClaim) return null;
+      assertClaimableProcessingRow(row);
       const leaseId = this.ids.next();
       const expiresAt = addMilliseconds(now, 5 * 60_000);
       const update = this.raw
@@ -583,27 +627,34 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     return this.transaction(() => {
       const row = this.raw
         .prepare(
-          "SELECT status, deletion_state, processing_generation, processing_lease_id, processing_context_json FROM attempts WHERE id = ?",
+          `SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version,
+                  a.calibration_session_id, c.nonce AS calibration_nonce, a.media_json,
+                  a.media_sha256, a.processing_context_json, a.processing_receipt_id,
+                  a.processing_receipt_sha256, a.status, a.deletion_state,
+                  a.processing_generation, a.processing_lease_id
+             FROM attempts a LEFT JOIN calibration_sessions c ON c.id = a.calibration_session_id
+            WHERE a.id = ?`,
         )
         .get(input.attemptId) as
-        | Readonly<{
-            status: AttemptRecord["status"];
-            deletion_state: "active" | "tombstoned";
-            processing_generation: number;
-            processing_lease_id: string | null;
-            processing_context_json: string | null;
-          }>
+        | (ProcessingAuthorityRow &
+            Readonly<{
+              status: AttemptRecord["status"];
+              deletion_state: "active" | "tombstoned";
+              processing_generation: number;
+              processing_lease_id: string | null;
+            }>)
         | undefined;
       if (
         !row ||
         row.deletion_state !== "active" ||
         row.status !== "processing" ||
         row.processing_generation !== input.generation ||
-        row.processing_lease_id !== input.leaseId ||
-        row.processing_context_json === null
+        row.processing_lease_id !== input.leaseId
       )
         return null;
-      return parsePersistedProcessingContext(row.processing_context_json);
+      if (row.processing_context_json === null)
+        throw new RepositoryError("persisted_data_corrupt");
+      return assertClaimableProcessingRow(row);
     });
   }
 
@@ -956,18 +1007,16 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     input: LiveLeaderboardPageInput,
   ): Promise<LiveLeaderboardPage> {
     assertLiveLeaderboardInput(input);
-    const ranked = rankWallPassV1Cohort(this.currentCohort());
+    const ranked = rankWallPassV1Cohort(this.currentCohort(input.calculatedAt));
     const cursor = input.cursor
-      ? decodeLiveLeaderboardCursor(input.cursor)
+      ? this.liveLeaderboardCursor.decode(input.cursor)
       : null;
     if (
       cursor &&
-      !ranked.some(
-        (entry) =>
-          entry.attemptId === cursor.attemptId &&
-          entry.score === cursor.score &&
-          entry.completedAt === cursor.completedAt,
-      )
+      (cursor.challengeId !== input.challenge.id ||
+        cursor.challengeVersion !== input.challenge.version ||
+        cursor.ruleVersion !== input.challenge.ruleVersion ||
+        cursor.calculatedAt !== input.calculatedAt)
     )
       throw new RepositoryError("invalid_input");
     const afterCursor = cursor
@@ -987,22 +1036,39 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       cohortSize: ranked.length,
       nextCursor:
         afterCursor.length > input.limit && last
-          ? encodeLiveLeaderboardCursor(last)
+          ? this.liveLeaderboardCursor.encode(
+              Object.freeze({
+                version: 2,
+                challengeId: input.challenge.id,
+                challengeVersion: input.challenge.version,
+                ruleVersion: input.challenge.ruleVersion,
+                calculatedAt: input.calculatedAt,
+                score: last.score,
+                completedAt: last.completedAt,
+                attemptId: last.attemptId,
+              }),
+            )
           : null,
     });
   }
 
-  private currentCohort(): DomainWallPassRankableResult[] {
-    return this.raw
-      .prepare(
-        `SELECT le.attempt_id, le.id AS entry_id, le.score, le.completed_at
+  private currentCohort(cutoff?: string): DomainWallPassRankableResult[] {
+    const sql = cutoff
+      ? `SELECT le.attempt_id, le.id AS entry_id, le.score, le.completed_at
        FROM leaderboard_entries le
        INNER JOIN attempts a ON a.id = le.attempt_id
        WHERE a.deletion_state = 'active' AND a.status = 'valid'
-         AND le.challenge_id = 'wall-pass' AND le.challenge_version = 1 AND le.rule_version = 'wall-pass-v1-score-1'`,
-      )
-      .all()
-      .map(parseCohortRow);
+         AND le.challenge_id = 'wall-pass' AND le.challenge_version = 1 AND le.rule_version = 'wall-pass-v1-score-1'
+         AND le.completed_at <= ?`
+      : `SELECT le.attempt_id, le.id AS entry_id, le.score, le.completed_at
+       FROM leaderboard_entries le
+       INNER JOIN attempts a ON a.id = le.attempt_id
+       WHERE a.deletion_state = 'active' AND a.status = 'valid'
+         AND le.challenge_id = 'wall-pass' AND le.challenge_version = 1 AND le.rule_version = 'wall-pass-v1-score-1'`;
+    const statement = this.raw.prepare(sql);
+    return (cutoff ? statement.all(cutoff) : statement.all()).map(
+      parseCohortRow,
+    );
   }
 
   private finalizedFromRows(
@@ -1400,7 +1466,7 @@ function parsePersistedProcessingContext(
     throw new RepositoryError("persisted_data_corrupt");
   }
   const record = asRecord(parsed);
-  if (!hasExactKeys(record, ["processing", "upload"]))
+  if (!hasExactKeys(record, ["processing", "sourceSha256", "upload"]))
     throw new RepositoryError("persisted_data_corrupt");
   const upload = parsePersistedUploadContext(record.upload);
   let processing: DurableProcessingContext;
@@ -1410,14 +1476,85 @@ function parsePersistedProcessingContext(
     throw new RepositoryError("persisted_data_corrupt");
   }
   if (
-    processing.manifest.attemptId !== upload.attemptId ||
-    processing.manifest.generation !== upload.generation ||
-    processing.manifest.mode !== upload.mode ||
-    (upload.mode === "free" && processing.manifest.mode !== "free") ||
-    (upload.mode === "verified" && processing.manifest.mode !== "verified")
+    processing.kind !== "c5-durable-processing-context-v2" ||
+    typeof record.sourceSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/i.test(record.sourceSha256)
   )
     throw new RepositoryError("persisted_data_corrupt");
-  return Object.freeze({ upload, processing });
+  return Object.freeze({
+    upload,
+    processing,
+    sourceSha256: record.sourceSha256,
+  });
+}
+
+function assertClaimableProcessingRow(
+  row: ProcessingAuthorityRow,
+): PersistedProcessingContext {
+  if (
+    row.processing_context_json === null ||
+    row.media_json === null ||
+    row.media_sha256 === null ||
+    row.processing_receipt_id === null ||
+    row.processing_receipt_sha256 === null
+  )
+    throw new RepositoryError("persisted_data_corrupt");
+  const persisted = parsePersistedProcessingContext(
+    row.processing_context_json,
+  );
+  const processing = persisted.processing;
+  if (processing.kind !== "c5-durable-processing-context-v2")
+    throw new RepositoryError("persisted_data_corrupt");
+  let media: StoredMedia;
+  try {
+    media = parseStoredMedia(row.media_json);
+  } catch {
+    throw new RepositoryError("persisted_data_corrupt");
+  }
+  const expectedUpload =
+    row.mode === "free"
+      ? Object.freeze({
+          attemptId: row.id,
+          athleteId: row.athlete_id,
+          mode: "free" as const,
+          generation: row.processing_generation,
+          uploadedAt: persisted.upload.uploadedAt,
+          verified: null,
+        })
+      : Object.freeze({
+          attemptId: row.id,
+          athleteId: row.athlete_id,
+          mode: "verified" as const,
+          generation: row.processing_generation,
+          uploadedAt: persisted.upload.uploadedAt,
+          verified:
+            row.challenge_id === "wall-pass" &&
+            row.challenge_version === 1 &&
+            row.calibration_session_id !== null &&
+            row.calibration_nonce !== null
+              ? Object.freeze({
+                  challenge: Object.freeze({
+                    id: "wall-pass" as const,
+                    version: 1 as const,
+                  }),
+                  calibrationSessionId: row.calibration_session_id,
+                  calibrationNonce: row.calibration_nonce,
+                })
+              : null,
+        });
+  if (
+    (expectedUpload.mode === "verified" && expectedUpload.verified === null) ||
+    !sameUploadContext(
+      persisted.upload,
+      expectedUpload as MediaUploadContext,
+    ) ||
+    persisted.sourceSha256 !== row.media_sha256 ||
+    processing.receipt.frameBatchId !== row.processing_receipt_id ||
+    processing.receipt.sha256 !== row.processing_receipt_sha256 ||
+    media.id !== processing.receipt.mediaId
+  )
+    throw new RepositoryError("persisted_data_corrupt");
+  return persisted;
 }
 
 function parsePersistedUploadContext(value: unknown): MediaUploadContext {
@@ -1801,11 +1938,65 @@ function decodeCursor(
   }
 }
 
-type LiveLeaderboardCursor = Readonly<{
-  attemptId: string;
-  score: number;
-  completedAt: string;
-}>;
+type LiveLeaderboardCursor = Pick<
+  LiveLeaderboardCursorPayload,
+  "attemptId" | "score" | "completedAt"
+>;
+
+const AES_256_GCM_KEY_BYTES = 32;
+const AES_256_GCM_IV_BYTES = 12;
+const AES_256_GCM_TAG_BYTES = 16;
+const AES_256_GCM_MINIMUM_PAYLOAD_BYTES =
+  AES_256_GCM_IV_BYTES + AES_256_GCM_TAG_BYTES;
+const processLiveLeaderboardCursorKey = randomBytes(AES_256_GCM_KEY_BYTES);
+
+const processLiveLeaderboardCursorCodec: LiveLeaderboardCursorCodec =
+  Object.freeze({
+    encode(value: LiveLeaderboardCursorPayload) {
+      const iv = randomBytes(AES_256_GCM_IV_BYTES);
+      const cipher = createCipheriv(
+        "aes-256-gcm",
+        processLiveLeaderboardCursorKey,
+        iv,
+      );
+      const encrypted = Buffer.concat([
+        cipher.update(stableJson(value), "utf8"),
+        cipher.final(),
+      ]);
+      return Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString(
+        "base64url",
+      );
+    },
+    decode(cursor: string) {
+      try {
+        const encoded = Buffer.from(cursor, "base64url");
+        if (encoded.length <= AES_256_GCM_MINIMUM_PAYLOAD_BYTES)
+          throw new Error("invalid cursor");
+        const decipher = createDecipheriv(
+          "aes-256-gcm",
+          processLiveLeaderboardCursorKey,
+          encoded.subarray(0, AES_256_GCM_IV_BYTES),
+        );
+        decipher.setAuthTag(
+          encoded.subarray(
+            AES_256_GCM_IV_BYTES,
+            AES_256_GCM_MINIMUM_PAYLOAD_BYTES,
+          ),
+        );
+        const value = JSON.parse(
+          Buffer.concat([
+            decipher.update(
+              encoded.subarray(AES_256_GCM_MINIMUM_PAYLOAD_BYTES),
+            ),
+            decipher.final(),
+          ]).toString("utf8"),
+        );
+        return parseLiveLeaderboardCursorPayload(value);
+      } catch {
+        throw new RepositoryError("invalid_input");
+      }
+    },
+  });
 
 function assertLiveLeaderboardInput(input: LiveLeaderboardPageInput): void {
   if (
@@ -1820,48 +2011,47 @@ function assertLiveLeaderboardInput(input: LiveLeaderboardPageInput): void {
     throw new RepositoryError("invalid_input");
 }
 
-function encodeLiveLeaderboardCursor(
-  entry: Readonly<{
-    attemptId: string;
-    score: number;
-    completedAt: string;
-  }>,
-): string {
-  return Buffer.from(
-    stableJson({
-      version: 1,
-      attemptId: entry.attemptId,
-      score: entry.score,
-      completedAt: entry.completedAt,
-    }),
-  ).toString("base64url");
-}
-
-function decodeLiveLeaderboardCursor(cursor: string): LiveLeaderboardCursor {
-  try {
-    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-    const score = isRecord(value) ? value.score : undefined;
-    if (
-      !isRecord(value) ||
-      !hasExactKeys(value, ["version", "attemptId", "score", "completedAt"]) ||
-      value.version !== 1 ||
-      !isUuid(value.attemptId) ||
-      typeof score !== "number" ||
-      !Number.isInteger(score) ||
-      score < 0 ||
-      score > 100 ||
-      typeof value.completedAt !== "string" ||
-      !UtcIsoTimestampSchema.safeParse(value.completedAt).success
-    )
-      throw new Error("invalid live leaderboard cursor");
-    return Object.freeze({
-      attemptId: value.attemptId,
-      score,
-      completedAt: value.completedAt,
-    });
-  } catch {
-    throw new RepositoryError("invalid_input");
-  }
+function parseLiveLeaderboardCursorPayload(
+  value: unknown,
+): LiveLeaderboardCursorPayload {
+  const score = isRecord(value) ? value.score : undefined;
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "version",
+      "challengeId",
+      "challengeVersion",
+      "ruleVersion",
+      "calculatedAt",
+      "attemptId",
+      "score",
+      "completedAt",
+    ]) ||
+    value.version !== 2 ||
+    value.challengeId !== "wall-pass" ||
+    value.challengeVersion !== 1 ||
+    value.ruleVersion !== "wall-pass-v1-score-1" ||
+    !isUuid(value.attemptId) ||
+    typeof score !== "number" ||
+    !Number.isInteger(score) ||
+    score < 0 ||
+    score > 100 ||
+    typeof value.calculatedAt !== "string" ||
+    !UtcIsoTimestampSchema.safeParse(value.calculatedAt).success ||
+    typeof value.completedAt !== "string" ||
+    !UtcIsoTimestampSchema.safeParse(value.completedAt).success
+  )
+    throw new Error("invalid live leaderboard cursor");
+  return Object.freeze({
+    version: 2,
+    challengeId: "wall-pass",
+    challengeVersion: 1,
+    ruleVersion: "wall-pass-v1-score-1",
+    calculatedAt: value.calculatedAt,
+    attemptId: value.attemptId,
+    score,
+    completedAt: value.completedAt,
+  });
 }
 
 function isAfterLiveLeaderboardCursor(

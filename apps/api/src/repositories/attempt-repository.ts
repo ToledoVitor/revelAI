@@ -6,6 +6,7 @@ import type {
   VerifiedResult,
 } from "@revelai/contracts";
 import type { DurableProcessingContext } from "../media/extraction-manifest.js";
+import type { AcceptedMediaHandoff } from "../media/accepted-media-handoff.js";
 import type { AnalysisJob } from "../queue/analysis-queue.js";
 
 export type StoredMedia = Readonly<{
@@ -134,6 +135,8 @@ export type MediaUploadContext =
 export type PersistedProcessingContext = Readonly<{
   upload: MediaUploadContext;
   processing: DurableProcessingContext;
+  /** C4-owned column, independently matched to JSON and C5's receipt. */
+  sourceSha256: string;
 }>;
 
 /** C3-compatible, cursor-paginated public projection with no athlete fields. */
@@ -261,19 +264,16 @@ export interface AttemptRepository {
   ): Promise<MediaUploadContext>;
   attachPreparedMedia(
     input: Readonly<{
-      context: MediaUploadContext;
-      media: StoredMediaAttachment;
-      processingContext: DurableProcessingContext;
-    }>,
-  ): Promise<AnalysisJob>;
-  attachValidatedMedia(
-    input: Readonly<{
-      attemptId: string;
-      athleteId: string;
-      media: StoredMediaAttachment;
+      accepted: AcceptedMediaHandoff;
     }>,
   ): Promise<AnalysisJob>;
   rollbackMediaAttachment(
+    input: Readonly<{
+      attemptId: string;
+      generation: number;
+    }>,
+  ): Promise<void>;
+  recoverMediaAttachment(
     input: Readonly<{
       attemptId: string;
       generation: number;

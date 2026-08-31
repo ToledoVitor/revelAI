@@ -1,4 +1,5 @@
 import { constants } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -15,8 +16,11 @@ import { decode } from "jpeg-js";
 import {
   attestVerifiedExtractionContinuity,
   createExtractionManifest,
+  createStorageExtractionReceipt,
+  issueStorageExtractionReceipt,
   type ExtractedFrame,
   type ExtractionManifest,
+  type StorageReceiptAuthority,
 } from "../media/extraction-manifest.js";
 import { freeSampleTimestamps } from "../media/eligibility.js";
 import { originalOrFrameDeleteAt } from "../media/retention-deadlines.js";
@@ -67,6 +71,10 @@ export interface FrameRetentionRepository {
 
 type DecodedFrame = Readonly<{ index: number; timestampSeconds: number }>;
 type SceneEvidence = Readonly<{ timestampSeconds: number; score: number }>;
+type ExtractionAuthority = Pick<
+  StorageReceiptAuthority,
+  "athleteId" | "calibrationSessionId" | "calibrationNonce"
+>;
 
 // FFmpeg showinfo can emit a complete per-frame record with colour, side-data,
 // and metadata. This cap permits 640 bounded 512-byte records plus process
@@ -123,6 +131,8 @@ export class LocalFrameExtraction {
       uploadedAt: string;
       /** Acceptance always extracts from the private staged upload. */
       source: "staged";
+      /** Required for source digest verification and receipt publication. */
+      authority: ExtractionAuthority;
     }>,
   ): Promise<ExtractionManifest> {
     const batchId = this.ids.next();
@@ -144,6 +154,8 @@ export class LocalFrameExtraction {
       if (scheduled.kind === "conflict")
         throw new MediaPipelineError("media_probe_failed");
       await assertPrivateRegularFile(inputPath);
+      if ((await sha256PrivateFile(inputPath)) !== input.mediaSha256)
+        throw new MediaPipelineError("media_probe_failed");
       await mkdir(staging, { mode: 0o700 });
       stagingOwned = true;
       await chmod(staging, 0o700);
@@ -188,7 +200,34 @@ export class LocalFrameExtraction {
       const manifest = createExtractionManifest({ ...input, frames });
       if (manifest.mode === "verified")
         attestVerifiedExtractionContinuity(manifest, evidence.scenes);
+      let receiptSha256: string | null = null;
+      const receipt = createStorageExtractionReceipt({
+        authority: Object.freeze({
+          attemptId: input.attemptId,
+          athleteId: input.authority.athleteId,
+          generation: input.generation,
+          mode: input.mode,
+          mediaId: input.mediaId,
+          sourceSha256: input.mediaSha256,
+          calibrationSessionId: input.authority.calibrationSessionId,
+          calibrationNonce: input.authority.calibrationNonce,
+        }),
+        manifest,
+        frames: frames.map((frame) => frame.rawBytes),
+        activeScenes: input.mode === "verified" ? evidence.scenes : null,
+      });
+      const bytes = Buffer.from(JSON.stringify(receipt));
+      receiptSha256 = createHash("sha256").update(bytes).digest("hex");
+      await writeFile(safeChild(staging, ".receipt.json"), bytes, {
+        mode: 0o600,
+        flag: "wx",
+      });
+      await chmod(safeChild(staging, ".receipt.json"), 0o600);
       await publishFrameSet(staging, published);
+      issueStorageExtractionReceipt(manifest, {
+        frameBatchId: batchId,
+        sha256: receiptSha256,
+      });
       return manifest;
     } catch (error) {
       // The retention record intentionally remains due: it can clean either
@@ -238,6 +277,41 @@ export class LocalFrameExtraction {
       return bytes;
     } catch {
       // Do not surface an OS error that embeds the private filesystem layout.
+      throw new MediaPipelineError("media_probe_failed");
+    }
+  }
+
+  /** Reads the receipt only from a complete, C5-owned opaque frame batch. */
+  public async readReceipt(
+    input: Readonly<{ frameBatchId: string }>,
+  ): Promise<Readonly<{ bytes: Uint8Array }>> {
+    if (!isOpaqueUuid(input.frameBatchId))
+      throw new MediaPipelineError("media_probe_failed");
+    const directory = safeChild(this.frames, input.frameBatchId);
+    const receipt = safeChild(directory, ".receipt.json");
+    const completion = safeChild(directory, ".complete");
+    try {
+      const completionStat = await lstat(completion);
+      const receiptStat = await lstat(receipt);
+      if (
+        !completionStat.isFile() ||
+        completionStat.isSymbolicLink() ||
+        !receiptStat.isFile() ||
+        receiptStat.isSymbolicLink() ||
+        receiptStat.size < 2 ||
+        receiptStat.size > 2 * 1024 * 1024
+      )
+        throw new MediaPipelineError("media_probe_failed");
+      const handle = await open(
+        receipt,
+        constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+      );
+      return Object.freeze({
+        bytes: new Uint8Array(
+          await handle.readFile().finally(() => handle.close()),
+        ),
+      });
+    } catch {
       throw new MediaPipelineError("media_probe_failed");
     }
   }
@@ -462,6 +536,27 @@ async function materializeFrames(
   )
     throw new MediaPipelineError("media_probe_failed");
   return Object.freeze(frames);
+}
+
+async function sha256PrivateFile(path: string): Promise<string> {
+  const handle = await open(
+    path,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const hash = createHash("sha256");
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    let position = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+      if (bytesRead === 0) break;
+      hash.update(chunk.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    return hash.digest("hex");
+  } finally {
+    await handle.close();
+  }
 }
 
 async function publishFrameSet(

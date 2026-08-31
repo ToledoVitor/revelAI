@@ -9,6 +9,11 @@ import {
 } from "../database/sqlite-database.js";
 import { SQLiteAttemptRepository } from "../repositories/sqlite-attempt-repository.js";
 import { createStoredMediaAttachment } from "../repositories/attempt-repository.js";
+import { createAcceptedMediaHandoff } from "./accepted-media-handoff.js";
+import {
+  createStorageBackedDurableProcessingContext,
+  issueStorageExtractionReceipt,
+} from "./extraction-manifest.js";
 import { QueueUnavailableError } from "../queue/analysis-queue.js";
 import { AttemptService } from "../services/attempt-service.js";
 import { RetentionScavenger } from "./retention-scavenger.js";
@@ -45,10 +50,11 @@ describe("SQLiteRetentionRepository", () => {
       kind: "temporary",
       deleteAt: "2030-01-15T13:00:00.000Z",
     });
-    await repository.attachValidatedMedia({
-      attemptId: ATTEMPT,
-      athleteId: ATHLETE,
-      media: createStoredMediaAttachment({
+    await attachStoredMedia(
+      repository,
+      ATTEMPT,
+      ATHLETE,
+      createStoredMediaAttachment({
         id: MEDIA,
         contentType: "video/mp4",
         bytes: 1,
@@ -60,7 +66,7 @@ describe("SQLiteRetentionRepository", () => {
           deleteAt: "2030-01-15T13:00:00.000Z",
         },
       }),
-    });
+    );
   });
 
   afterEach(async () => {
@@ -176,10 +182,11 @@ describe("SQLiteRetentionRepository", () => {
       clock: { now: () => "2030-01-15T12:00:00.000Z" },
       ids: { next: () => "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
     });
-    await reopenedAttempts.attachValidatedMedia({
-      attemptId: secondAttempt,
-      athleteId: ATHLETE,
-      media: createStoredMediaAttachment({
+    await attachStoredMedia(
+      reopenedAttempts,
+      secondAttempt,
+      ATHLETE,
+      createStoredMediaAttachment({
         id: secondMedia,
         contentType: "video/mp4",
         bytes: 1,
@@ -191,7 +198,7 @@ describe("SQLiteRetentionRepository", () => {
           deleteAt: "2030-01-15T13:00:00.000Z",
         },
       }),
-    });
+    );
 
     database.close();
     database = openSqliteDatabase(join(directory, "api.sqlite"));
@@ -380,21 +387,34 @@ describe("SQLiteRetentionRepository", () => {
       },
     });
 
+    const rollbackContext = await attempts.prepareMediaUpload({
+      attemptId: rolledBackAttempt,
+      athleteId: ATHLETE,
+    });
+    const rollbackMedia = createStoredMediaAttachment({
+      id: stored.id,
+      contentType: stored.contentType,
+      bytes: stored.bytes,
+      uploadedAt,
+      deleteAt: "2030-01-16T11:00:00.000Z",
+      transition: {
+        kind: "upload-transition",
+        resourceId: stored.id,
+        deleteAt: "2030-01-15T13:00:00.000Z",
+      },
+    });
     await expect(
-      service.attachValidatedMedia({
-        attemptId: rolledBackAttempt,
-        athleteId: ATHLETE,
-        media: createStoredMediaAttachment({
-          id: stored.id,
-          contentType: stored.contentType,
-          bytes: stored.bytes,
-          uploadedAt,
-          deleteAt: "2030-01-16T11:00:00.000Z",
-          transition: {
-            kind: "upload-transition",
-            resourceId: stored.id,
-            deleteAt: "2030-01-15T13:00:00.000Z",
-          },
+      service.attachAcceptedMedia({
+        accepted: createAcceptedMediaHandoff({
+          context: rollbackContext,
+          storedMedia: rollbackMedia,
+          sourceSha256: stored.sha256,
+          processingContext: createStorageBackedDurableProcessingContext({
+            frameBatchId: "55555555-5555-4555-8555-555555555555",
+            mediaId: rollbackMedia.id,
+            sha256: "b".repeat(64),
+          }),
+          cleanup: { cleanup: async () => storage.delete(stored.id) },
         }),
       }),
     ).rejects.toBeInstanceOf(QueueUnavailableError);
@@ -411,7 +431,7 @@ describe("SQLiteRetentionRepository", () => {
           "payload",
         ),
       ),
-    ).resolves.toEqual(payload);
+    ).rejects.toMatchObject({ code: "ENOENT" });
 
     database.close();
     database = openSqliteDatabase(join(directory, "api.sqlite"));
@@ -500,8 +520,8 @@ describe("SQLiteRetentionRepository", () => {
     const pipeline = new MediaPipeline({
       storage,
       extractor: {
-        extract: async (input) =>
-          createExtractionManifest({
+        extract: async (input) => {
+          const manifest = createExtractionManifest({
             attemptId: input.attemptId,
             generation: input.generation,
             mediaId: input.mediaId,
@@ -513,7 +533,13 @@ describe("SQLiteRetentionRepository", () => {
               reference: `${input.mediaId}_${String(ordinal).padStart(4, "0")}`,
               rawBytes: Uint8Array.of(ordinal),
             })),
-          }),
+          });
+          issueStorageExtractionReceipt(manifest, {
+            frameBatchId: "55555555-5555-4555-8555-555555555555",
+            sha256: "b".repeat(64),
+          });
+          return manifest;
+        },
       },
     });
     const attempts = new SQLiteAttemptRepository({
@@ -536,16 +562,22 @@ describe("SQLiteRetentionRepository", () => {
           attemptId: uploadAttempt,
           generation,
           uploadedAt,
+          authority: await attempts.prepareMediaUpload({
+            attemptId: uploadAttempt,
+            athleteId: ATHLETE,
+          }),
         },
       });
 
     const accepted = await accept(1);
     expect(Object.keys(accepted).sort()).toEqual([
       "cleanup",
+      "context",
       "manifest",
       "probe",
       "processingContext",
       "sha256",
+      "sourceSha256",
       "storedMedia",
     ]);
     expect(JSON.stringify(accepted)).not.toContain("transitionResourceId");
@@ -559,11 +591,7 @@ describe("SQLiteRetentionRepository", () => {
         subscribe: () => () => undefined,
       },
     });
-    await service.attachValidatedMedia({
-      attemptId: uploadAttempt,
-      athleteId: ATHLETE,
-      media: accepted.storedMedia,
-    });
+    await service.attachAcceptedMedia({ accepted });
     await expect(
       attempts.getAttempt({ attemptId: uploadAttempt, athleteId: ATHLETE }),
     ).resolves.toMatchObject({
@@ -605,8 +633,8 @@ describe("SQLiteRetentionRepository", () => {
     const rejectPipeline = new MediaPipeline({
       storage,
       extractor: {
-        extract: async (input) =>
-          createExtractionManifest({
+        extract: async (input) => {
+          const manifest = createExtractionManifest({
             attemptId: input.attemptId,
             generation: input.generation,
             mediaId: input.mediaId,
@@ -618,7 +646,13 @@ describe("SQLiteRetentionRepository", () => {
               reference: `${input.mediaId}_${String(ordinal).padStart(4, "0")}`,
               rawBytes: Uint8Array.of(ordinal),
             })),
-          }),
+          });
+          issueStorageExtractionReceipt(manifest, {
+            frameBatchId: "55555555-5555-4555-8555-555555555555",
+            sha256: "b".repeat(64),
+          });
+          return manifest;
+        },
       },
     });
     const rejected = await rejectPipeline.accept({
@@ -630,6 +664,10 @@ describe("SQLiteRetentionRepository", () => {
         attemptId: retryAttempt,
         generation: 1,
         uploadedAt,
+        authority: await reopened.prepareMediaUpload({
+          attemptId: retryAttempt,
+          athleteId: ATHLETE,
+        }),
       },
     });
     const failing = new AttemptService({
@@ -643,11 +681,7 @@ describe("SQLiteRetentionRepository", () => {
       },
     });
     await expect(
-      failing.attachValidatedMedia({
-        attemptId: retryAttempt,
-        athleteId: ATHLETE,
-        media: rejected.storedMedia,
-      }),
+      failing.attachAcceptedMedia({ accepted: rejected }),
     ).rejects.toBeInstanceOf(QueueUnavailableError);
 
     database.close();
@@ -669,6 +703,10 @@ describe("SQLiteRetentionRepository", () => {
         attemptId: retryAttempt,
         generation: 2,
         uploadedAt,
+        authority: await afterRollback.prepareMediaUpload({
+          attemptId: retryAttempt,
+          athleteId: ATHLETE,
+        }),
       },
     });
     const retried = await new AttemptService({
@@ -678,14 +716,32 @@ describe("SQLiteRetentionRepository", () => {
         enqueue: async () => undefined,
         subscribe: () => () => undefined,
       },
-    }).attachValidatedMedia({
-      attemptId: retryAttempt,
-      athleteId: ATHLETE,
-      media: retry.storedMedia,
-    });
+    }).attachAcceptedMedia({ accepted: retry });
     expect(retried).toEqual({ attemptId: retryAttempt, generation: 2 });
   });
 });
+
+async function attachStoredMedia(
+  repository: SQLiteAttemptRepository,
+  attemptId: string,
+  athleteId: string,
+  storedMedia: ReturnType<typeof createStoredMediaAttachment>,
+) {
+  const context = await repository.prepareMediaUpload({ attemptId, athleteId });
+  return repository.attachPreparedMedia({
+    accepted: createAcceptedMediaHandoff({
+      context,
+      storedMedia,
+      sourceSha256: "a".repeat(64),
+      processingContext: createStorageBackedDurableProcessingContext({
+        frameBatchId: "55555555-5555-4555-8555-555555555555",
+        mediaId: storedMedia.id,
+        sha256: "b".repeat(64),
+      }),
+      cleanup: { cleanup: async () => undefined },
+    }),
+  });
+}
 
 async function* chunks(value: Uint8Array): AsyncIterable<Uint8Array> {
   yield value;

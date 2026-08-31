@@ -22,11 +22,8 @@ import {
   AnalysisWorker,
   ExpectedProcessingFailure,
 } from "../workers/analysis-worker.js";
-import {
-  createDurableProcessingContext,
-  createExtractionManifest,
-  reconstructDurableProcessingContext,
-} from "../media/extraction-manifest.js";
+import { createStorageBackedDurableProcessingContext } from "../media/extraction-manifest.js";
+import { createAcceptedMediaHandoff } from "../media/accepted-media-handoff.js";
 import {
   SQLiteAttemptRepository,
   type Clock,
@@ -497,15 +494,20 @@ async function attachMedia(
     }>;
   }>,
 ) {
-  const uploadedAt = new Date(
-    Date.parse(input.media.deleteAt) - 23 * 60 * 60 * 1000,
-  ).toISOString();
+  const context = await fixture.repository.prepareMediaUpload({
+    attemptId: input.attemptId,
+    athleteId: input.athleteId,
+  });
+  const uploadedAt = context.uploadedAt;
   const transitionDeleteAt = new Date(
     Date.parse(uploadedAt) + 60 * 60 * 1000,
   ).toISOString();
   const media: StoredMedia = {
     ...input.media,
     uploadedAt,
+    deleteAt: new Date(
+      Date.parse(uploadedAt) + 23 * 60 * 60 * 1000,
+    ).toISOString(),
     transition: {
       kind: "upload-transition",
       resourceId: input.media.id,
@@ -517,9 +519,8 @@ async function attachMedia(
       "INSERT INTO retention_cleanup_records (resource_id, attempt_id, resource_kind, delete_at, created_at) VALUES (?, ?, 'temporary', ?, ?)",
     )
     .run(media.id, input.attemptId, media.transition.deleteAt, uploadedAt);
-  return fixture.repository.attachValidatedMedia({
-    ...input,
-    media: createStoredMediaAttachment(media),
+  return fixture.repository.attachPreparedMedia({
+    accepted: preparedAccepted(context, createStoredMediaAttachment(media)),
   });
 }
 
@@ -559,29 +560,29 @@ async function scheduleTemporaryRetention(
 function freeProcessingContext(
   input: Readonly<{ attemptId: string; generation: number; mediaId: string }>,
 ) {
-  const duration = 3;
-  const manifest = createExtractionManifest({
-    attemptId: input.attemptId,
-    generation: input.generation,
+  return createStorageBackedDurableProcessingContext({
+    frameBatchId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
     mediaId: input.mediaId,
-    mediaSha256: "e".repeat(64),
-    mode: "free",
-    probe: {
-      container: "mp4",
-      durationSeconds: duration,
-      displayWidth: 480,
-      displayHeight: 853,
-      nominalFps: 12,
-      codec: "h264",
-      sourceRotationDegrees: 0,
-    },
-    frames: Array.from({ length: 12 }, (_, index) => ({
-      timestampSeconds: (duration * index) / 11,
-      reference: `free-${String(index).padStart(4, "0")}`,
-      rawBytes: Uint8Array.of(index),
-    })),
+    sha256: "d".repeat(64),
   });
-  return createDurableProcessingContext(manifest);
+}
+
+function preparedAccepted(
+  context: Awaited<ReturnType<SQLiteAttemptRepository["prepareMediaUpload"]>>,
+  media: StoredMediaAttachment,
+  processingContext = freeProcessingContext({
+    attemptId: context.attemptId,
+    generation: context.generation,
+    mediaId: media.id,
+  }),
+) {
+  return createAcceptedMediaHandoff({
+    context,
+    storedMedia: media,
+    sourceSha256: "e".repeat(64),
+    processingContext,
+    cleanup: { cleanup: async () => undefined },
+  });
 }
 
 describe("SQLiteAttemptRepository", () => {
@@ -741,30 +742,31 @@ describe("SQLiteAttemptRepository", () => {
     });
     await expect(
       fixture.repository.attachPreparedMedia({
-        context: poisonedContext,
-        media: createStoredMediaAttachment(media),
-        processingContext,
+        accepted: preparedAccepted(
+          poisonedContext as typeof first,
+          createStoredMediaAttachment(media),
+          processingContext,
+        ),
       }),
     ).rejects.toMatchObject({ code: "invalid_input" });
     const job = await fixture.repository.attachPreparedMedia({
-      context: first,
-      media: createStoredMediaAttachment(media),
-      processingContext,
+      accepted: preparedAccepted(
+        first,
+        createStoredMediaAttachment(media),
+        processingContext,
+      ),
     });
     await expect(
       fixture.repository.attachPreparedMedia({
-        context: stale,
-        media: createStoredMediaAttachment(
-          preparedStoredMedia({
-            id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-            uploadedAt: stale.uploadedAt,
-          }),
+        accepted: preparedAccepted(
+          stale,
+          createStoredMediaAttachment(
+            preparedStoredMedia({
+              id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              uploadedAt: stale.uploadedAt,
+            }),
+          ),
         ),
-        processingContext: freeProcessingContext({
-          attemptId: ATTEMPT_A,
-          generation: stale.generation,
-          mediaId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-        }),
       }),
     ).rejects.toMatchObject({ code: "invalid_attempt_transition" });
 
@@ -783,19 +785,7 @@ describe("SQLiteAttemptRepository", () => {
     expect(persisted).toEqual({
       upload: first,
       processing: processingContext,
-    });
-    const reconstructed = await reconstructDurableProcessingContext({
-      context: persisted!.processing,
-      frames: {
-        readFrame: async (reference) =>
-          Uint8Array.of(Number(reference.slice("free-".length))),
-      },
-    });
-    expect(reconstructed).toMatchObject({
-      attemptId: ATTEMPT_A,
-      generation: 1,
-      mediaId: media.id,
-      mode: "free",
+      sourceSha256: "e".repeat(64),
     });
     await expect(
       reopened.releaseProcessingClaim({
@@ -866,6 +856,63 @@ describe("SQLiteAttemptRepository", () => {
         calibrationNonce: "a".repeat(43),
       },
     });
+  });
+
+  it("fails closed on exact claimed receipt/source row mismatches while stale jobs remain null", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await attachMedia(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "media-a",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    await expect(
+      fixture.repository.claimProcessing({
+        attemptId: job.attemptId,
+        generation: job.generation + 1,
+      }),
+    ).resolves.toBeNull();
+    fixture.database.raw
+      .prepare(
+        "UPDATE attempts SET processing_context_json = json_set(processing_context_json, '$.upload.generation', ?) WHERE id = ?",
+      )
+      .run(job.generation + 1, ATTEMPT_A);
+    await expect(fixture.repository.claimProcessing(job)).rejects.toMatchObject(
+      {
+        code: "persisted_data_corrupt",
+      },
+    );
+    fixture.database.raw
+      .prepare(
+        "UPDATE attempts SET processing_context_json = json_set(processing_context_json, '$.upload.generation', ?) WHERE id = ?",
+      )
+      .run(job.generation, ATTEMPT_A);
+    fixture.database.raw
+      .prepare("UPDATE attempts SET media_sha256 = ? WHERE id = ?")
+      .run("f".repeat(64), ATTEMPT_A);
+    await expect(fixture.repository.claimProcessing(job)).rejects.toMatchObject(
+      {
+        code: "persisted_data_corrupt",
+      },
+    );
+    fixture.database.raw
+      .prepare(
+        "UPDATE attempts SET media_sha256 = ?, processing_context_json = NULL WHERE id = ?",
+      )
+      .run("e".repeat(64), ATTEMPT_A);
+    await expect(fixture.repository.claimProcessing(job)).rejects.toMatchObject(
+      {
+        code: "persisted_data_corrupt",
+      },
+    );
   });
 
   it("allows exactly one independently-connected actor to consume a ready calibration session", async () => {
@@ -1047,51 +1094,16 @@ describe("SQLiteAttemptRepository", () => {
     });
 
     await expect(
-      fixture.repository.attachValidatedMedia({
-        attemptId: ATTEMPT_A,
-        athleteId: ATHLETE_A,
-        media: {
-          id: "media-a",
-          contentType: "video/mp4",
-          bytes: 10,
-          deleteAt: "2040-01-01T00:00:00.000Z",
-        } as unknown as StoredMediaAttachment,
+      fixture.repository.attachPreparedMedia({ accepted: {} as never }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(
+      fixture.repository.attachPreparedMedia({
+        accepted: { context: {}, storedMedia: {} } as never,
       }),
     ).rejects.toMatchObject({ code: "invalid_input" });
     await expect(
-      fixture.repository.attachValidatedMedia({
-        attemptId: ATTEMPT_A,
-        athleteId: ATHLETE_A,
-        media: {
-          id: "media-a",
-          contentType: "video/mp4",
-          bytes: 10,
-          uploadedAt: "2030-01-15T12:00:00.000Z",
-          deleteAt: "2040-01-01T00:00:00.000Z",
-          transition: {
-            kind: "upload-transition",
-            resourceId: "media-a",
-            deleteAt: "2030-01-15T13:00:00.000Z",
-          },
-        } as unknown as StoredMediaAttachment,
-      }),
-    ).rejects.toMatchObject({ code: "invalid_input" });
-    await expect(
-      fixture.repository.attachValidatedMedia({
-        attemptId: ATTEMPT_A,
-        athleteId: ATHLETE_A,
-        media: {
-          id: "media-a",
-          contentType: "video/mp4",
-          bytes: 10,
-          uploadedAt: "2030-01-15T12:00:00.000Z",
-          deleteAt: "2030-01-16T11:00:00.000Z",
-          transition: {
-            kind: "upload-transition",
-            resourceId: "media-b",
-            deleteAt: "2030-01-15T13:00:00.000Z",
-          },
-        } as unknown as StoredMediaAttachment,
+      fixture.repository.attachPreparedMedia({
+        accepted: { cleanup: { cleanup: async () => undefined } } as never,
       }),
     ).rejects.toMatchObject({ code: "invalid_input" });
     expect(
@@ -1353,6 +1365,56 @@ describe("SQLiteAttemptRepository", () => {
           completedAt,
         },
       ],
+      nextCursor: null,
+    });
+    expect(
+      Buffer.from(firstPage.nextCursor!, "base64url").toString("utf8"),
+    ).not.toContain(ATTEMPT_A);
+    await expect(
+      fixture.repository.listLiveLeaderboard({
+        challenge: {
+          id: "wall-pass",
+          version: 1,
+          ruleVersion: "wall-pass-v1-score-1",
+        },
+        limit: 1,
+        cursor: firstPage.nextCursor!,
+        calculatedAt: "2030-01-15T12:00:01.000Z",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    const tamperedCursor = `${firstPage.nextCursor!.slice(0, -1)}${
+      firstPage.nextCursor!.at(-1) === "A" ? "B" : "A"
+    }`;
+    await expect(
+      fixture.repository.listLiveLeaderboard({
+        challenge: {
+          id: "wall-pass",
+          version: 1,
+          ruleVersion: "wall-pass-v1-score-1",
+        },
+        limit: 1,
+        cursor: tamperedCursor,
+        calculatedAt: completedAt,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await fixture.repository.tombstoneAttempt({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+    });
+    await expect(
+      fixture.repository.listLiveLeaderboard({
+        challenge: {
+          id: "wall-pass",
+          version: 1,
+          ruleVersion: "wall-pass-v1-score-1",
+        },
+        limit: 1,
+        cursor: firstPage.nextCursor!,
+        calculatedAt: completedAt,
+      }),
+    ).resolves.toEqual({
+      cohortSize: 1,
+      entries: [{ entryId: ENTRY_B, rank: 1, score: 80, completedAt }],
       nextCursor: null,
     });
     expect(() =>
@@ -1774,8 +1836,25 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       generation: firstJob.generation,
     });
+    await fixture.repository.recoverMediaAttachment({
+      attemptId: ATTEMPT_A,
+      generation: firstJob.generation,
+    });
 
     expect(secondJob).toEqual({ attemptId: ATTEMPT_A, generation: 2 });
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({ status: "uploaded", media: { id: "media-b" } });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT cleanup_requested_at FROM media_retention_records WHERE attempt_id = ? AND media_id = ?",
+        )
+        .get(ATTEMPT_A, "media-b"),
+    ).toMatchObject({ cleanup_requested_at: null });
     expect(await fixture.repository.claimProcessing(firstJob)).toBeNull();
     const firstClaim = (await fixture.repository.claimProcessing(secondJob))!;
     fixture.clock.advance(5 * 60_000);
@@ -2913,7 +2992,7 @@ describe("SQLiteAttemptRepository", () => {
     ).toMatchObject({ id: ATTEMPT_A });
   });
 
-  it("projects every valid pre-v12 C5 attachment shape during repeated reopen", async () => {
+  it("resets contextless legacy uploads for a fresh generation during repeated reopen", async () => {
     const filename = join(fixture.directory, "legacy-c5-v10.sqlite");
     const legacy = openSqliteDatabaseAtVersionForTest(filename, 10);
     const uploadedAt = fixture.clock.now();
@@ -2989,7 +3068,7 @@ describe("SQLiteAttemptRepository", () => {
       clock: fixture.clock,
       ids: new TestIds(LEASE_A),
     });
-    for (const [attemptId, mediaId] of [
+    for (const [attemptId] of [
       [ATTEMPT_A, transitionId],
       [ATTEMPT_B, richId],
       [ATTEMPT_C, canonicalId],
@@ -2997,20 +3076,23 @@ describe("SQLiteAttemptRepository", () => {
       await expect(
         repository.getAttempt({ attemptId, athleteId: ATHLETE_A }),
       ).resolves.toMatchObject({
-        media: {
-          id: mediaId,
-          uploadedAt,
-          deleteAt,
-          transition: { resourceId: mediaId, deleteAt: temporaryDeleteAt },
-        },
+        status: "awaiting-upload",
+        media: null,
       });
       expect(
         upgraded.raw
-          .prepare("SELECT media_json FROM attempts WHERE id = ?")
+          .prepare(
+            "SELECT media_json, processing_context_json, processing_generation FROM attempts WHERE id = ?",
+          )
           .get(attemptId),
-      ).toMatchObject({
-        media_json: expect.not.stringContaining("sha256"),
+      ).toEqual({
+        media_json: null,
+        processing_context_json: null,
+        processing_generation: 2,
       });
+      await expect(
+        repository.claimProcessing({ attemptId, generation: 1 }),
+      ).resolves.toBeNull();
     }
     const reopened = upgraded.reopen();
     expect(
@@ -3020,6 +3102,40 @@ describe("SQLiteAttemptRepository", () => {
     ).toMatchObject({ count: 16 });
     reopened.close();
     upgraded.close();
+
+    const malformedFilename = join(
+      fixture.directory,
+      "legacy-c5-v15-malformed.sqlite",
+    );
+    const malformed = openSqliteDatabaseAtVersionForTest(malformedFilename, 15);
+    malformed.raw.exec(
+      "DROP TRIGGER attempts_media_json_requires_c5_transition",
+    );
+    malformed.raw.exec(
+      "DROP TRIGGER attempts_media_json_insert_requires_c5_transition",
+    );
+    malformed.raw
+      .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+      .run(ATHLETE_A, uploadedAt);
+    malformed.raw
+      .prepare(
+        "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, created_at, updated_at) VALUES (?, ?, 'free', NULL, NULL, NULL, 'uploaded', 'active', ?, 1, ?, ?)",
+      )
+      .run(ATTEMPT_A, ATHLETE_A, "{not-json", uploadedAt, uploadedAt);
+    malformed.close();
+    const malformedUpgraded = openSqliteDatabase(malformedFilename);
+    const malformedRepository = new SQLiteAttemptRepository({
+      database: malformedUpgraded,
+      clock: fixture.clock,
+      ids: new TestIds(LEASE_A),
+    });
+    await expect(
+      malformedRepository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).resolves.toMatchObject({ status: "awaiting-upload", media: null });
+    malformedUpgraded.close();
   });
 
   it("fails startup rather than marking conflicting legacy C5 media as migrated", () => {

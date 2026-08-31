@@ -7,7 +7,10 @@ import { LocalFrameExtraction } from "../storage/local-frame-extraction.js";
 import { RawMultipartByteCounter } from "./multipart-intake.js";
 import { MediaPipeline } from "./media-pipeline.js";
 import { MediaPipelineError } from "./probe.js";
-import type { ExtractionManifest } from "./extraction-manifest.js";
+import {
+  reconstructDurableProcessingContext,
+  type ExtractionManifest,
+} from "./extraction-manifest.js";
 
 const mediaId = "11111111-1111-4111-8111-111111111111";
 const frameBatchId = "33333333-3333-4333-8333-333333333333";
@@ -22,6 +25,14 @@ const retention = {
   attemptId: "22222222-2222-4222-8222-222222222222",
   generation: 1,
   uploadedAt: "2030-01-15T12:00:00.000Z",
+  authority: {
+    attemptId: "22222222-2222-4222-8222-222222222222",
+    athleteId: "44444444-4444-4444-8444-444444444444",
+    mode: "free" as const,
+    generation: 1,
+    uploadedAt: "2030-01-15T12:00:00.000Z",
+    verified: null,
+  },
 };
 const extractor = { extract: async () => ({}) as ExtractionManifest };
 
@@ -51,31 +62,29 @@ describe("MediaPipeline", () => {
         }),
       },
     });
+    const extraction = new LocalFrameExtraction({
+      root,
+      ids: { next: () => frameBatchId },
+      runner: {
+        run: async (command) => {
+          const timeline = Array.from({ length: 37 }, (_, index) => index / 12);
+          await Promise.all(
+            timeline.map((timestamp, index) =>
+              writeFile(
+                `${command.outputDirectory}/decoded-${String(index).padStart(6, "0")}.jpg`,
+                jpeg(index),
+                { mode: 0o600 },
+              ),
+            ),
+          );
+          return rawEvidence(timeline, []);
+        },
+      },
+      retention: { schedule: async () => ({ kind: "created" as const }) },
+    });
     const pipeline = new MediaPipeline({
       storage,
-      extractor: new LocalFrameExtraction({
-        root,
-        ids: { next: () => frameBatchId },
-        runner: {
-          run: async (command) => {
-            const timeline = Array.from(
-              { length: 37 },
-              (_, index) => index / 12,
-            );
-            await Promise.all(
-              timeline.map((timestamp, index) =>
-                writeFile(
-                  `${command.outputDirectory}/decoded-${String(index).padStart(6, "0")}.jpg`,
-                  jpeg(index),
-                  { mode: 0o600 },
-                ),
-              ),
-            );
-            return rawEvidence(timeline, []);
-          },
-        },
-        retention: { schedule: async () => ({ kind: "created" as const }) },
-      }),
+      extractor: extraction,
     });
     const accepted = await pipeline.accept({
       mode: "free",
@@ -92,6 +101,29 @@ describe("MediaPipeline", () => {
     });
     expect(await readdir(join(root, "originals"))).toEqual([mediaId]);
     expect(await readdir(join(root, "frames"))).toEqual([frameBatchId]);
+    expect(accepted.processingContext).toMatchObject({
+      kind: "c5-durable-processing-context-v2",
+      receipt: { frameBatchId, mediaId, sha256: expect.any(String) },
+    });
+    await expect(
+      reconstructDurableProcessingContext({
+        context: accepted.processingContext,
+        frames: extraction,
+        receipts: extraction,
+        authority: {
+          upload: {
+            attemptId: retention.authority.attemptId,
+            athleteId: retention.authority.athleteId,
+            generation: retention.authority.generation,
+            mode: retention.authority.mode,
+            mediaId,
+            sourceSha256: accepted.sha256,
+            calibrationSessionId: null,
+            calibrationNonce: null,
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ mediaId, mode: "free" });
     await expect(accepted.cleanup.cleanup()).resolves.toBeUndefined();
     await expect(accepted.cleanup.cleanup()).resolves.toBeUndefined();
     expect(await readdir(join(root, "originals"))).toEqual([]);

@@ -2,16 +2,20 @@ import { isMediaProbeAdmissible, type MediaMode } from "./eligibility.js";
 import { MediaPipelineError } from "./probe.js";
 import {
   createDurableProcessingContext,
-  type DurableProcessingContext,
   type ExtractionManifest,
 } from "./extraction-manifest.js";
+import {
+  createAcceptedMediaHandoff,
+  type AcceptedMediaCleanup,
+  type AcceptedMediaHandoff,
+} from "./accepted-media-handoff.js";
 import {
   acceptSingleMediaPart,
   type MultipartIntake,
 } from "./multipart-intake.js";
 import {
   createStoredMediaAttachment,
-  type StoredMediaAttachment,
+  type MediaUploadContext,
 } from "../repositories/attempt-repository.js";
 import { originalOrFrameDeleteAt } from "./retention-deadlines.js";
 import { temporaryDeleteAt } from "./retention-deadlines.js";
@@ -34,29 +38,28 @@ export interface MediaEvidenceExtractor {
       probe: StoredLocalMedia["probe"];
       uploadedAt: string;
       source: "staged";
+      authority: Readonly<{
+        athleteId: string;
+        calibrationSessionId: string | null;
+        calibrationNonce: string | null;
+      }>;
     }>,
   ): Promise<ExtractionManifest>;
 }
 
 /**
  * C5's acceptance result deliberately separates private evidence from its
- * six-field persistence attachment. `AcceptedMedia` therefore cannot be
- * structurally passed to `AttemptService.attachValidatedMedia`: only the
- * explicitly named, canonical `storedMedia` value crosses that boundary.
+ * six-field persistence attachment. The correlated values cross C5→C8 only
+ * through the branded accepted-media handoff, never as caller-mixable fields.
  */
-export type AcceptedMedia = Readonly<{
-  storedMedia: StoredMediaAttachment;
-  sha256: string;
-  probe: StoredLocalMedia["probe"];
-  manifest: ExtractionManifest;
-  processingContext: DurableProcessingContext;
-  cleanup: AcceptedMediaCleanup;
-}>;
+export type AcceptedMedia = AcceptedMediaHandoff &
+  Readonly<{
+    sha256: string;
+    probe: StoredLocalMedia["probe"];
+    manifest: ExtractionManifest;
+  }>;
 
-/** Opaque C5 cleanup capability: callers can request cleanup but never paths. */
-export type AcceptedMediaCleanup = Readonly<{
-  cleanup(): Promise<void>;
-}>;
+export type { AcceptedMediaCleanup } from "./accepted-media-handoff.js";
 
 /** The public acceptance capability cannot publish a probe-only upload. */
 export class MediaPipeline {
@@ -83,6 +86,7 @@ export class MediaPipeline {
         attemptId: string;
         generation: number;
         uploadedAt: string;
+        authority: MediaUploadContext;
       }>;
     }>,
   ): Promise<AcceptedMedia> {
@@ -122,6 +126,7 @@ export class MediaPipeline {
         attemptId: string;
         generation: number;
         uploadedAt: string;
+        authority: MediaUploadContext;
       }>;
     }>,
   ): Promise<AcceptedMedia> {
@@ -180,49 +185,84 @@ export class MediaPipeline {
         attemptId: string;
         generation: number;
         uploadedAt: string;
+        authority: MediaUploadContext;
       }>;
     }>,
   ): Promise<AcceptedMedia> {
     const staged = await input.session.inspect();
-    const manifest = await this.extractor.extract({
-      mode: input.mode,
-      attemptId: input.retention.attemptId,
-      generation: input.retention.generation,
-      mediaId: staged.id,
-      mediaSha256: staged.sha256,
-      probe: staged.probe,
-      uploadedAt: input.retention.uploadedAt,
-      source: "staged",
-    });
-    const processingContext = createDurableProcessingContext(manifest);
-    const stored = await input.session.publish();
-    const storedMedia = createStoredMediaAttachment({
-      id: stored.id,
-      contentType: stored.contentType,
-      bytes: stored.bytes,
-      uploadedAt: input.retention.uploadedAt,
-      deleteAt: originalOrFrameDeleteAt(input.retention.uploadedAt),
-      transition: Object.freeze({
-        kind: "upload-transition" as const,
-        resourceId: stored.id,
-        deleteAt: temporaryDeleteAt(input.retention.uploadedAt),
-      }),
-    });
-    return Object.freeze({
-      storedMedia,
-      sha256: stored.sha256,
-      probe: stored.probe,
-      manifest,
-      processingContext,
-      cleanup: this.cleanupCapability(stored.id, manifest),
-    });
+    const authority = input.retention.authority;
+    let cleanup: AcceptedMediaCleanup | undefined;
+    try {
+      const manifest = await this.extractor.extract({
+        mode: input.mode,
+        attemptId: input.retention.attemptId,
+        generation: input.retention.generation,
+        mediaId: staged.id,
+        mediaSha256: staged.sha256,
+        probe: staged.probe,
+        uploadedAt: input.retention.uploadedAt,
+        source: "staged",
+        authority: Object.freeze({
+          athleteId: authority.athleteId,
+          calibrationSessionId:
+            authority.mode === "verified"
+              ? authority.verified.calibrationSessionId
+              : null,
+          calibrationNonce:
+            authority.mode === "verified"
+              ? authority.verified.calibrationNonce
+              : null,
+        }),
+      });
+      if (
+        manifest.attemptId !== authority.attemptId ||
+        manifest.generation !== authority.generation ||
+        manifest.mode !== authority.mode ||
+        manifest.mediaId !== staged.id ||
+        manifest.mediaSha256 !== staged.sha256
+      )
+        throw new MediaPipelineError("media_probe_failed");
+      const processingContext = createDurableProcessingContext(manifest);
+      if (processingContext.kind !== "c5-durable-processing-context-v2")
+        throw new MediaPipelineError("media_probe_failed");
+      // Derive cleanup identifiers before the original can be published.
+      cleanup = this.cleanupCapability(
+        staged.id,
+        processingContext.receipt.frameBatchId,
+      );
+      const stored = await input.session.publish();
+      const storedMedia = createStoredMediaAttachment({
+        id: stored.id,
+        contentType: stored.contentType,
+        bytes: stored.bytes,
+        uploadedAt: input.retention.uploadedAt,
+        deleteAt: originalOrFrameDeleteAt(input.retention.uploadedAt),
+        transition: Object.freeze({
+          kind: "upload-transition" as const,
+          resourceId: stored.id,
+          deleteAt: temporaryDeleteAt(input.retention.uploadedAt),
+        }),
+      });
+      return createAcceptedMediaHandoff({
+        context: authority,
+        storedMedia,
+        sourceSha256: stored.sha256,
+        processingContext,
+        cleanup,
+        sha256: stored.sha256,
+        probe: stored.probe,
+        manifest,
+      });
+    } catch (error) {
+      if (cleanup) await cleanup.cleanup().catch(() => undefined);
+      throw error;
+    }
   }
 
   private cleanupCapability(
     mediaId: string,
-    manifest: ExtractionManifest,
+    frameBatchId: string,
   ): AcceptedMediaCleanup {
-    const frameBatchId = frameBatchIdentifier(manifest);
     return Object.freeze({
       cleanup: async () => {
         const outcomes = await Promise.allSettled([
@@ -234,11 +274,4 @@ export class MediaPipeline {
       },
     });
   }
-}
-
-function frameBatchIdentifier(manifest: ExtractionManifest): string {
-  const reference = manifest.frames.items[0]?.reference;
-  const match = /^([0-9a-f-]{36})_\d{4}$/i.exec(reference ?? "");
-  if (!match) throw new MediaPipelineError("media_probe_failed");
-  return match[1]!;
 }

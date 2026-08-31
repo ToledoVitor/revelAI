@@ -7,6 +7,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,6 +18,19 @@ import { LocalFrameExtraction } from "./local-frame-extraction.js";
 const attemptId = "11111111-1111-4111-8111-111111111111";
 const mediaId = "22222222-2222-4222-8222-222222222222";
 const batchId = "33333333-3333-4333-8333-333333333333";
+const stagedSourceSha256 = createHash("sha256")
+  .update(Uint8Array.of(1, 2, 3))
+  .digest("hex");
+const frameAuthority = {
+  athleteId: "44444444-4444-4444-8444-444444444444",
+  calibrationSessionId: null,
+  calibrationNonce: null,
+};
+const verifiedFrameAuthority = {
+  athleteId: "44444444-4444-4444-8444-444444444444",
+  calibrationSessionId: "55555555-5555-4555-8555-555555555555",
+  calibrationNonce: "test-calibration-nonce",
+};
 const verifiedProbe: MediaProbe = {
   container: "mp4",
   durationSeconds: 64,
@@ -55,10 +69,11 @@ describe("LocalFrameExtraction", () => {
       attemptId,
       generation: 1,
       mediaId,
-      mediaSha256: "a".repeat(64),
+      mediaSha256: stagedSourceSha256,
       probe: verifiedProbe,
       uploadedAt: "2030-01-15T12:00:00.000Z",
       source: "staged",
+      authority: verifiedFrameAuthority,
     });
     expect(manifest.frames.items[1]?.timestampSeconds).toBeCloseTo(0.1, 4);
     expect(manifest).toMatchObject({
@@ -101,16 +116,45 @@ describe("LocalFrameExtraction", () => {
         attemptId,
         generation: 1,
         mediaId,
-        mediaSha256: "a".repeat(64),
+        mediaSha256: stagedSourceSha256,
         probe: verifiedProbe,
         uploadedAt: "2030-01-15T12:00:00.000Z",
         source: "staged",
+        authority: verifiedFrameAuthority,
       }),
     ).resolves.toMatchObject({
       frames: { count: 640 },
       preRoll: { count: 40 },
       active: { count: 600 },
     });
+  });
+
+  it("rejects a claimed source digest before it can issue a durable receipt", async () => {
+    const root = await setupRoot(roots);
+    const extractor = new LocalFrameExtraction({
+      root,
+      ids: { next: () => batchId },
+      runner: {
+        run: async () => {
+          throw new Error("source digest must be checked before extraction");
+        },
+      },
+      retention: { schedule: async () => ({ kind: "created" as const }) },
+    });
+
+    await expect(
+      extractor.extract({
+        mode: "free",
+        attemptId,
+        generation: 1,
+        mediaId,
+        mediaSha256: "a".repeat(64),
+        probe: { ...verifiedProbe, durationSeconds: 3 },
+        uploadedAt: "2030-01-15T12:00:00.000Z",
+        source: "staged",
+        authority: frameAuthority,
+      }),
+    ).rejects.toThrow("media_probe_failed");
   });
 
   it("rejects marker-only JPEG output before exposing a frame reference", async () => {
@@ -138,10 +182,11 @@ describe("LocalFrameExtraction", () => {
         attemptId,
         generation: 1,
         mediaId,
-        mediaSha256: "a".repeat(64),
+        mediaSha256: stagedSourceSha256,
         probe: { ...verifiedProbe, durationSeconds: 3 },
         uploadedAt: "2030-01-15T12:00:00.000Z",
         source: "staged",
+        authority: verifiedFrameAuthority,
       }),
     ).rejects.toThrow("media_probe_failed");
   });
@@ -189,10 +234,11 @@ describe("LocalFrameExtraction", () => {
           attemptId,
           generation: 1,
           mediaId,
-          mediaSha256: "a".repeat(64),
+          mediaSha256: stagedSourceSha256,
           probe: { ...verifiedProbe, durationSeconds: 3 },
           uploadedAt: "2030-01-15T12:00:00.000Z",
           source: "staged",
+          authority: frameAuthority,
         }),
       ).rejects.toThrow("media_probe_failed");
       await expect(
@@ -220,10 +266,11 @@ describe("LocalFrameExtraction", () => {
       attemptId,
       generation: 1,
       mediaId,
-      mediaSha256: "a".repeat(64),
+      mediaSha256: stagedSourceSha256,
       probe: { ...verifiedProbe, durationSeconds: 3 },
       uploadedAt: "2030-01-15T12:00:00.000Z",
       source: "staged",
+      authority: frameAuthority,
     });
     await writeFile(
       join(root, "frames", batchId, "frame-0000.jpg"),
@@ -254,10 +301,11 @@ describe("LocalFrameExtraction", () => {
       attemptId,
       generation: 1,
       mediaId,
-      mediaSha256: "a".repeat(64),
+      mediaSha256: stagedSourceSha256,
       probe: { ...verifiedProbe, durationSeconds: 3 },
       uploadedAt: "2030-01-15T12:00:00.000Z",
       source: "staged",
+      authority: frameAuthority,
     });
 
     for (const kind of [
@@ -308,10 +356,11 @@ describe("LocalFrameExtraction", () => {
         attemptId,
         generation: 1,
         mediaId,
-        mediaSha256: "a".repeat(64),
+        mediaSha256: stagedSourceSha256,
         probe: { ...verifiedProbe, durationSeconds: 3 },
         uploadedAt: "2030-01-15T12:00:00.000Z",
         source: "staged",
+        authority: frameAuthority,
       });
       expect(manifest.frames.count).toBe(12);
       expect(manifest.frames.items[0]?.timestampSeconds).toBe(0);
@@ -343,10 +392,11 @@ describe("LocalFrameExtraction", () => {
         attemptId,
         generation: 1,
         mediaId,
-        mediaSha256: "a".repeat(64),
+        mediaSha256: stagedSourceSha256,
         probe: verifiedProbe,
         uploadedAt: "2030-01-15T12:00:00.000Z",
         source: "staged",
+        authority: frameAuthority,
       }),
     ).rejects.toThrow("media_probe_failed");
     await expect(
@@ -376,10 +426,11 @@ describe("LocalFrameExtraction", () => {
         attemptId,
         generation: 1,
         mediaId,
-        mediaSha256: "a".repeat(64),
+        mediaSha256: stagedSourceSha256,
         probe: verifiedProbe,
         uploadedAt: "2030-01-15T12:00:00.000Z",
         source: "staged",
+        authority: frameAuthority,
       }),
     ).rejects.toThrow("media_probe_failed");
   });
@@ -407,10 +458,11 @@ describe("LocalFrameExtraction", () => {
         attemptId,
         generation: 1,
         mediaId,
-        mediaSha256: "a".repeat(64),
+        mediaSha256: stagedSourceSha256,
         probe: { ...verifiedProbe, durationSeconds: 3 },
         uploadedAt: "2030-01-15T12:00:00.000Z",
         source: "staged",
+        authority: frameAuthority,
       }),
     ).rejects.toThrow("media_probe_failed");
     await expect(readFile(join(existing, ".complete"), "utf8")).resolves.toBe(
@@ -447,10 +499,11 @@ describe("LocalFrameExtraction", () => {
         attemptId,
         generation: 1,
         mediaId,
-        mediaSha256: "a".repeat(64),
+        mediaSha256: stagedSourceSha256,
         probe: { ...verifiedProbe, durationSeconds: 3 },
         uploadedAt: "2030-01-15T12:00:00.000Z",
         source: "staged",
+        authority: frameAuthority,
       }),
     ).rejects.toThrow("media_probe_failed");
   });
@@ -474,6 +527,9 @@ describe("LocalFrameExtraction", () => {
       "yuv420p",
       staged,
     ]);
+    const generatedSourceSha256 = createHash("sha256")
+      .update(await readFile(staged))
+      .digest("hex");
     const extractor = new LocalFrameExtraction({
       root,
       ids: { next: () => batchId },
@@ -500,10 +556,11 @@ describe("LocalFrameExtraction", () => {
         attemptId,
         generation: 1,
         mediaId,
-        mediaSha256: "a".repeat(64),
+        mediaSha256: generatedSourceSha256,
         probe: { ...verifiedProbe, sourceRotationDegrees: 0 },
         uploadedAt: "2030-01-15T12:00:00.000Z",
         source: "staged",
+        authority: verifiedFrameAuthority,
       }),
     ).resolves.toMatchObject({
       frames: { count: 640 },

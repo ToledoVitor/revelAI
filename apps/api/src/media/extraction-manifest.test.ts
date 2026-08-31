@@ -1,8 +1,10 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import {
   attestVerifiedExtractionContinuity,
   createDurableProcessingContext,
+  createStorageBackedDurableProcessingContext,
+  createStorageExtractionReceipt,
   createExtractionManifest,
   parseExtractionManifest,
   reconstructDurableProcessingContext,
@@ -160,6 +162,7 @@ describe("extraction manifest", () => {
         readFrame: async (reference) =>
           frames.find((frame) => frame.reference === reference)!.rawBytes,
       },
+      authoritative: manifest,
     });
 
     expect(reconstructed).not.toBe(manifest);
@@ -171,8 +174,150 @@ describe("extraction manifest", () => {
       reconstructDurableProcessingContext({
         context,
         frames: { readFrame: async () => Uint8Array.of(0) },
+        authoritative: manifest,
       }),
     ).rejects.toThrow("durable extraction frame mismatch");
+  });
+
+  it("rejects rehashed substitute bytes when the claimed upload authority names another extraction", async () => {
+    const acceptedFrames = verifiedFrames();
+    const substitutedFrames = verifiedFrames().map((frame, index) => ({
+      ...frame,
+      reference: `substituted-${String(index).padStart(4, "0")}`,
+      rawBytes: Uint8Array.of((index + 1) % 256),
+    }));
+    const accepted = createExtractionManifest({
+      attemptId: IDs[0],
+      generation: 1,
+      mediaId: IDs[1],
+      mediaSha256: "a".repeat(64),
+      mode: "verified",
+      probe,
+      frames: acceptedFrames,
+    });
+    const substituted = createExtractionManifest({
+      attemptId: IDs[2],
+      generation: 2,
+      mediaId: IDs[2],
+      mediaSha256: "b".repeat(64),
+      mode: "verified",
+      probe,
+      frames: substitutedFrames,
+    });
+    if (accepted.mode !== "verified" || substituted.mode !== "verified")
+      throw new Error("verified extraction required");
+    for (const manifest of [accepted, substituted])
+      attestVerifiedExtractionContinuity(
+        manifest,
+        manifest.frames.items.slice(40).map((frame) => ({
+          timestampSeconds: frame.timestampSeconds,
+          score: 0.1,
+        })),
+      );
+
+    const substitutedContext = createDurableProcessingContext(substituted);
+    const reconstruction = {
+      context: substitutedContext,
+      frames: {
+        readFrame: async (reference: string) =>
+          substitutedFrames.find((frame) => frame.reference === reference)!
+            .rawBytes,
+      },
+      authoritative: accepted,
+    };
+
+    await expect(
+      reconstructDurableProcessingContext(reconstruction),
+    ).rejects.toThrow("durable extraction authority mismatch");
+  });
+
+  it("rejects an A-identity/B-byte receipt even when B was completely rehashed", async () => {
+    const acceptedFrames = verifiedFrames();
+    const substitutedFrames = verifiedFrames().map((frame, index) => ({
+      ...frame,
+      reference: `rehashed-${String(index).padStart(4, "0")}`,
+      rawBytes: Uint8Array.of((index + 17) % 256),
+    }));
+    const accepted = createExtractionManifest({
+      attemptId: IDs[0],
+      generation: 1,
+      mediaId: IDs[1],
+      mediaSha256: "a".repeat(64),
+      mode: "verified",
+      probe,
+      frames: acceptedFrames,
+    });
+    const substituted = createExtractionManifest({
+      attemptId: IDs[2],
+      generation: 2,
+      mediaId: IDs[2],
+      mediaSha256: "b".repeat(64),
+      mode: "verified",
+      probe,
+      frames: substitutedFrames,
+    });
+    if (accepted.mode !== "verified" || substituted.mode !== "verified")
+      throw new Error("verified required");
+    const scenes = substituted.frames.items.slice(40).map((frame) => ({
+      timestampSeconds: frame.timestampSeconds,
+      score: 0.1,
+    }));
+    attestVerifiedExtractionContinuity(
+      accepted,
+      accepted.frames.items.slice(40).map((frame) => ({
+        timestampSeconds: frame.timestampSeconds,
+        score: 0.1,
+      })),
+    );
+    attestVerifiedExtractionContinuity(substituted, scenes);
+    const receipt = createStorageExtractionReceipt({
+      authority: {
+        attemptId: IDs[2],
+        athleteId: IDs[2],
+        generation: 2,
+        mode: "verified",
+        mediaId: IDs[2],
+        sourceSha256: "b".repeat(64),
+        calibrationSessionId: IDs[1],
+        calibrationNonce: "nonce-b",
+      },
+      manifest: substituted,
+      frames: substitutedFrames.map((frame) => frame.rawBytes),
+      activeScenes: scenes,
+    });
+    const receiptBytes = Buffer.from(JSON.stringify(receipt));
+    const context = createStorageBackedDurableProcessingContext({
+      frameBatchId: IDs[1],
+      mediaId: IDs[2],
+      sha256: createHash("sha256").update(receiptBytes).digest("hex"),
+    });
+
+    await expect(
+      reconstructDurableProcessingContext({
+        context,
+        frames: {
+          readFrame: async (reference) =>
+            substitutedFrames.find((frame) => frame.reference === reference)!
+              .rawBytes,
+        },
+        receipts: {
+          readReceipt: async () => ({ bytes: receiptBytes }),
+          readFrame: async () => Uint8Array.of(),
+        },
+        authority: {
+          upload: {
+            attemptId: accepted.attemptId,
+            athleteId: IDs[0],
+            generation: accepted.generation,
+            mode: accepted.mode,
+            mediaId: accepted.mediaId,
+            sourceSha256: accepted.mediaSha256,
+            calibrationSessionId: IDs[1],
+            calibrationNonce: "nonce-a",
+          },
+        },
+      }),
+    ).rejects.toThrow("durable extraction authority mismatch");
   });
 });
 
