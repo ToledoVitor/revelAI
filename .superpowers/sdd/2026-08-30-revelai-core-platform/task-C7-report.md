@@ -1,5 +1,107 @@
 # Task C7 report — integrity evaluation and competitive policy
 
+## Round 5 final correction — `f1851a7..a91d2e2`
+
+### Status
+
+- Product correction: `a91d2e2`
+  (`fix(api): close C7 migration and topology gaps`).
+- Local only; no push.
+- R4-I1 and R4-I2 are corrected. No execution/provider path was reopened.
+
+### R4-I1 — exact durable receipt row/JSON invariant
+
+The shared receipt matcher now receives and exactly compares durable `status`,
+`run_at`, `valid_until`, and `invalidated_at` in addition to the pre-existing
+identity, tuple, version, and canonical JSON checks. The v14 binder, v15
+pre-update reader, v15 post-update reader, activation lookup, and active-policy
+reader all select and pass those fields. `invalidated_at` preserves exact null
+semantics rather than treating a missing or string value as interchangeable.
+
+The migration suite has four independent legacy-v14 probes: one each for a
+contradictory status, run time, expiry, and invalidation time. Every probe
+throws `competitive_policy_persisted_data_corrupt`, remains at migration 14,
+and fails again after reopen. The valid v14 predecessor upgrade and the
+current-row policy lookup remain green.
+
+### R4-I2 — topology proof and actual C5→C6→C7 matrix
+
+The C7 boundary proof now uses a TypeScript program/checker for score, policy,
+and capability consumers. It resolves import aliases, namespace properties,
+literal element access, and `const`-computed element access to their underlying
+symbols. The isolated evasion fixture contains all three forms: an aliased C5
+capability consumer, `capability[capabilityKey]()` with a const string key, and
+aliased score/policy consumers. The production graph asserts the sole C5
+reader/compositor/capability-consumer and the single C7 execution read, while
+asserting no external direct C3-score or policy calls.
+
+The real factory-produced join now measures and asserts:
+
+- median anchor drift below/equal/above six and maximum drift below/equal/above
+  twelve, including measured median and maximum facts;
+- reprojection median below/equal/above four, maximum below/equal eight, and
+  wall-edge seven/eight/nine from C5-produced C6 geometry, followed by the C7
+  decision;
+- full joined graph facts: canonical-to-graph one-to-one rows, duplicate
+  elimination, permitted return-contact reuse, too-short and too-long windows,
+  marker-loss cross-track return, and active-end expiry;
+- public serialized and log payload redaction for valid, invalid, and
+  temporary decisions; the real invalid-candidate error is also redacted; and
+  byte-equivalent serialized decision and score replay.
+
+`maxReprojectionError > 8` cannot be emitted by the actual C6 RANSAC producer:
+`estimateRansacHomography` forms `inlierIndices` with `error <= 8`, and
+`estimateFrameGeometry` calculates the published maximum only from those
+indices. This is a constructive producer invariant, not a skipped case. C7
+retains a separately tested defense-in-depth pure guard at 7.99, 8, and 8.01;
+only the above-bound value is rejected. The opaque C5/C6 capability prevents a
+structural high-max object from reaching the evaluator as evidence.
+
+### RED → GREEN
+
+- RED: migration v15 could certify a canonical receipt whose durable status,
+  timing, expiry, or invalidation column contradicted JSON. GREEN: every such
+  contradiction rolls back v15 and is reproducibly rejected on reopen.
+- RED: topology checks missed constant-computed capability access and aliased
+  score/policy calls. GREEN: checker-backed symbol resolution identifies each
+  isolated evasion and proves the production graph.
+- RED: the exact producer matrix lacked measured drift/reprojection, joined
+  graph, redaction, and deterministic replay coverage. GREEN: the added C5 to
+  C6 to C7 fixture matrix asserts the computed facts and decision outcomes.
+
+### Verification
+
+```text
+rtk pnpm --filter @revelai/api test -- integrity-evaluator.test.ts
+  21 API files / 217 tests passed
+
+rtk pnpm --filter @revelai/api test -- sqlite-attempt-repository.test.ts
+  21 API files / 217 tests passed
+
+rtk pnpm --filter @revelai/api test -- c7-boundary.test.ts
+  21 API files / 217 tests passed
+
+rtk pnpm --filter @revelai/api typecheck
+  passed
+
+rtk pnpm check && rtk pnpm build && rtk pnpm install --frozen-lockfile
+  passed; root check: API 21 files / 217 tests, Vision 6 files / 76 tests,
+  Contracts 6 files / 33 tests, Domain 1 file / 50 tests, Design System
+  2 files / 16 tests, Config 1 file / 9 tests; all six builds passed
+
+fresh git archive a91d2e2 → frozen install → uncached pnpm check → pnpm build
+  passed; the archive began without dist and produced all six build outputs
+
+rtk git diff --check f1851a7..HEAD
+  passed
+```
+
+### Final concern
+
+The capability remains deliberately process-local and fail-closed. C8 must
+compose C5 extraction, C6 observation assembly, and C7 evaluation in one worker
+process; it must not serialize or reconstruct the capability.
+
 ## Status and commits
 
 - C6 carry: `55076e3c5ffbe2d695e90cf11087f0b5200f6073`
