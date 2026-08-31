@@ -3384,6 +3384,54 @@ describe("SQLiteAttemptRepository", () => {
     reopened.close();
   });
 
+  it("rolls back v15 when a v14 receipt JSON id does not match its durable row", async () => {
+    const filename = join(
+      fixture.directory,
+      "legacy-v14-receipt-id-mismatch.sqlite",
+    );
+    const legacy = openSqliteDatabaseAtVersionForTest(filename, 14);
+    const {
+      receiptSha256: _hash,
+      evidence: _evidence,
+      ...oldPayload
+    } = passingWorkflowBenchmarkReceiptFixture;
+    void _hash;
+    void _evidence;
+    const oldHash = workflowBenchmarkReceiptDigest(oldPayload as never);
+    const oldReceipt = { ...oldPayload, receiptSha256: oldHash };
+    legacy.raw
+      .prepare(
+        "INSERT INTO workflow_benchmark_receipts (id, receipt_sha256, schema_version, workflow_id, workflow_version, model_bundle_id, provider_version, status, run_at, valid_until, invalidated_at, receipt_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        oldReceipt.receiptSha256,
+        oldReceipt.schemaVersion,
+        oldReceipt.workflow.workflowId,
+        oldReceipt.workflow.workflowVersion,
+        oldReceipt.workflow.modelBundleId,
+        oldReceipt.workflow.providerVersion,
+        oldReceipt.status,
+        oldReceipt.runAt,
+        oldReceipt.validUntil,
+        oldReceipt.invalidatedAt,
+        JSON.stringify(oldReceipt),
+        fixture.clock.now(),
+      );
+    legacy.close();
+
+    expect(() => openSqliteDatabase(filename)).toThrow(
+      "competitive_policy_persisted_data_corrupt",
+    );
+    const beforeRetry = openSqliteDatabaseAtVersionForTest(filename, 14);
+    expect(
+      beforeRetry.raw
+        .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+        .get(),
+    ).toMatchObject({ count: 14 });
+    beforeRetry.close();
+  });
+
   it("upgrades an already-applied v7/v8 database with quarantine, policy, and invalidation invariants", async () => {
     const filename = join(
       fixture.directory,

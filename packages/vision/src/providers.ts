@@ -492,7 +492,7 @@ export async function analyzeBatch(
 export async function analyzeOwnedVerifiedBatch(
   provider: VisionProvider,
   requests: readonly VerifiedVisionFrameRequest[],
-  scheduler: VisionBatchScheduler = new VisionBatchScheduler(),
+  demoScheduler?: VisionBatchScheduler,
   signal?: AbortSignal,
 ): Promise<OwnedVerifiedVisionBatch> {
   const owner = factoryOwnedVerifiedProviders.get(provider);
@@ -507,14 +507,29 @@ export async function analyzeOwnedVerifiedBatch(
     throw new VisionProviderError("provider_output_invalid");
   if (requests.some((request) => request.kind !== "verified-wall-pass"))
     throw new VisionProviderError("provider_output_invalid");
-  const batch = await analyzeBatch(provider, requests, scheduler, signal);
+  // Capture bytes before any async provider work. The original request array
+  // remains the C5 identity; only an unshared copy crosses the competitive
+  // runtime boundary, then the source digests are checked again on return.
+  const sourceSha256 = Object.freeze(
+    requests.map((request) => sha256(request.frame.jpeg)),
+  );
+  const runtimeRequests = Object.freeze(requests.map(snapshotVerifiedRequest));
+  const batch = await runOwnedVerifiedBatch({
+    provider,
+    owner,
+    requests: runtimeRequests,
+    demoScheduler,
+    signal,
+  });
   if (batch.kind !== "verified-wall-pass")
     throw new VisionProviderError("provider_output_invalid");
-  const sourceSha256 = Object.freeze(
-    requests.map((request) =>
-      createHash("sha256").update(request.frame.jpeg).digest("hex"),
-    ),
-  );
+  if (
+    !sameDigestSequence(
+      sourceSha256,
+      requests.map((request) => sha256(request.frame.jpeg)),
+    )
+  )
+    throw new VisionProviderError("provider_output_invalid");
   const encodedSha256 = Object.freeze(
     batch.frames.map((frame) => frame.inference?.sha256 ?? null),
   );
@@ -540,6 +555,94 @@ export async function analyzeOwnedVerifiedBatch(
   });
   ownedVerifiedVisionBatchData.set(owned, data);
   return owned;
+}
+
+/**
+ * Competitive Roboflow execution is factory-owned end to end: no caller can
+ * select its scheduler or return an arbitrary result. Demo retains a narrow
+ * scheduler seam for deterministic fixtures; demo receipts cannot become
+ * Roboflow provenance by construction.
+ */
+async function runOwnedVerifiedBatch(
+  input: Readonly<{
+    provider: VisionProvider;
+    owner: FactoryOwnedVerifiedProvider;
+    requests: readonly VerifiedVisionFrameRequest[];
+    demoScheduler?: VisionBatchScheduler;
+    signal?: AbortSignal;
+  }>,
+): Promise<VerifiedVisionObservationBatch> {
+  if (input.owner.provenance.kind === "demo") {
+    const batch = await analyzeBatch(
+      input.provider,
+      input.requests,
+      input.demoScheduler,
+      input.signal,
+    );
+    if (batch.kind !== "verified-wall-pass")
+      throw new VisionProviderError("provider_output_invalid");
+    return batch;
+  }
+  if (input.demoScheduler !== undefined)
+    throw new VisionProviderError("provider_output_invalid");
+  const runner = ownedBenchmarkRunners.get(input.provider);
+  if (!runner) throw new VisionProviderError("provider_output_invalid");
+  const scheduler = new VisionBatchScheduler();
+  const frames = await scheduler.run(
+    input.requests,
+    (request, requestSignal, deadline) =>
+      runner(request, requestSignal, deadline),
+    input.signal,
+  );
+  const observations = frames.map((frame, index) => {
+    const request = input.requests[index]!;
+    const identity = ownedRoboflowBenchmarkFrameIdentity(frame);
+    if (
+      identity.frameIndex !== request.frame.index ||
+      identity.sourceSha256 !== sha256(request.frame.jpeg) ||
+      identity.encodedSha256 !== frame.observation.inference?.sha256
+    )
+      throw new VisionProviderError("provider_output_invalid");
+    return frame.observation;
+  });
+  assertFrameCorrelation(input.requests, observations);
+  return parseVerifiedObservationBatch({
+    attemptId: input.requests[0]!.attemptId,
+    kind: "verified-wall-pass",
+    frames: observations,
+    provenance: input.owner.provenance,
+  });
+}
+
+function snapshotVerifiedRequest(
+  request: VerifiedVisionFrameRequest,
+): VerifiedVisionFrameRequest {
+  return Object.freeze({
+    kind: request.kind,
+    attemptId: request.attemptId,
+    challenge: Object.freeze({ ...request.challenge }),
+    frame: Object.freeze({
+      index: request.frame.index,
+      timestampMs: request.frame.timestampMs,
+      sourceWidth: request.frame.sourceWidth,
+      sourceHeight: request.frame.sourceHeight,
+      jpeg: new Uint8Array(request.frame.jpeg),
+    }),
+  });
+}
+
+function sha256(value: Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function sameDigestSequence(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
 }
 
 /**

@@ -1,4 +1,9 @@
-import { createDemoVisionProvider, type VisionProvider } from "@revelai/vision";
+import {
+  createDemoVisionProvider,
+  createRoboflowVisionProvider,
+  VisionBatchScheduler,
+  type VisionProvider,
+} from "@revelai/vision";
 import { describe, expect, it } from "vitest";
 import {
   attestVerifiedExtractionContinuity,
@@ -102,6 +107,55 @@ describe("verified integrity evaluator", () => {
     });
   });
 
+  it("blocks a 640-frame fake scheduler before it can mint a ranked Roboflow candidate", async () => {
+    let fetches = 0;
+    const provider = createRoboflowVisionProvider({
+      config: {
+        apiUrl: "http://127.0.0.1:9001",
+        workspaceId: "revelai-workspace",
+        freeModelBundleId: "free-bundle-v1",
+        verifiedModelBundleId: "wall-pass-bundle-v1",
+        freeProviderVersion: "roboflow-inference-v1",
+        verifiedProviderVersion: "roboflow-inference-v1",
+      },
+      fetch: async () => {
+        fetches += 1;
+        throw new Error("the fake scheduler must never reach factory fetch");
+      },
+    });
+    const demo = createDemoVisionProvider();
+    const fakeScheduler = {
+      async run(
+        requests: readonly Parameters<VisionProvider["analyzeVerified"]>[0][],
+      ) {
+        return Promise.all(
+          requests.map(async (request) => ({
+            ...(await demo.analyzeVerified(request)),
+            inference: {
+              sha256: "a".repeat(64),
+              transform: {
+                sourceWidth: request.frame.sourceWidth,
+                sourceHeight: request.frame.sourceHeight,
+                inferenceWidth: 1280,
+                inferenceHeight: 720,
+                scale: 1,
+                scaledWidth: 1280,
+                scaledHeight: 720,
+                padLeft: 0,
+                padTop: 0,
+              },
+            },
+          })),
+        );
+      },
+    } as unknown as VisionBatchScheduler;
+
+    await expect(validInput(provider, fakeScheduler)).rejects.toMatchObject({
+      code: "provider_output_invalid",
+    });
+    expect(fetches).toBe(0);
+  });
+
   it("accepts C6 geometry with seven RANSAC inliers rather than requiring eight", async () => {
     const input = await validInput(fixtureProvider({ inlierCount: 7 }));
 
@@ -131,6 +185,42 @@ describe("verified integrity evaluator", () => {
     expect(
       evaluateVerifiedIntegrity(
         await validInput(fixtureProvider({ gradualFiducialXDrift: true })),
+      ),
+    ).toMatchObject({ code: "calibration_not_verified" });
+  });
+
+  it.each([
+    [
+      "the median anchor-drift limit",
+      [8, -8, 8, -8, 8, -8, 8, -8],
+      "calibration_not_verified",
+    ],
+    [
+      "the maximum anchor-drift limit while median remains admissible",
+      [12, 12, 12, 12, 0, 0, 0, 0],
+      "calibration_not_verified",
+    ],
+    [
+      "both independent anchor-drift limits below threshold",
+      [6, 6, 6, 6, 0, 0, 0, 0],
+      "integrity-valid",
+    ],
+  ] as const)(
+    "enforces %s through private C5 to C6 evidence",
+    async (_, offsets, expected) => {
+      const decision = evaluateVerifiedIntegrity(
+        await validInput(fixtureProvider({ activeFiducialXOffsets: offsets })),
+      );
+      expect(
+        decision.kind === "integrity-valid" ? decision.kind : decision.code,
+      ).toBe(expected);
+    },
+  );
+
+  it("rejects actual C5 to C6 evidence with no selectable calibration reference", async () => {
+    expect(
+      evaluateVerifiedIntegrity(
+        await validInput(fixtureProvider({ missingPreRoll: 40 })),
       ),
     ).toMatchObject({ code: "calibration_not_verified" });
   });
@@ -298,6 +388,7 @@ describe("verified integrity evaluator", () => {
 
 async function validInput(
   provider: VisionProvider = createDemoVisionProvider(),
+  scheduler?: VisionBatchScheduler,
 ) {
   const manifest = createExtractionManifest({
     attemptId,
@@ -331,6 +422,7 @@ async function validInput(
   const evidence = await assembleVerifiedObservation({
     manifest,
     provider,
+    scheduler,
     calibrationSessionId: sessionId,
     calibrationNonce: nonce,
     frames: {
@@ -366,6 +458,7 @@ type FixtureFault = Readonly<{
   wallEdgeOffset?: number;
   activeFiducialXOffset?: number;
   gradualFiducialXDrift?: boolean;
+  activeFiducialXOffsets?: readonly number[];
   mirroredGeometry?: boolean;
   wrongWallSide?: boolean;
   singularGeometry?: boolean;
@@ -391,6 +484,16 @@ function fixtureProvider(fault: FixtureFault): VisionProvider {
           ? 0
           : (fault.activeFiducialXOffset ?? 0) +
             (fault.gradualFiducialXDrift ? activeIndex / 85 : 0);
+      const shiftedCorners = observation.fiducialCorners.map((corner, index) =>
+        Object.freeze({
+          ...corner,
+          x:
+            corner.x +
+            (activeIndex >= 0
+              ? (fault.activeFiducialXOffsets?.[index] ?? 0)
+              : 0),
+        }),
+      );
       const fiducialCorners = fault.singularGeometry
         ? observation.fiducialCorners.map((corner) =>
             Object.freeze({ ...corner, x: 400, y: 400 }),
@@ -399,7 +502,7 @@ function fixtureProvider(fault: FixtureFault): VisionProvider {
           ? observation.fiducialCorners.map((corner) =>
               Object.freeze({ ...corner, y: 720 - corner.y }),
             )
-          : observation.fiducialCorners.map((corner) =>
+          : shiftedCorners.map((corner) =>
               Object.freeze({ ...corner, x: corner.x + activeFiducialXOffset }),
             );
       const wallFloorEdge = observation.wallFloorEdge

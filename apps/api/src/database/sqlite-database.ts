@@ -3,7 +3,10 @@ import {
   WorkflowBenchmarkReceiptSchema,
   workflowBenchmarkReceiptDigest,
 } from "@revelai/contracts";
-import { parseStoredBenchmarkReceipt } from "../repositories/competitive-policy-repository.js";
+import {
+  CompetitivePolicyRepositoryError,
+  parseStoredBenchmarkReceipt,
+} from "../repositories/competitive-policy-repository.js";
 
 type Migration = Readonly<{
   version: number;
@@ -831,11 +834,16 @@ function upgradeCompetitivePolicyEvidenceVersionsV15(
 ): void {
   const rows = raw
     .prepare(
-      "SELECT id, receipt_sha256, receipt_json FROM workflow_benchmark_receipts",
+      "SELECT id, receipt_sha256, schema_version, model_bundle_id, workflow_id, workflow_version, provider_version, receipt_json FROM workflow_benchmark_receipts",
     )
     .all() as readonly Readonly<{
     id: string;
     receipt_sha256: string;
+    schema_version: string;
+    model_bundle_id: string;
+    workflow_id: string;
+    workflow_version: string;
+    provider_version: string;
     receipt_json: string;
   }>[];
   const policiesForReceipt = raw.prepare(
@@ -850,43 +858,16 @@ function upgradeCompetitivePolicyEvidenceVersionsV15(
   const updateReceipt = raw.prepare(
     "UPDATE workflow_benchmark_receipts SET receipt_sha256 = ?, receipt_json = ? WHERE id = ? AND receipt_sha256 = ?",
   );
+  const receiptForId = raw.prepare(
+    "SELECT id, receipt_sha256, schema_version, model_bundle_id, workflow_id, workflow_version, provider_version, receipt_json FROM workflow_benchmark_receipts WHERE id = ?",
+  );
   for (const row of rows) {
-    let parsed: Record<string, unknown>;
-    try {
-      const value = JSON.parse(row.receipt_json);
-      if (!value || typeof value !== "object" || Array.isArray(value))
-        throw new Error("invalid receipt");
-      parsed = value as Record<string, unknown>;
-    } catch {
-      throw new Error("invalid v14 benchmark receipt");
-    }
-    if ("evidence" in parsed) {
-      if (!WorkflowBenchmarkReceiptSchema.safeParse(parsed).success)
-        throw new Error("invalid v15 benchmark receipt");
+    const parsed = parseV14ReceiptValue(row);
+    if (parsed.kind === "current") {
+      parseStrictV15ReceiptRow(row);
       continue;
     }
-    const oldHash = parsed.receiptSha256;
-    const oldPayload = { ...parsed };
-    delete oldPayload.receiptSha256;
-    if (
-      oldHash !== row.receipt_sha256 ||
-      typeof oldHash !== "string" ||
-      workflowBenchmarkReceiptDigest(oldPayload as never) !== oldHash
-    )
-      throw new Error("invalid v14 benchmark receipt");
-    const nextPayload = {
-      ...oldPayload,
-      evidence: {
-        calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
-        extractionEvidenceVersion: "c5-frame-manifest-v1",
-        observationEvidenceVersion: "wall-pass-geometry-evidence-v1",
-      },
-    };
-    const nextHash = workflowBenchmarkReceiptDigest(nextPayload as never);
-    const next = WorkflowBenchmarkReceiptSchema.parse({
-      ...nextPayload,
-      receiptSha256: nextHash,
-    });
+    const { next, nextHash } = parsed;
     const policies = policiesForReceipt.all(
       row.id,
       row.receipt_sha256,
@@ -910,12 +891,22 @@ function upgradeCompetitivePolicyEvidenceVersionsV15(
       created_at: string;
     }>[];
     deletePolicies.run(row.id, row.receipt_sha256);
-    updateReceipt.run(
+    const update = updateReceipt.run(
       nextHash,
       JSON.stringify(next),
       row.id,
       row.receipt_sha256,
     );
+    if (update.changes !== 1)
+      throw new CompetitivePolicyRepositoryError(
+        "competitive_policy_persisted_data_corrupt",
+      );
+    const persisted = receiptForId.get(row.id) as V15ReceiptRow | undefined;
+    if (!persisted)
+      throw new CompetitivePolicyRepositoryError(
+        "competitive_policy_persisted_data_corrupt",
+      );
+    parseStrictV15ReceiptRow(persisted);
     for (const policy of policies)
       insertPolicy.run(
         policy.id,
@@ -937,6 +928,97 @@ function upgradeCompetitivePolicyEvidenceVersionsV15(
         policy.created_at,
       );
   }
+}
+
+type V15ReceiptRow = Readonly<{
+  id: string;
+  receipt_sha256: string;
+  schema_version: string;
+  model_bundle_id: string;
+  workflow_id: string;
+  workflow_version: string;
+  provider_version: string;
+  receipt_json: string;
+}>;
+
+/**
+ * v15 admits exactly two shapes: a current receipt or v14's one missing
+ * evidence object. Both must correlate to every durable identity before any
+ * new receipt or policy value is committed.
+ */
+function parseV14ReceiptValue(row: V15ReceiptRow):
+  | Readonly<{ kind: "current" }>
+  | Readonly<{
+      kind: "legacy";
+      next: ReturnType<typeof WorkflowBenchmarkReceiptSchema.parse>;
+      nextHash: string;
+    }> {
+  let value: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(row.receipt_json);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error("invalid receipt");
+    value = parsed as Record<string, unknown>;
+  } catch {
+    throw new CompetitivePolicyRepositoryError(
+      "competitive_policy_persisted_data_corrupt",
+    );
+  }
+  if ("evidence" in value) return Object.freeze({ kind: "current" as const });
+
+  const oldHash = value.receiptSha256;
+  const oldPayload = { ...value };
+  delete oldPayload.receiptSha256;
+  if (
+    typeof oldHash !== "string" ||
+    oldHash !== row.receipt_sha256 ||
+    workflowBenchmarkReceiptDigest(oldPayload as never) !== oldHash
+  )
+    throw new CompetitivePolicyRepositoryError(
+      "competitive_policy_persisted_data_corrupt",
+    );
+  const nextPayload = {
+    ...oldPayload,
+    evidence: {
+      calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+      extractionEvidenceVersion: "c5-frame-manifest-v1",
+      observationEvidenceVersion: "wall-pass-geometry-evidence-v1",
+    },
+  };
+  const nextHash = workflowBenchmarkReceiptDigest(nextPayload as never);
+  let next: ReturnType<typeof WorkflowBenchmarkReceiptSchema.parse>;
+  try {
+    next = WorkflowBenchmarkReceiptSchema.parse({
+      ...nextPayload,
+      receiptSha256: nextHash,
+    });
+    // Verify the post-v15 document against every row field before writing it.
+    // `nextHash` is the deterministic successor of the verified old digest.
+    parseStrictV15ReceiptRow({
+      ...row,
+      receipt_sha256: nextHash,
+      receipt_json: JSON.stringify(next),
+    });
+  } catch (error) {
+    if (error instanceof CompetitivePolicyRepositoryError) throw error;
+    throw new CompetitivePolicyRepositoryError(
+      "competitive_policy_persisted_data_corrupt",
+    );
+  }
+  return Object.freeze({ kind: "legacy" as const, next, nextHash });
+}
+
+function parseStrictV15ReceiptRow(row: V15ReceiptRow) {
+  return parseStoredBenchmarkReceipt({
+    id: row.id,
+    receiptSha256: row.receipt_sha256,
+    schemaVersion: row.schema_version,
+    modelBundleId: row.model_bundle_id,
+    workflowId: row.workflow_id,
+    workflowVersion: row.workflow_version,
+    providerVersion: row.provider_version,
+    receiptJson: row.receipt_json,
+  });
 }
 
 function canonicalizeStoredMediaV13Value(value: string): string {

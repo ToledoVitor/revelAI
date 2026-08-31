@@ -1151,4 +1151,78 @@ describe("vision providers", () => {
       ).rejects.toMatchObject({ code: "provider_output_invalid" });
     }
   });
+
+  it("refuses caller-owned scheduler output for a competitive Roboflow batch", async () => {
+    let fetches = 0;
+    const provider = createRoboflowVisionProvider({
+      config: {
+        apiUrl: "http://127.0.0.1:9001",
+        workspaceId: "revelai",
+        freeModelBundleId: "free-bundle-v1",
+        verifiedModelBundleId: "verified-bundle-v1",
+        freeProviderVersion: "provider-v1",
+        verifiedProviderVersion: "provider-v1",
+      },
+      fetch: async () => {
+        fetches += 1;
+        throw new Error("factory fetch must not be bypassed");
+      },
+    });
+    const fakeScheduler = {
+      async run() {
+        return [roboflowVerifiedBatchFixture.frames[0]!];
+      },
+    } as unknown as VisionBatchScheduler;
+
+    await expect(
+      analyzeOwnedVerifiedBatch(
+        provider,
+        Object.freeze([verifiedRequest(0)]),
+        fakeScheduler,
+      ),
+    ).rejects.toMatchObject({ code: "provider_output_invalid" });
+    expect(fetches).toBe(0);
+  });
+
+  it("rejects a source frame changed while factory-owned Roboflow work is in flight", async () => {
+    let release!: () => void;
+    let beganFetch!: () => void;
+    const fetching = new Promise<void>((resolve) => {
+      beganFetch = resolve;
+    });
+    const provider = createRoboflowVisionProvider({
+      config: {
+        apiUrl: "http://127.0.0.1:9001",
+        workspaceId: "revelai",
+        freeModelBundleId: "free-bundle-v1",
+        verifiedModelBundleId: "verified-bundle-v1",
+        freeProviderVersion: "provider-v1",
+        verifiedProviderVersion: "provider-v1",
+      },
+      fetch: async () => {
+        beganFetch();
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return {
+          status: 200,
+          json: async () => ({ outputs: [verifiedWorkflowOutput()] }),
+        };
+      },
+    });
+    const request = verifiedRequest(0);
+    request.frame.jpeg = new Uint8Array(jpeg);
+    const analysis = analyzeOwnedVerifiedBatch(
+      provider,
+      Object.freeze([request]),
+    );
+
+    await fetching;
+    request.frame.jpeg[0] ^= 0xff;
+    release();
+
+    await expect(analysis).rejects.toMatchObject({
+      code: "provider_output_invalid",
+    });
+  });
 });
