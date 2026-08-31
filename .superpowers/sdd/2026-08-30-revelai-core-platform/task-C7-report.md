@@ -539,3 +539,72 @@ rtk git diff --check
 The owned execution capability remains process-local by design. C8 must keep
 C5 extraction, C6 analysis and C7 evaluation in one worker process and must
 not serialize or reconstruct the capability.
+
+---
+
+## C8 prerequisite carry closure — `a905c39`
+
+### Scope
+
+- Product/test correction: `a905c3912406ad77509fafcfe3ab5eb36fa6b226`
+  (`fix(api): harden C4 receipt and C7 topology guards`).
+- Local only; no C8 HTTP route, worker orchestration, provider, media, or
+  scoring implementation was added.
+
+### R5-I1 — current-row idempotency validates every durable duplicate
+
+`storeBenchmarkReceipt` now selects the receipt schema/tuple columns plus
+`status`, `run_at`, `valid_until`, and `invalidated_at` for an existing ID. If
+the canonical JSON and receipt hash match, it sends that complete durable row
+through the shared `parseStoredBenchmarkReceipt` matcher before returning the
+idempotent success. A mismatch returns the typed
+`competitive_policy_persisted_data_corrupt` error and leaves the row unchanged;
+it is never silently repaired. Activation/lookup retain their existing
+fail-closed parsing and only the explicit availability error remains retryable.
+
+Four independent regression cases corrupt precisely one current-row status,
+run time, expiry, or invalidation-time column; all reject a repeat store with
+the typed corruption error. The matching-row idempotent control succeeds.
+
+### R5-I2 — alias-aware topology proof and bounded reprojection claims
+
+The compiler-checker topology probe now follows immutable local `const`
+initializers before comparing the underlying callable symbols. The isolated
+production-style fixture exercises direct import aliases, namespace and
+constant-computed capability access, and local aliases for capability, score,
+and policy calls.
+
+The C7 pure defense-in-depth reprojection guard remains independently tested at
+7.99, 8, and 8.01. A C6-produced maximum above eight is constructively
+unreachable: RANSAC retains only errors `<= 8`, and C6 reports its maximum over
+that same retained set. No synthetic producer case claims otherwise.
+
+The redaction test now covers only the current public decision serializer and
+invalid-candidate error. It does not claim an emitted logging seam or a
+serialized-byte proof; those require C8-owned emission/transport seams.
+
+### Focused verification
+
+```text
+RED: rtk pnpm --filter @revelai/api test -- sqlite-attempt-repository.test.ts
+  4 new current-row corruption cases failed as expected; the valid control passed
+
+RED: rtk pnpm --filter @revelai/api test -- c7-boundary.test.ts
+  local capability alias was missed as expected
+
+GREEN: rtk pnpm --filter @revelai/api test -- sqlite-attempt-repository.test.ts c7-boundary.test.ts integrity-evaluator.test.ts
+  21 API files / 222 tests passed
+
+rtk pnpm --filter @revelai/api typecheck
+  passed
+
+rtk pnpm check
+  passed format, lint, typecheck, tests, and all six builds:
+  API 21 files / 222 tests; Vision 6 files / 76 tests; Contracts 6 files /
+  33 tests; Domain 1 file / 50 tests; Design System 2 files / 16 tests;
+  Config 1 file / 9 tests
+
+rtk pnpm build
+rtk pnpm install --frozen-lockfile
+  passed
+```
