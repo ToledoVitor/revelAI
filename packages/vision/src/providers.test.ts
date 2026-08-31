@@ -161,6 +161,20 @@ const demoFreeBatchFixture = {
 } satisfies FreeVisionObservationBatch;
 void demoFreeBatchFixture;
 
+const invalidDemoFreeInferenceFixture = {
+  ...demoFreeBatchFixture,
+  frames: [
+    {
+      ...demoFreeBatchFixture.frames[0]!,
+      inference: roboflowFreeBatchFixture.frames[0]!.inference,
+    },
+  ],
+};
+const invalidDemoFreeInferenceCorrelationFixture =
+  // @ts-expect-error Demo frames cannot carry an inference binding.
+  invalidDemoFreeInferenceFixture satisfies FreeVisionObservationBatch;
+void invalidDemoFreeInferenceCorrelationFixture;
+
 const invalidCrossBranchBatchFixture = {
   ...demoFreeBatchFixture,
   provenance: {
@@ -205,6 +219,41 @@ const invalidRoboflowBatchCorrelationFixture =
   invalidRoboflowBatchFixture satisfies VerifiedVisionObservationBatch;
 void invalidRoboflowBatchFixture;
 void invalidRoboflowBatchCorrelationFixture;
+
+const demoVerifiedBatchFixture = {
+  ...invalidRoboflowBatchFixture,
+  provenance: {
+    kind: "demo" as const,
+    fixtureId: "wall-pass-balanced-v1" as const,
+    providerVersion: "demo-observations-v1" as const,
+  },
+} satisfies VerifiedVisionObservationBatch;
+void demoVerifiedBatchFixture;
+
+const roboflowVerifiedBatchFixture = {
+  ...invalidRoboflowBatchFixture,
+  frames: [
+    {
+      ...invalidRoboflowBatchFixture.frames[0]!,
+      inference: roboflowFreeBatchFixture.frames[0]!.inference,
+    },
+  ],
+} satisfies VerifiedVisionObservationBatch;
+void roboflowVerifiedBatchFixture;
+
+const invalidDemoVerifiedInferenceFixture = {
+  ...demoVerifiedBatchFixture,
+  frames: [
+    {
+      ...demoVerifiedBatchFixture.frames[0]!,
+      inference: roboflowFreeBatchFixture.frames[0]!.inference,
+    },
+  ],
+};
+const invalidDemoVerifiedInferenceCorrelationFixture =
+  // @ts-expect-error Demo frames cannot carry an inference binding.
+  invalidDemoVerifiedInferenceFixture satisfies VerifiedVisionObservationBatch;
+void invalidDemoVerifiedInferenceCorrelationFixture;
 
 const freeWorkflowCorrelationFixture = {
   outputs: [
@@ -335,7 +384,28 @@ describe("vision providers", () => {
           },
         })),
       },
+      {
+        ...roboflowFreeBatchFixture,
+        frames: roboflowFreeBatchFixture.frames.map((frame) => ({
+          ...frame,
+          inference: {
+            ...frame.inference,
+            transform: {
+              sourceWidth: 1920,
+              sourceHeight: 1080,
+              inferenceWidth: 1280,
+              inferenceHeight: 720,
+              scale: 2 / 3,
+              scaledWidth: 1280,
+              scaledHeight: 720,
+              padLeft: 0,
+              padTop: 0,
+            },
+          },
+        })),
+      },
       invalidCrossBranchBatchFixture,
+      invalidDemoFreeInferenceFixture,
     ])
       expect(FreeVisionObservationBatchSchema.safeParse(invalid).success).toBe(
         false,
@@ -361,6 +431,33 @@ describe("vision providers", () => {
             inference: roboflowFreeBatchFixture.frames[0]!.inference,
           },
         ],
+      }).success,
+    ).toBe(false);
+    expect(
+      VerifiedVisionObservationBatchSchema.safeParse(
+        roboflowVerifiedBatchFixture,
+      ).success,
+    ).toBe(true);
+    expect(
+      VerifiedVisionObservationBatchSchema.safeParse({
+        ...roboflowVerifiedBatchFixture,
+        frames: roboflowVerifiedBatchFixture.frames.map((frame) => ({
+          ...frame,
+          inference: {
+            ...frame.inference,
+            transform: {
+              sourceWidth: 1920,
+              sourceHeight: 1080,
+              inferenceWidth: 1280,
+              inferenceHeight: 720,
+              scale: 2 / 3,
+              scaledWidth: 1280,
+              scaledHeight: 720,
+              padLeft: 0,
+              padTop: 0,
+            },
+          },
+        })),
       }).success,
     ).toBe(false);
   });
@@ -855,6 +952,65 @@ describe("vision providers", () => {
       },
     );
     expect(fetches).toBe(1);
+  });
+
+  it("carries the scheduler request deadline through transform and prevents post-timeout HTTP", async () => {
+    let now = 0;
+    let fetches = 0;
+    const provider = createRoboflowVisionProvider({
+      config: {
+        apiUrl: "http://127.0.0.1:9001",
+        workspaceId: "revelai",
+        freeModelBundleId: "free-bundle-v1",
+        verifiedModelBundleId: "verified-bundle-v1",
+        freeProviderVersion: "provider-v1",
+        verifiedProviderVersion: "provider-v1",
+      },
+      transformer: {
+        transform: async (frame) => {
+          const encoded = encodeInferenceFrame(frame);
+          now += 8001;
+          return encoded;
+        },
+      },
+      fetch: async () => {
+        fetches += 1;
+        return {
+          status: 200,
+          json: async () => ({
+            outputs: [
+              {
+                kind: "free-training-v1",
+                image: {
+                  width: 1280,
+                  height: 720,
+                  coordinateSystem: "inference_pixels",
+                },
+                workflow: {
+                  id: "revelai-free-training-v1",
+                  version: "1.0.0",
+                  modelBundleId: "free-bundle-v1",
+                  providerVersion: "provider-v1",
+                },
+                detections: [],
+              },
+            ],
+          }),
+        };
+      },
+    });
+    const scheduler = new VisionBatchScheduler({
+      clock: {
+        now: () => now,
+        sleep: async () => undefined,
+        schedule: () => () => undefined,
+      },
+    });
+    await expect(
+      analyzeBatch(provider, [freeRequest()], scheduler),
+    ).rejects.toMatchObject({ code: "provider_temporary_unavailable" });
+    expect(fetches).toBe(0);
+    expect(now).toBe(8001);
   });
 
   it("never starts fetch when external cancellation wins while a transform is pending", async () => {

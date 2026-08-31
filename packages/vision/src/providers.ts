@@ -12,7 +12,10 @@ import {
   type EncodedInferenceFrame,
   type LetterboxTransform,
 } from "./transform.js";
-import { VisionBatchScheduler } from "./scheduler.js";
+import {
+  VisionBatchScheduler,
+  type VisionRequestDeadline,
+} from "./scheduler.js";
 import {
   FIDUCIAL_CORNER_IDS,
   FreeVisionFrameRequestSchema,
@@ -68,10 +71,12 @@ export type VisionProvider = Readonly<{
   analyzeFree(
     request: FreeVisionFrameRequest,
     signal?: AbortSignal,
+    deadline?: VisionRequestDeadline,
   ): Promise<FreeFrameObservation>;
   analyzeVerified(
     request: VerifiedVisionFrameRequest,
     signal?: AbortSignal,
+    deadline?: VisionRequestDeadline,
   ): Promise<WallPassFrameObservation>;
   freeProvenance: FreeAnalysisProvenance;
   verifiedProvenance: VerifiedAnalysisProvenance;
@@ -95,6 +100,7 @@ export type OwnedRoboflowBenchmarkFrameIdentity = Readonly<{
 type OwnedBenchmarkRunner = (
   request: VerifiedVisionFrameRequest,
   signal?: AbortSignal,
+  deadline?: VisionRequestDeadline,
 ) => Promise<OwnedRoboflowBenchmarkFrame>;
 
 const ownedBenchmarkRunners = new WeakMap<
@@ -260,6 +266,7 @@ export function createRoboflowVisionProvider(
   const runFree = async (
     inputRequest: FreeVisionFrameRequest,
     signal?: AbortSignal,
+    deadline?: VisionRequestDeadline,
   ) => {
     const request = FreeVisionFrameRequestSchema.parse(inputRequest);
     const normalized = await runWorkflow({
@@ -269,6 +276,7 @@ export function createRoboflowVisionProvider(
       transformer: input.transformer ?? defaultFrameTransformer,
       validatedEncodedJpegs,
       signal,
+      deadline,
       workflowId: "revelai-free-training-v1",
       modelBundleId: config.freeModelBundleId,
       providerVersion: config.freeProviderVersion,
@@ -280,6 +288,7 @@ export function createRoboflowVisionProvider(
   const runVerified = async (
     inputRequest: VerifiedVisionFrameRequest,
     signal?: AbortSignal,
+    deadline?: VisionRequestDeadline,
   ) => {
     const request = VerifiedVisionFrameRequestSchema.parse(inputRequest);
     const normalized = await runWorkflow({
@@ -289,6 +298,7 @@ export function createRoboflowVisionProvider(
       transformer: input.transformer ?? defaultFrameTransformer,
       validatedEncodedJpegs,
       signal,
+      deadline,
       workflowId: "revelai-wall-pass-geometry-v1",
       modelBundleId: config.verifiedModelBundleId,
       providerVersion: config.verifiedProviderVersion,
@@ -300,31 +310,34 @@ export function createRoboflowVisionProvider(
   const provider: VisionProvider = {
     freeProvenance,
     verifiedProvenance,
-    async analyzeFree(inputRequest, signal) {
-      return (await runFree(inputRequest, signal)).observation;
+    async analyzeFree(inputRequest, signal, deadline) {
+      return (await runFree(inputRequest, signal, deadline)).observation;
     },
-    async analyzeVerified(inputRequest, signal) {
-      return (await runVerified(inputRequest, signal)).observation;
+    async analyzeVerified(inputRequest, signal, deadline) {
+      return (await runVerified(inputRequest, signal, deadline)).observation;
     },
   };
   const frozenProvider = Object.freeze(provider);
-  ownedBenchmarkRunners.set(frozenProvider, async (request, signal) => {
-    const normalized = await runVerified(request, signal);
-    const receipt: OwnedRoboflowBenchmarkFrame = Object.freeze({
-      observation: normalized.observation,
-    });
-    ownedBenchmarkFrameIdentities.set(
-      receipt,
-      Object.freeze({
-        frameIndex: request.frame.index,
-        sourceSha256: createHash("sha256")
-          .update(request.frame.jpeg)
-          .digest("hex"),
-        encodedSha256: normalized.encoded.sha256,
-      }),
-    );
-    return receipt;
-  });
+  ownedBenchmarkRunners.set(
+    frozenProvider,
+    async (request, signal, deadline) => {
+      const normalized = await runVerified(request, signal, deadline);
+      const receipt: OwnedRoboflowBenchmarkFrame = Object.freeze({
+        observation: normalized.observation,
+      });
+      ownedBenchmarkFrameIdentities.set(
+        receipt,
+        Object.freeze({
+          frameIndex: request.frame.index,
+          sourceSha256: createHash("sha256")
+            .update(request.frame.jpeg)
+            .digest("hex"),
+          encodedSha256: normalized.encoded.sha256,
+        }),
+      );
+      return receipt;
+    },
+  );
   return frozenProvider;
 }
 
@@ -332,10 +345,15 @@ export async function analyzeOwnedRoboflowBenchmarkFrame(
   provider: VisionProvider,
   request: VerifiedVisionFrameRequest,
   signal?: AbortSignal,
+  deadline?: VisionRequestDeadline,
 ): Promise<OwnedRoboflowBenchmarkFrame> {
   const runner = ownedBenchmarkRunners.get(provider);
   if (!runner) throw new VisionProviderError("provider_output_invalid");
-  return runner(VerifiedVisionFrameRequestSchema.parse(request), signal);
+  return runner(
+    VerifiedVisionFrameRequestSchema.parse(request),
+    signal,
+    deadline,
+  );
 }
 
 export function ownedRoboflowBenchmarkFrameIdentity(
@@ -377,9 +395,9 @@ export async function analyzeBatch(
   if (first.kind === "free-training") {
     const frames = await scheduler.run(
       requests,
-      (request, requestSignal) => {
+      (request, requestSignal, deadline) => {
         const parsed = FreeVisionFrameRequestSchema.parse(request);
-        return provider.analyzeFree(parsed, requestSignal);
+        return provider.analyzeFree(parsed, requestSignal, deadline);
       },
       signal,
     );
@@ -393,9 +411,9 @@ export async function analyzeBatch(
   }
   const frames = await scheduler.run(
     requests,
-    (request, requestSignal) => {
+    (request, requestSignal, deadline) => {
       const parsed = VerifiedVisionFrameRequestSchema.parse(request);
-      return provider.analyzeVerified(parsed, requestSignal);
+      return provider.analyzeVerified(parsed, requestSignal, deadline);
     },
     signal,
   );
@@ -451,6 +469,15 @@ function assertNotAborted(signal: AbortSignal): void {
     throw new VisionProviderError("provider_temporary_unavailable");
 }
 
+function assertRequestDeadline(
+  signal: AbortSignal,
+  deadline: VisionRequestDeadline | undefined,
+): void {
+  assertNotAborted(signal);
+  if (deadline && deadline.now() >= deadline.deadlineAtMs)
+    throw new VisionProviderError("provider_temporary_unavailable");
+}
+
 function assertEncodedInferenceFrame(
   encoded: EncodedInferenceFrame,
   expectedTransform: LetterboxTransform,
@@ -488,6 +515,7 @@ async function runWorkflow(
     transformer: FrameTransformer;
     validatedEncodedJpegs: Set<string>;
     signal?: AbortSignal;
+    deadline?: VisionRequestDeadline;
     workflowId: "revelai-free-training-v1" | "revelai-wall-pass-geometry-v1";
     modelBundleId: string;
     providerVersion: string;
@@ -509,14 +537,14 @@ async function runWorkflow(
   if (input.signal?.aborted) controller.abort();
   else input.signal?.addEventListener("abort", abort, { once: true });
   try {
-    assertNotAborted(controller.signal);
+    assertRequestDeadline(controller.signal, input.deadline);
     const transform = createLetterboxTransform(input.request.frame);
     const encoded = await input.transformer.transform(
       input.request.frame,
       transform,
       controller.signal,
     );
-    assertNotAborted(controller.signal);
+    assertRequestDeadline(controller.signal, input.deadline);
     assertEncodedInferenceFrame(
       encoded,
       transform,
@@ -531,7 +559,7 @@ async function runWorkflow(
         },
       },
     };
-    assertNotAborted(controller.signal);
+    assertRequestDeadline(controller.signal, input.deadline);
     const response = await input.fetch(
       `${input.config.apiUrl}/infer/workflows/${encodeURIComponent(input.config.workspaceId)}/${input.workflowId}`,
       {

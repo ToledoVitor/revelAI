@@ -19,7 +19,13 @@ const binding = {
   calibrationNonce: "c".repeat(43),
 };
 
-function frame(index: number, offsetX = 0): WallPassFrameObservation {
+type DemoWallPassFrameObservation = Omit<
+  WallPassFrameObservation,
+  "inference"
+> &
+  Readonly<{ inference?: never }>;
+
+function frame(index: number, offsetX = 0): DemoWallPassFrameObservation {
   return {
     kind: "verified-wall-pass",
     frameIndex: index,
@@ -321,7 +327,7 @@ describe("verified geometry", () => {
   });
 });
 
-function verifiedDemoBatch(frames: WallPassFrameObservation[]) {
+function verifiedDemoBatch(frames: DemoWallPassFrameObservation[]) {
   return {
     attemptId: binding.attemptId,
     kind: "verified-wall-pass" as const,
@@ -334,7 +340,7 @@ function verifiedDemoBatch(frames: WallPassFrameObservation[]) {
   };
 }
 
-function ballFrame(index: number, ballY: number): WallPassFrameObservation {
+function ballFrame(index: number, ballY: number): DemoWallPassFrameObservation {
   const observation = frame(index);
   return {
     ...observation,
@@ -349,7 +355,7 @@ function ballFrame(index: number, ballY: number): WallPassFrameObservation {
   };
 }
 
-function noTrackFrame(index: number): WallPassFrameObservation {
+function noTrackFrame(index: number): DemoWallPassFrameObservation {
   const observation = frame(index);
   return { ...observation, ball: undefined, feet: [] };
 }

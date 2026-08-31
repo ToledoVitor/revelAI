@@ -273,7 +273,7 @@ export const FreeFrameObservationSchema = refineFreeFrame(
 
 const DemoFreeFrameObservationSchema = refineFreeFrame(
   FreeFrameObservationBaseSchema.extend({
-    inference: InferenceFrameBindingSchema.optional(),
+    inference: z.never().optional(),
   }).strict(),
 );
 
@@ -291,7 +291,7 @@ export const WallPassFrameObservationSchema = refineWallPassFrame(
 
 const DemoWallPassFrameObservationSchema = refineWallPassFrame(
   WallPassFrameObservationBaseSchema.extend({
-    inference: InferenceFrameBindingSchema.optional(),
+    inference: z.never().optional(),
   }).strict(),
 );
 
@@ -308,14 +308,7 @@ const FreeDemoVisionObservationBatchSchema = z
     frames: z.array(DemoFreeFrameObservationSchema),
     provenance: FreeDemoAnalysisProvenanceSchema,
   })
-  .strict()
-  .superRefine((batch, context) => {
-    if (batch.frames.some((frame) => frame.inference !== undefined))
-      context.addIssue({
-        code: "custom",
-        message: "demo frames cannot carry Roboflow inference bindings",
-      });
-  });
+  .strict();
 
 const FreeRoboflowVisionObservationBatchSchema = z
   .object({
@@ -338,14 +331,7 @@ const VerifiedDemoVisionObservationBatchSchema = z
     frames: z.array(DemoWallPassFrameObservationSchema),
     provenance: VerifiedDemoAnalysisProvenanceSchema,
   })
-  .strict()
-  .superRefine((batch, context) => {
-    if (batch.frames.some((frame) => frame.inference !== undefined))
-      context.addIssue({
-        code: "custom",
-        message: "demo frames cannot carry Roboflow inference bindings",
-      });
-  });
+  .strict();
 
 const VerifiedRoboflowVisionObservationBatchSchema = z
   .object({
@@ -392,22 +378,26 @@ export type VisionObservationBatch = z.infer<
 
 function refineFreeFrame<T extends z.ZodTypeAny>(schema: T): T {
   return schema.superRefine((value, context) => {
-    assertSourceGeometry(value as never, context);
+    const frame = value as never as InferenceBoundFrame;
+    assertSourceGeometry(frame, context);
+    assertInferenceMatchesFrame(frame, context);
   }) as T;
 }
 
 function refineWallPassFrame<T extends z.ZodTypeAny>(schema: T): T {
   return schema.superRefine((value, context) => {
-    const frame = value as never as Readonly<{
-      sourceWidth: number;
-      sourceHeight: number;
-      athlete?: z.infer<typeof SourceBoxSchema>;
-      ball?: z.infer<typeof SourceBoxSchema>;
-      feet: readonly Record<string, unknown>[];
-      fiducialCorners: readonly Record<string, unknown>[];
-      wallFloorEdge?: Record<string, unknown>;
-    }>;
+    const frame = value as never as InferenceBoundFrame &
+      Readonly<{
+        sourceWidth: number;
+        sourceHeight: number;
+        athlete?: z.infer<typeof SourceBoxSchema>;
+        ball?: z.infer<typeof SourceBoxSchema>;
+        feet: readonly Record<string, unknown>[];
+        fiducialCorners: readonly Record<string, unknown>[];
+        wallFloorEdge?: Record<string, unknown>;
+      }>;
     assertSourceGeometry(frame, context);
+    assertInferenceMatchesFrame(frame, context);
     for (const [index, foot] of frame.feet.entries())
       assertSourcePoint(foot, frame, context, ["feet", index]);
     for (const [index, corner] of frame.fiducialCorners.entries())
@@ -431,6 +421,30 @@ function refineWallPassFrame<T extends z.ZodTypeAny>(schema: T): T {
       );
     }
   }) as T;
+}
+
+type InferenceBoundFrame = Readonly<{
+  sourceWidth: number;
+  sourceHeight: number;
+  inference?: Readonly<{
+    transform: Readonly<{ sourceWidth: number; sourceHeight: number }>;
+  }>;
+}>;
+
+function assertInferenceMatchesFrame(
+  frame: InferenceBoundFrame,
+  context: z.RefinementCtx,
+): void {
+  if (
+    frame.inference &&
+    (frame.inference.transform.sourceWidth !== frame.sourceWidth ||
+      frame.inference.transform.sourceHeight !== frame.sourceHeight)
+  )
+    context.addIssue({
+      code: "custom",
+      path: ["inference", "transform"],
+      message: "inference transform source dimensions do not match frame",
+    });
 }
 
 function assertSourceGeometry(

@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { assembleFreeInsight } from "./free-insight.js";
 import { VisionProviderError } from "./providers.js";
+import type { FreeFrameObservation } from "./types.js";
 
 const attemptId = "11111111-1111-4111-8111-111111111111";
 const now = "2030-01-15T12:00:00.000Z";
 
-function frame(index: number, timestampMs: number, x: number, ball = true) {
+type DemoFreeFrameObservation = Omit<FreeFrameObservation, "inference"> &
+  Readonly<{ inference?: never }>;
+
+function frame(
+  index: number,
+  timestampMs: number,
+  x: number,
+  ball = true,
+): DemoFreeFrameObservation {
   return {
     kind: "free-training" as const,
     frameIndex: index,
@@ -25,6 +34,44 @@ function frame(index: number, timestampMs: number, x: number, ball = true) {
         }
       : {}),
   };
+}
+
+function insightFor(frames: readonly DemoFreeFrameObservation[]) {
+  return assembleFreeInsight({
+    batch: {
+      attemptId,
+      kind: "free-training",
+      provenance: {
+        kind: "demo",
+        fixtureId: "free-well-framed-active-v1",
+        providerVersion: "demo-observations-v1",
+      },
+      frames: [...frames],
+    },
+    generatedAt: now,
+  });
+}
+
+function visibilityFrames(
+  athletePresent: number,
+  ballPresent: number,
+  total = 100,
+): DemoFreeFrameObservation[] {
+  return Array.from({ length: total }, (_, index) => ({
+    ...frame(index, index * 1000, 0),
+    athlete:
+      index < athletePresent
+        ? frame(index, index * 1000, 0).athlete
+        : undefined,
+    ball: index < ballPresent ? frame(index, index * 1000, 0).ball : undefined,
+  }));
+}
+
+function activityFrames(activePairs: number): DemoFreeFrameObservation[] {
+  return Array.from({ length: 101 }, (_, index) => {
+    const x = index <= activePairs ? (index % 2) * 22 : (activePairs % 2) * 22;
+    return frame(index, index * 1000, x);
+  });
 }
 
 describe("assembleFreeInsight", () => {
@@ -212,5 +259,120 @@ describe("assembleFreeInsight", () => {
       value: 100,
       range: "high",
     });
+  });
+
+  it.each([
+    { confidence: 0.549, expected: 0, label: "below" },
+    { confidence: 0.55, expected: 100, label: "at" },
+  ])(
+    "uses the confidence boundary $label 0.55 without rounding",
+    ({ confidence: confidenceValue, expected }) => {
+      const frames = [0, 1].map((index) => {
+        const source = frame(index, index * 1000, index * 22);
+        return {
+          ...source,
+          athlete: source.athlete && {
+            ...source.athlete,
+            confidence: confidenceValue,
+          },
+          ball: source.ball && { ...source.ball, confidence: confidenceValue },
+        };
+      });
+      expect(insightFor(frames).observations.slice(0, 2)).toEqual([
+        expect.objectContaining({ value: expected }),
+        expect.objectContaining({ value: expected }),
+      ]);
+    },
+  );
+
+  it.each([
+    { present: 49, range: "limited" },
+    { present: 50, range: "partial" },
+    { present: 79, range: "partial" },
+    { present: 80, range: "consistent" },
+  ] as const)(
+    "uses exact visibility boundary $present percent",
+    ({ present, range }) => {
+      expect(
+        insightFor(visibilityFrames(present, present)).observations.slice(0, 2),
+      ).toEqual([
+        expect.objectContaining({ value: present, range }),
+        expect.objectContaining({ value: present, range }),
+      ]);
+    },
+  );
+
+  it.each([
+    {
+      activePairs: 19,
+      range: "low",
+      tip: "Grave uma sequência com mais movimento contínuo.",
+    },
+    {
+      activePairs: 20,
+      range: "moderate",
+      tip: "Boa cobertura para uma análise aproximada.",
+    },
+    {
+      activePairs: 59,
+      range: "moderate",
+      tip: "Boa cobertura para uma análise aproximada.",
+    },
+    {
+      activePairs: 60,
+      range: "high",
+      tip: "Boa cobertura para uma análise aproximada.",
+    },
+  ] as const)(
+    "uses exact movement activity boundary $activePairs percent",
+    ({ activePairs, range, tip }) => {
+      const insight = insightFor(activityFrames(activePairs));
+      expect(insight.observations[2]).toMatchObject({
+        value: activePairs,
+        range,
+      });
+      expect(insight.tips).toEqual([tip]);
+    },
+  );
+
+  it("rounds a genuine one-of-forty visibility fraction half up", () => {
+    const insight = insightFor(visibilityFrames(1, 1, 40));
+    expect(insight.observations.slice(0, 2)).toEqual([
+      expect.objectContaining({ value: 3, range: "limited" }),
+      expect.objectContaining({ value: 3, range: "limited" }),
+    ]);
+  });
+
+  it.each([
+    {
+      label: "both visibility limits",
+      frames: visibilityFrames(49, 49),
+      tips: [
+        "Mantenha o corpo inteiro visível.",
+        "Mantenha a bola visível durante a sequência.",
+      ],
+    },
+    {
+      label: "athlete visibility limit only",
+      frames: visibilityFrames(49, 100),
+      tips: ["Mantenha o corpo inteiro visível."],
+    },
+    {
+      label: "ball visibility limit only",
+      frames: visibilityFrames(100, 49),
+      tips: ["Mantenha a bola visível durante a sequência."],
+    },
+    {
+      label: "low movement after adequate coverage",
+      frames: activityFrames(19),
+      tips: ["Grave uma sequência com mais movimento contínuo."],
+    },
+    {
+      label: "coverage fallback after adequate movement",
+      frames: activityFrames(20),
+      tips: ["Boa cobertura para uma análise aproximada."],
+    },
+  ])("uses exact tip branch and order for $label", ({ frames, tips }) => {
+    expect(insightFor(frames).tips).toEqual(tips);
   });
 });

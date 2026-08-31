@@ -60,6 +60,7 @@ export {
   type BatchSchedulerOptions,
   type RetryableHttpError,
   type SchedulerClock,
+  type VisionRequestDeadline,
 } from "./scheduler.js";
 export { assembleFreeInsight } from "./free-insight.js";
 export {

@@ -163,12 +163,13 @@ export async function runWorkflowBenchmark(
     const batchStartedAt = input.clock.now();
     const ownedFrames = await input.scheduler.run(
       manifest.frames,
-      async (request, signal) => {
+      async (request, signal, deadline) => {
         const dispatchedAt = input.clock.now();
         const owned = await analyzeOwnedRoboflowBenchmarkFrame(
           input.provider,
           request,
           signal,
+          deadline,
         );
         const duration = input.clock.now() - dispatchedAt;
         if (!Number.isFinite(duration) || duration < 0)
