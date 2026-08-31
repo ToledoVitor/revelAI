@@ -6,6 +6,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -68,6 +69,78 @@ describe("LocalFrameExtraction", () => {
     ).resolves.toEqual(jpeg(0));
     expect(JSON.stringify(calls)).toContain("showinfo");
     expect(JSON.stringify(calls)).toContain("scene");
+  });
+
+  it("materializes zero-based image2 output and retains a bounded complete Verified showinfo stream", async () => {
+    const root = await setupRoot(roots);
+    const extractor = new LocalFrameExtraction({
+      root,
+      ids: { next: () => batchId },
+      runner: {
+        run: async (command) => {
+          expect(command.arguments).toContain("-start_number");
+          expect(command.arguments).toContain("0");
+          expect(command.maxStderrBytes).toBe(640 * 512 + 16 * 1024);
+          await writeDecodedFromCommand(command, verifiedTimeline());
+          return completedEvidence(
+            verifiedTimeline(),
+            verifiedScenes(),
+            " side_data: ".concat("x".repeat(360)),
+          );
+        },
+      },
+      retention: { schedule: async () => ({ kind: "created" as const }) },
+    });
+
+    await expect(
+      extractor.extract({
+        mode: "verified",
+        attemptId,
+        generation: 1,
+        mediaId,
+        mediaSha256: "a".repeat(64),
+        probe: verifiedProbe,
+        uploadedAt: "2030-01-15T12:00:00.000Z",
+        source: "staged",
+      }),
+    ).resolves.toMatchObject({
+      frames: { count: 640 },
+      preRoll: { count: 40 },
+      active: { count: 600 },
+    });
+  });
+
+  it("rejects marker-only JPEG output before exposing a frame reference", async () => {
+    const root = await setupRoot(roots);
+    const extractor = new LocalFrameExtraction({
+      root,
+      ids: { next: () => batchId },
+      runner: {
+        run: async (command) => {
+          const timeline = Array.from({ length: 37 }, (_, index) => index / 12);
+          await writeDecoded(
+            command.outputDirectory,
+            timeline,
+            markerOnlyJpeg(),
+          );
+          return completedEvidence(timeline, []);
+        },
+      },
+      retention: { schedule: async () => ({ kind: "created" as const }) },
+    });
+
+    await expect(
+      extractor.extract({
+        mode: "free",
+        attemptId,
+        generation: 1,
+        mediaId,
+        mediaSha256: "a".repeat(64),
+        probe: { ...verifiedProbe, durationSeconds: 3 },
+        uploadedAt: "2030-01-15T12:00:00.000Z",
+        source: "staged",
+      }),
+    ).rejects.toThrow("media_probe_failed");
   });
 
   it("selects cardinality-exact Free samples from real 12/24/30fps decoded timelines", async () => {
@@ -239,6 +312,69 @@ describe("LocalFrameExtraction", () => {
       }),
     ).rejects.toThrow("media_probe_failed");
   });
+
+  it("smokes the owned argv against FFmpeg when the binary is available", async () => {
+    if (!(await ffmpegAvailable())) return;
+    const root = await setupRoot(roots);
+    const staged = join(root, "temporary", `${mediaId}.uploading`);
+    await runProcess("ffmpeg", [
+      "-nostdin",
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=black:s=1280x720:r=10:d=64",
+      "-c:v",
+      "libx264",
+      "-crf",
+      "51",
+      "-pix_fmt",
+      "yuv420p",
+      staged,
+    ]);
+    const extractor = new LocalFrameExtraction({
+      root,
+      ids: { next: () => batchId },
+      runner: {
+        run: async (command) => {
+          const result = await runProcess(
+            command.executable,
+            command.arguments,
+          );
+          return {
+            exitCode: result.exitCode,
+            termination: "completed" as const,
+            stdout: result.stdout,
+            stderr: result.stderr,
+          };
+        },
+      },
+      retention: { schedule: async () => ({ kind: "created" as const }) },
+    });
+
+    await expect(
+      extractor.extract({
+        mode: "verified",
+        attemptId,
+        generation: 1,
+        mediaId,
+        mediaSha256: "a".repeat(64),
+        probe: { ...verifiedProbe, sourceRotationDegrees: 0 },
+        uploadedAt: "2030-01-15T12:00:00.000Z",
+        source: "staged",
+      }),
+    ).resolves.toMatchObject({
+      frames: { count: 640 },
+      preRoll: { count: 40 },
+      active: { count: 600 },
+    });
+    expect(
+      (await readFile(join(root, "frames", batchId, "frame-0000.jpg"))).length,
+    ).toBeGreaterThan(0);
+    expect(
+      (await readFile(join(root, "frames", batchId, "frame-0639.jpg"))).length,
+    ).toBeGreaterThan(0);
+  });
 });
 
 async function setupRoot(roots: string[]): Promise<string> {
@@ -271,22 +407,47 @@ function verifiedScenes(): number[] {
 async function writeDecoded(
   directory: string,
   timestamps: readonly number[],
+  bytes = jpeg(0),
 ): Promise<void> {
   for (let index = 0; index < timestamps.length; index += 1)
     await writeFile(
       join(directory, `decoded-${String(index).padStart(6, "0")}.jpg`),
+      bytes.length === 0 ? jpeg(index) : bytes,
+      { mode: 0o600 },
+    );
+}
+
+async function writeDecodedFromCommand(
+  command: Readonly<{ arguments: readonly string[]; outputDirectory: string }>,
+  timestamps: readonly number[],
+): Promise<void> {
+  const start = command.arguments.indexOf("-start_number");
+  const startNumber = Number(command.arguments[start + 1]);
+  for (let index = 0; index < timestamps.length; index += 1)
+    await writeFile(
+      join(
+        command.outputDirectory,
+        `decoded-${String(startNumber + index).padStart(6, "0")}.jpg`,
+      ),
       jpeg(index),
       { mode: 0o600 },
     );
 }
 
 function jpeg(index: number): Uint8Array {
-  return Uint8Array.of(0xff, 0xd8, 0xff, 0xe0, index % 256, 0xff, 0xd9);
+  void index;
+  return Uint8Array.from(
+    Buffer.from(
+      "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAA/AL//2Q==",
+      "base64",
+    ),
+  );
 }
 
 function completedEvidence(
   timestamps: readonly number[],
   sceneTimestamps: readonly number[],
+  showinfoSuffix = "",
 ): Readonly<{
   exitCode: number;
   termination: "completed";
@@ -302,15 +463,52 @@ function completedEvidence(
         "lavfi.scene_score=0.1",
       ])
       .join("\n"),
-    stderr: rawShowinfo(timestamps),
+    stderr: rawShowinfo(timestamps, showinfoSuffix),
   };
 }
 
-function rawShowinfo(timestamps: readonly number[]): string {
+function rawShowinfo(timestamps: readonly number[], suffix = ""): string {
   return timestamps
     .map(
       (timestampSeconds, index) =>
-        `[Parsed_showinfo_0] n: ${index} pts: ${Math.round(timestampSeconds * 1000)} pts_time:${timestampSeconds.toFixed(6)}`,
+        `[Parsed_showinfo_0] n: ${index} pts: ${Math.round(timestampSeconds * 1000)} pts_time:${timestampSeconds.toFixed(6)}${suffix}`,
     )
     .join("\n");
+}
+
+function markerOnlyJpeg(): Uint8Array {
+  return Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+}
+
+async function ffmpegAvailable(): Promise<boolean> {
+  try {
+    return (await runProcess("ffmpeg", ["-version"])).exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+async function runProcess(
+  executable: string,
+  arguments_: readonly string[],
+): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, arguments_, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.once("error", reject);
+    child.once("close", (code) => {
+      resolve(
+        Object.freeze({
+          exitCode: code ?? 1,
+          stdout: Buffer.concat(stdout).toString("utf8"),
+          stderr: Buffer.concat(stderr).toString("utf8"),
+        }),
+      );
+    });
+  });
 }

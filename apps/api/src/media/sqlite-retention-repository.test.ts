@@ -7,6 +7,8 @@ import {
   type SqliteDatabase,
 } from "../database/sqlite-database.js";
 import { SQLiteAttemptRepository } from "../repositories/sqlite-attempt-repository.js";
+import { QueueUnavailableError } from "../queue/analysis-queue.js";
+import { AttemptService } from "../services/attempt-service.js";
 import { RetentionScavenger } from "./retention-scavenger.js";
 import { LocalMediaStorage } from "../storage/local-media-storage.js";
 import { LocalRetentionObjectStore } from "../storage/local-retention-object-store.js";
@@ -33,6 +35,12 @@ describe("SQLiteRetentionRepository", () => {
       athleteId: ATHLETE,
       input: { mode: "free" },
     });
+    await new SQLiteRetentionRepository({ database }).schedule({
+      id: MEDIA,
+      attemptId: ATTEMPT,
+      kind: "temporary",
+      deleteAt: "2030-01-15T13:00:00.000Z",
+    });
     await repository.attachValidatedMedia({
       attemptId: ATTEMPT,
       athleteId: ATHLETE,
@@ -40,7 +48,13 @@ describe("SQLiteRetentionRepository", () => {
         id: MEDIA,
         contentType: "video/mp4",
         bytes: 1,
+        uploadedAt: "2030-01-15T12:00:00.000Z",
         deleteAt: "2030-01-16T11:00:00.000Z",
+        transition: {
+          kind: "upload-transition",
+          resourceId: MEDIA,
+          deleteAt: "2030-01-15T13:00:00.000Z",
+        },
       },
     });
   });
@@ -165,8 +179,13 @@ describe("SQLiteRetentionRepository", () => {
         id: secondMedia,
         contentType: "video/mp4",
         bytes: 1,
+        uploadedAt: "2030-01-15T12:00:00.000Z",
         deleteAt: "2030-01-16T11:00:00.000Z",
-        transitionResourceId: secondMedia,
+        transition: {
+          kind: "upload-transition",
+          resourceId: secondMedia,
+          deleteAt: "2030-01-15T13:00:00.000Z",
+        },
       },
     });
 
@@ -303,4 +322,146 @@ describe("SQLiteRetentionRepository", () => {
       expect.objectContaining({ id: transientMedia }),
     );
   });
+
+  it("keeps published bytes covered by original retention when queue enqueue rolls attachment back", async () => {
+    const rolledBackAttempt = "99999999-9999-4999-8999-999999999999";
+    const rolledBackMedia = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const uploadedAt = "2030-01-15T12:00:00.000Z";
+    const attempts = new SQLiteAttemptRepository({
+      database,
+      clock: { now: () => uploadedAt },
+      ids: { next: () => "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+    });
+    await attempts.createAttempt({
+      id: rolledBackAttempt,
+      athleteId: ATHLETE,
+      input: { mode: "free" },
+    });
+    const retention = new SQLiteRetentionRepository({ database });
+    const storage = new LocalMediaStorage({
+      root: join(directory, "queue-rollback-media"),
+      ids: { next: () => rolledBackMedia },
+      prober: {
+        probe: async () => ({
+          container: "mp4",
+          durationSeconds: 3,
+          displayWidth: 480,
+          displayHeight: 853,
+          nominalFps: 12,
+          codec: "h264",
+          sourceRotationDegrees: 0,
+        }),
+      },
+    });
+    const payload = Buffer.from([
+      0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 1, 2, 3, 4,
+    ]);
+    const stored = await storage.store({
+      source: chunks(payload),
+      maxBytes: payload.length,
+      retention: {
+        repository: retention,
+        attemptId: rolledBackAttempt,
+        createdAt: uploadedAt,
+      },
+    });
+    const service = new AttemptService({
+      repository: attempts,
+      queue: {
+        isAvailable: async () => true,
+        enqueue: async () => {
+          throw new QueueUnavailableError();
+        },
+        subscribe: () => () => undefined,
+      },
+    });
+
+    await expect(
+      service.attachValidatedMedia({
+        attemptId: rolledBackAttempt,
+        athleteId: ATHLETE,
+        media: {
+          id: stored.id,
+          contentType: stored.contentType,
+          bytes: stored.bytes,
+          uploadedAt,
+          deleteAt: "2030-01-16T11:00:00.000Z",
+          transition: {
+            kind: "upload-transition",
+            resourceId: stored.id,
+            deleteAt: "2030-01-15T13:00:00.000Z",
+          },
+        },
+      }),
+    ).rejects.toBeInstanceOf(QueueUnavailableError);
+    await expect(
+      attempts.getAttempt({ attemptId: rolledBackAttempt, athleteId: ATHLETE }),
+    ).resolves.toMatchObject({ status: "awaiting-upload", media: null });
+    await expect(
+      readFile(
+        join(
+          directory,
+          "queue-rollback-media",
+          "originals",
+          rolledBackMedia,
+          "payload",
+        ),
+      ),
+    ).resolves.toEqual(payload);
+
+    database.close();
+    database = openSqliteDatabase(join(directory, "api.sqlite"));
+    const reopenedRetention = new SQLiteRetentionRepository({ database });
+    const due = await reopenedRetention.listDue({
+      now: "2040-01-01T00:00:00.000Z",
+      limit: 10,
+    });
+    expect(due).toContainEqual(
+      expect.objectContaining({
+        id: rolledBackMedia,
+        attemptId: rolledBackAttempt,
+        kind: "original",
+        deleteAt: "2030-01-16T11:00:00.000Z",
+      }),
+    );
+    expect(due).not.toContainEqual(
+      expect.objectContaining({ id: rolledBackMedia, kind: "temporary" }),
+    );
+    const reopenedStorage = new LocalMediaStorage({
+      root: join(directory, "queue-rollback-media"),
+      ids: { next: () => rolledBackMedia },
+      prober: {
+        probe: async () => {
+          throw new Error("unused");
+        },
+      },
+    });
+    const scavenger = new RetentionScavenger({
+      repository: reopenedRetention,
+      objects: new LocalRetentionObjectStore({ storage: reopenedStorage }),
+      maxBatchSize: 10,
+      log: { event: () => undefined },
+    });
+    await scavenger.run("2040-01-01T00:00:00.000Z");
+    await expect(
+      readFile(
+        join(
+          directory,
+          "queue-rollback-media",
+          "originals",
+          rolledBackMedia,
+          "payload",
+        ),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      reopenedRetention.listDue({ now: "2040-01-01T00:00:00.000Z", limit: 10 }),
+    ).resolves.not.toContainEqual(
+      expect.objectContaining({ id: rolledBackMedia }),
+    );
+  });
 });
+
+async function* chunks(value: Uint8Array): AsyncIterable<Uint8Array> {
+  yield value;
+}

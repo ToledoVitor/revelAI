@@ -27,7 +27,7 @@ import {
   type Clock,
   type IdGenerator,
 } from "./sqlite-attempt-repository.js";
-import type { TerminalCandidate } from "./attempt-repository.js";
+import type { StoredMedia, TerminalCandidate } from "./attempt-repository.js";
 import { SQLiteCompetitivePolicyRepository } from "./sqlite-competitive-policy-repository.js";
 
 const ATHLETE_A = "11111111-1111-4111-8111-111111111111";
@@ -473,6 +473,43 @@ async function makeRepository(
   };
 }
 
+/** C4 behavior probes attach the same durable C5 handoff every production upload carries. */
+async function attachMedia(
+  fixture: Awaited<ReturnType<typeof makeRepository>>,
+  input: Readonly<{
+    attemptId: string;
+    athleteId: string;
+    media: Readonly<{
+      id: string;
+      contentType: string;
+      bytes: number;
+      deleteAt: string;
+    }>;
+  }>,
+) {
+  const uploadedAt = new Date(
+    Date.parse(input.media.deleteAt) - 23 * 60 * 60 * 1000,
+  ).toISOString();
+  const transitionDeleteAt = new Date(
+    Date.parse(uploadedAt) + 60 * 60 * 1000,
+  ).toISOString();
+  const media: StoredMedia = {
+    ...input.media,
+    uploadedAt,
+    transition: {
+      kind: "upload-transition",
+      resourceId: input.media.id,
+      deleteAt: transitionDeleteAt,
+    },
+  };
+  fixture.database.raw
+    .prepare(
+      "INSERT INTO retention_cleanup_records (resource_id, attempt_id, resource_kind, delete_at, created_at) VALUES (?, ?, 'temporary', ?, ?)",
+    )
+    .run(media.id, input.attemptId, media.transition.deleteAt, uploadedAt);
+  return fixture.repository.attachValidatedMedia({ ...input, media });
+}
+
 describe("SQLiteAttemptRepository", () => {
   let fixture: Awaited<ReturnType<typeof makeRepository>>;
 
@@ -736,7 +773,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -763,13 +800,76 @@ describe("SQLiteAttemptRepository", () => {
     });
   });
 
+  it("rejects an attachment without its mandatory C5 upload-transition metadata before SQL", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+
+    await expect(
+      fixture.repository.attachValidatedMedia({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+        media: {
+          id: "media-a",
+          contentType: "video/mp4",
+          bytes: 10,
+          deleteAt: "2040-01-01T00:00:00.000Z",
+        } as unknown as StoredMedia,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(
+      fixture.repository.attachValidatedMedia({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+        media: {
+          id: "media-a",
+          contentType: "video/mp4",
+          bytes: 10,
+          uploadedAt: "2030-01-15T12:00:00.000Z",
+          deleteAt: "2040-01-01T00:00:00.000Z",
+          transition: {
+            kind: "upload-transition",
+            resourceId: "media-a",
+            deleteAt: "2030-01-15T13:00:00.000Z",
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(
+      fixture.repository.attachValidatedMedia({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+        media: {
+          id: "media-a",
+          contentType: "video/mp4",
+          bytes: 10,
+          uploadedAt: "2030-01-15T12:00:00.000Z",
+          deleteAt: "2030-01-16T11:00:00.000Z",
+          transition: {
+            kind: "upload-transition",
+            resourceId: "media-b",
+            deleteAt: "2030-01-15T13:00:00.000Z",
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({ status: "awaiting-upload", media: null });
+  });
+
   it("uses a generation and lease to reject duplicate and stale processing delivery", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -799,7 +899,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -878,7 +978,7 @@ describe("SQLiteAttemptRepository", () => {
           calibrationSessionId: sessionId,
         },
       });
-      await fixture.repository.attachValidatedMedia({
+      await attachMedia(fixture, {
         attemptId: id,
         athleteId: athlete,
         media: {
@@ -1061,7 +1161,7 @@ describe("SQLiteAttemptRepository", () => {
           calibrationSessionId: sessionId,
         },
       });
-      const job = await fixture.repository.attachValidatedMedia({
+      const job = await attachMedia(fixture, {
         attemptId,
         athleteId,
         media: {
@@ -1095,7 +1195,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1133,7 +1233,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1216,7 +1316,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1281,7 +1381,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1353,7 +1453,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const firstJob = await fixture.repository.attachValidatedMedia({
+    const firstJob = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1367,7 +1467,7 @@ describe("SQLiteAttemptRepository", () => {
       attemptId: ATTEMPT_A,
       generation: firstJob.generation,
     });
-    const secondJob = await fixture.repository.attachValidatedMedia({
+    const secondJob = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1405,7 +1505,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1448,7 +1548,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1522,7 +1622,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1592,7 +1692,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1659,7 +1759,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1739,7 +1839,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1807,7 +1907,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1860,7 +1960,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -1935,7 +2035,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -2001,7 +2101,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -2073,7 +2173,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -2150,7 +2250,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -2252,7 +2352,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -2314,7 +2414,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -2385,7 +2485,7 @@ describe("SQLiteAttemptRepository", () => {
         calibrationSessionId: SESSION_A,
       },
     });
-    const job = await fixture.repository.attachValidatedMedia({
+    const job = await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -2462,7 +2562,7 @@ describe("SQLiteAttemptRepository", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    await fixture.repository.attachValidatedMedia({
+    await attachMedia(fixture, {
       attemptId: ATTEMPT_A,
       athleteId: ATHLETE_A,
       media: {
@@ -2472,6 +2572,14 @@ describe("SQLiteAttemptRepository", () => {
         deleteAt: "2030-01-16T12:00:00.000Z",
       },
     });
+    expect(() =>
+      fixture.database.raw
+        .prepare("UPDATE attempts SET media_json = ? WHERE id = ?")
+        .run("{not-json", ATTEMPT_A),
+    ).toThrow("invalid C5 media transition");
+    fixture.database.raw.exec(
+      "DROP TRIGGER attempts_media_json_requires_c5_transition",
+    );
     fixture.database.raw
       .prepare("UPDATE attempts SET media_json = ? WHERE id = ?")
       .run("{not-json", ATTEMPT_A);
@@ -2698,7 +2806,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 10 });
+    ).toMatchObject({ count: 11 });
     reopened.close();
     upgraded.close();
   });
@@ -2776,7 +2884,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 10 });
+    ).toMatchObject({ count: 11 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -2927,7 +3035,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 10 });
+    ).toMatchObject({ count: 11 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);

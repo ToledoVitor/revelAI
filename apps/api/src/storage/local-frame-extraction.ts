@@ -66,6 +66,16 @@ export interface FrameRetentionRepository {
 type DecodedFrame = Readonly<{ index: number; timestampSeconds: number }>;
 type SceneEvidence = Readonly<{ timestampSeconds: number; score: number }>;
 
+// FFmpeg showinfo can emit a complete per-frame record with colour, side-data,
+// and metadata. This cap permits 640 bounded 512-byte records plus process
+// diagnostics. A record permits 512 bytes: fixed showinfo fields plus maximum
+// pixel/colour/side-data fields emitted by the locked FFmpeg invocation. It
+// still rejects unbounded/erroring runners before evidence crosses storage.
+const MAX_SHOWINFO_RECORD_BYTES = 512;
+const MAX_SHOWINFO_DIAGNOSTIC_BYTES = 16 * 1024;
+const MAX_SHOWINFO_BYTES =
+  640 * MAX_SHOWINFO_RECORD_BYTES + MAX_SHOWINFO_DIAGNOSTIC_BYTES;
+
 /** Private stored-media capability: callers see only opaque IDs and manifests. */
 export class LocalFrameExtraction {
   private readonly root: string;
@@ -146,13 +156,17 @@ export class LocalFrameExtraction {
         timeoutMilliseconds: this.timeoutMilliseconds,
         terminationGraceMilliseconds: 1_000,
         maxStdoutBytes: 2 * 1024 * 1024,
-        maxStderrBytes: 64 * 1024,
+        maxStderrBytes: MAX_SHOWINFO_BYTES,
         maxOutputBytes: 128 * 1024 * 1024,
         evidenceFormat: "ffmpeg-showinfo-metadata-v1",
       });
       if (result.exitCode !== 0 || result.termination !== "completed")
         throw new MediaPipelineError("media_probe_failed");
-      const evidence = parseEvidence(result, 2 * 1024 * 1024, 64 * 1024);
+      const evidence = parseEvidence(
+        result,
+        2 * 1024 * 1024,
+        MAX_SHOWINFO_BYTES,
+      );
       const selected = selectDecodedFrames(
         input.mode,
         input.probe,
@@ -244,6 +258,10 @@ function extractionArguments(
     "[frames]",
     "-vsync",
     "0",
+    // image2 defaults to 1 while showinfo begins at 0. C5 owns both sides of
+    // this protocol, so the opaque decoded index and actual filename agree.
+    "-start_number",
+    "0",
     "-y",
     outputPattern,
     "-map",
@@ -283,6 +301,8 @@ function parseShowinfo(output: string): readonly DecodedFrame[] {
     const match =
       /\bn:\s*(\d+)\s+pts:\s*-?\d+\s+pts_time:([-+]?\d+(?:\.\d+)?)/.exec(line);
     if (!match) continue;
+    if (Buffer.byteLength(line, "utf8") > MAX_SHOWINFO_RECORD_BYTES)
+      throw new MediaPipelineError("media_probe_failed");
     const index = Number(match[1]);
     const timestampSeconds = Number(match[2]);
     if (
@@ -506,11 +526,109 @@ function isOpaqueUuid(value: string): boolean {
 }
 
 function isJpeg(bytes: Uint8Array): boolean {
+  if (
+    bytes.length < 16 ||
+    bytes[0] !== 0xff ||
+    bytes[1] !== 0xd8 ||
+    bytes.at(-2) !== 0xff ||
+    bytes.at(-1) !== 0xd9
+  )
+    return false;
+
+  let cursor = 2;
+  let sawDht = false;
+  let sawDqt = false;
+  let sawSof = false;
+  let sawSos = false;
+  let entropyBytes = 0;
+  while (cursor < bytes.length - 2) {
+    if (bytes[cursor] !== 0xff) return false;
+    while (bytes[cursor] === 0xff) cursor += 1;
+    const marker = bytes[cursor];
+    if (marker === undefined || marker === 0x00 || marker === 0xd9)
+      return false;
+    cursor += 1;
+    if (
+      marker === 0xd8 ||
+      marker === 0x01 ||
+      (marker >= 0xd0 && marker <= 0xd7)
+    )
+      continue;
+    if (cursor + 2 > bytes.length) return false;
+    const segmentLength = (bytes[cursor]! << 8) | bytes[cursor + 1]!;
+    if (segmentLength < 2 || cursor + segmentLength > bytes.length)
+      return false;
+    const segmentStart = cursor + 2;
+    const segmentEnd = cursor + segmentLength;
+    if (marker === 0xdb) {
+      // DQT: at least precision/table-id plus 64 quantisation entries.
+      if (segmentLength < 67) return false;
+      sawDqt = true;
+    }
+    if (marker === 0xc4) {
+      // DHT: class/id, sixteen code-length counts, and one value.
+      if (segmentLength < 20) return false;
+      sawDht = true;
+    }
+    if (isStartOfFrame(marker)) {
+      // precision + height + width + component count
+      if (
+        segmentLength < 8 ||
+        bytes[segmentStart] === 0 ||
+        ((bytes[segmentStart + 1]! << 8) | bytes[segmentStart + 2]!) === 0 ||
+        ((bytes[segmentStart + 3]! << 8) | bytes[segmentStart + 4]!) === 0 ||
+        bytes[segmentStart + 5] === 0
+      )
+        return false;
+      sawSof = true;
+    }
+    if (marker !== 0xda) {
+      cursor = segmentEnd;
+      continue;
+    }
+    if (!sawDqt || !sawDht || !sawSof || segmentLength < 8) return false;
+    const scanComponents = bytes[segmentStart];
+    if (
+      scanComponents === undefined ||
+      scanComponents < 1 ||
+      scanComponents > 4 ||
+      segmentLength !== 6 + 2 * scanComponents
+    )
+      return false;
+    sawSos = true;
+    cursor = segmentEnd;
+    // Entropy-coded data accepts byte-stuffed 0xff00 and restart markers. A
+    // next non-restart marker ends this scan and must be EOI for our one-scan
+    // frame contract; multi-scan/marker fragments are rejected fail-closed.
+    while (cursor < bytes.length - 1) {
+      if (bytes[cursor] !== 0xff) {
+        entropyBytes += 1;
+        cursor += 1;
+        continue;
+      }
+      const next = bytes[cursor + 1];
+      if (next === undefined) return false;
+      if (next === 0x00) {
+        entropyBytes += 1;
+        cursor += 2;
+        continue;
+      }
+      if (next >= 0xd0 && next <= 0xd7) {
+        cursor += 2;
+        continue;
+      }
+      return next === 0xd9 && entropyBytes > 0 && sawSos;
+    }
+    return false;
+  }
+  return false;
+}
+
+function isStartOfFrame(marker: number): boolean {
   return (
-    bytes.length >= 4 &&
-    bytes[0] === 0xff &&
-    bytes[1] === 0xd8 &&
-    bytes.at(-2) === 0xff &&
-    bytes.at(-1) === 0xd9
+    (marker >= 0xc0 && marker <= 0xc3) ||
+    (marker >= 0xc5 && marker <= 0xc7) ||
+    (marker >= 0xc9 && marker <= 0xcb) ||
+    (marker >= 0xcd && marker <= 0xcf)
   );
 }

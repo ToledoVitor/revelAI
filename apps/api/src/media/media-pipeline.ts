@@ -2,6 +2,7 @@ import { isMediaProbeAdmissible, type MediaMode } from "./eligibility.js";
 import { MediaPipelineError } from "./probe.js";
 import type { ExtractionManifest } from "./extraction-manifest.js";
 import { originalOrFrameDeleteAt } from "./retention-deadlines.js";
+import { temporaryDeleteAt } from "./retention-deadlines.js";
 import {
   LocalMediaStorage,
   type LocalMediaUploadSession,
@@ -25,11 +26,17 @@ export interface MediaEvidenceExtractor {
   ): Promise<ExtractionManifest>;
 }
 
-export type AcceptedMedia = StoredLocalMedia &
+export type AcceptedMedia = Omit<StoredLocalMedia, "transitionResourceId"> &
   Readonly<{
     manifest: ExtractionManifest;
     uploadedAt: string;
     deleteAt: string;
+    /** Required repository handoff for the durable C5 temporary fact. */
+    transition: Readonly<{
+      kind: "upload-transition";
+      resourceId: string;
+      deleteAt: string;
+    }>;
   }>;
 
 /** The public acceptance capability cannot publish a probe-only upload. */
@@ -83,11 +90,19 @@ export class MediaPipeline {
         source: "staged",
       });
       const stored = await session.publish();
+      const { transitionResourceId: ignoredTransitionResourceId, ...media } =
+        stored;
+      void ignoredTransitionResourceId;
       return Object.freeze({
-        ...stored,
+        ...media,
         manifest,
         uploadedAt: input.retention.uploadedAt,
         deleteAt: originalOrFrameDeleteAt(input.retention.uploadedAt),
+        transition: Object.freeze({
+          kind: "upload-transition" as const,
+          resourceId: stored.id,
+          deleteAt: temporaryDeleteAt(input.retention.uploadedAt),
+        }),
       });
     } catch (error) {
       await session.abort();

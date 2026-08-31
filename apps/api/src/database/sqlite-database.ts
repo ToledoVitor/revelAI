@@ -541,6 +541,27 @@ const migrations: readonly Migration[] = [
         ON retention_cleanup_records(cleanup_requested_at, delete_at, resource_id);
     `,
   },
+  {
+    version: 11,
+    sql: `
+      CREATE TRIGGER attempts_media_json_requires_c5_transition
+      BEFORE UPDATE OF media_json ON attempts
+      WHEN NEW.media_json IS NOT NULL AND (
+        json_valid(NEW.media_json) = 0
+        OR json_type(NEW.media_json, '$.uploadedAt') IS NOT 'text'
+        OR json_type(NEW.media_json, '$.deleteAt') IS NOT 'text'
+        OR json_type(NEW.media_json, '$.transition') IS NOT 'object'
+        OR json_extract(NEW.media_json, '$.transition.kind') IS NOT 'upload-transition'
+        OR json_type(NEW.media_json, '$.transition.resourceId') IS NOT 'text'
+        OR json_type(NEW.media_json, '$.transition.deleteAt') IS NOT 'text'
+        OR json_extract(NEW.media_json, '$.transition.resourceId') IS NOT json_extract(NEW.media_json, '$.id')
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid C5 media transition');
+      END;
+    `,
+    afterApply: canonicalizeLegacyStoredMedia,
+  },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {
@@ -623,6 +644,50 @@ function canonicalizeLegacyTerminalCandidates(raw: Database.Database): void {
   for (const row of rows) {
     const canonical = canonicalizeLegacyTerminalCandidate(row.candidate_json);
     if (canonical !== row.candidate_json) update.run(canonical, row.id);
+  }
+}
+
+/** Upgrade pre-C5 attached rows into the one canonical retention handoff. */
+function canonicalizeLegacyStoredMedia(raw: Database.Database): void {
+  const rows = raw
+    .prepare("SELECT id, media_json FROM attempts WHERE media_json IS NOT NULL")
+    .all() as readonly Readonly<{ id: string; media_json: string }>[];
+  const update = raw.prepare("UPDATE attempts SET media_json = ? WHERE id = ?");
+  for (const row of rows) {
+    const canonical = canonicalizeLegacyMedia(row.media_json);
+    if (canonical !== row.media_json) update.run(canonical, row.id);
+  }
+}
+
+function canonicalizeLegacyMedia(value: string): string {
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return value;
+    const media = parsed as Record<string, unknown>;
+    if (
+      "uploadedAt" in media ||
+      typeof media.id !== "string" ||
+      typeof media.deleteAt !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(media.deleteAt)
+    )
+      return value;
+    const deleteAt = Date.parse(media.deleteAt);
+    if (!Number.isFinite(deleteAt)) return value;
+    const uploadedAt = new Date(deleteAt - 23 * 60 * 60 * 1000).toISOString();
+    return canonicalJson({
+      ...media,
+      uploadedAt,
+      transition: {
+        kind: "upload-transition",
+        resourceId: media.id,
+        deleteAt: new Date(
+          Date.parse(uploadedAt) + 60 * 60 * 1000,
+        ).toISOString(),
+      },
+    });
+  } catch {
+    return value;
   }
 }
 

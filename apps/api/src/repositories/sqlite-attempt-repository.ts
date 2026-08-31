@@ -11,7 +11,10 @@ import {
   type WallPassRankableResult as DomainWallPassRankableResult,
 } from "@revelai/domain";
 import type { AnalysisJob } from "../queue/analysis-queue.js";
-import { originalOrFrameDeleteAt } from "../media/retention-deadlines.js";
+import {
+  originalOrFrameDeleteAt,
+  temporaryDeleteAt,
+} from "../media/retention-deadlines.js";
 import type { SqliteDatabase } from "../database/sqlite-database.js";
 import type {
   AttemptRecord,
@@ -291,11 +294,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     }>,
   ): Promise<AnalysisJob> {
     return this.transaction(() => {
-      if (
-        input.media.uploadedAt &&
-        input.media.deleteAt !== originalOrFrameDeleteAt(input.media.uploadedAt)
-      )
-        throw new RepositoryError("invalid_input");
+      assertTransitionMedia(input.media);
       const row = this.mustGetScopedAttempt(input.attemptId, input.athleteId);
       const attempt = parseAttemptRow(row);
       if (attempt.media !== null)
@@ -325,15 +324,17 @@ export class SQLiteAttemptRepository implements AttemptRepository {
           input.media.deleteAt,
           now,
         );
-      if (input.media.transitionResourceId) {
-        const acknowledged = this.raw
-          .prepare(
-            "DELETE FROM retention_cleanup_records WHERE resource_id = ? AND attempt_id = ? AND resource_kind = 'temporary'",
-          )
-          .run(input.media.transitionResourceId, input.attemptId);
-        if (acknowledged.changes !== 1)
-          throw new RepositoryError("invalid_input");
-      }
+      const acknowledged = this.raw
+        .prepare(
+          "DELETE FROM retention_cleanup_records WHERE resource_id = ? AND attempt_id = ? AND resource_kind = 'temporary' AND delete_at = ?",
+        )
+        .run(
+          input.media.transition.resourceId,
+          input.attemptId,
+          input.media.transition.deleteAt,
+        );
+      if (acknowledged.changes !== 1)
+        throw new RepositoryError("invalid_input");
       this.event(
         input.attemptId,
         row.processing_generation + 1,
@@ -374,11 +375,10 @@ export class SQLiteAttemptRepository implements AttemptRepository {
           "UPDATE attempts SET media_json = NULL, status = 'awaiting-upload', updated_at = ? WHERE id = ? AND status = 'uploaded' AND processing_generation = ? AND deletion_state = 'active'",
         )
         .run(now, input.attemptId, input.generation);
-      this.raw
-        .prepare(
-          "DELETE FROM media_retention_records WHERE media_id = ? AND attempt_id = ?",
-        )
-        .run(attempt.media.id, input.attemptId);
+      // Queue delivery is not an authority to lose physical-byte coverage.
+      // Keep the original +23h retention fact while the attempt returns to
+      // awaiting-upload. C8 may delete and acknowledge it later; a crash or
+      // failed delete leaves it due for the scavenger.
       this.event(input.attemptId, input.generation, "media-rolled-back", now);
     });
   }
@@ -1070,6 +1070,14 @@ function parseStoredMedia(value: string): StoredMedia {
   }
   const record = asRecord(parsed);
   if (
+    !hasExactKeys(record, [
+      "id",
+      "contentType",
+      "bytes",
+      "uploadedAt",
+      "deleteAt",
+      "transition",
+    ]) ||
     typeof record.id !== "string" ||
     record.id.length === 0 ||
     typeof record.contentType !== "string" ||
@@ -1078,22 +1086,70 @@ function parseStoredMedia(value: string): StoredMedia {
     !Number.isFinite(record.bytes) ||
     !Number.isInteger(record.bytes) ||
     record.bytes < 0 ||
+    typeof record.uploadedAt !== "string" ||
+    !UtcIsoTimestampSchema.safeParse(record.uploadedAt).success ||
     typeof record.deleteAt !== "string" ||
-    !UtcIsoTimestampSchema.safeParse(record.deleteAt).success
+    !UtcIsoTimestampSchema.safeParse(record.deleteAt).success ||
+    !isRecord(record.transition) ||
+    !hasExactKeys(record.transition, ["kind", "resourceId", "deleteAt"]) ||
+    record.transition.kind !== "upload-transition" ||
+    typeof record.transition.resourceId !== "string" ||
+    typeof record.transition.deleteAt !== "string" ||
+    !UtcIsoTimestampSchema.safeParse(record.transition.deleteAt).success
   )
     throw new RepositoryError("persisted_data_corrupt");
-  return Object.freeze({
+  const media: StoredMedia = Object.freeze({
     id: record.id,
     contentType: record.contentType,
     bytes: record.bytes,
+    uploadedAt: record.uploadedAt,
     deleteAt: record.deleteAt,
+    transition: Object.freeze({
+      kind: "upload-transition",
+      resourceId: record.transition.resourceId,
+      deleteAt: record.transition.deleteAt,
+    }),
   });
+  try {
+    assertTransitionMedia(media);
+  } catch {
+    throw new RepositoryError("persisted_data_corrupt");
+  }
+  return media;
+}
+
+function assertTransitionMedia(media: StoredMedia): void {
+  if (
+    !UtcIsoTimestampSchema.safeParse(media.uploadedAt).success ||
+    !UtcIsoTimestampSchema.safeParse(media.deleteAt).success ||
+    !UtcIsoTimestampSchema.safeParse(media.transition.deleteAt).success ||
+    media.transition.kind !== "upload-transition" ||
+    media.transition.resourceId !== media.id ||
+    media.deleteAt !== originalOrFrameDeleteAt(media.uploadedAt) ||
+    media.transition.deleteAt !== temporaryDeleteAt(media.uploadedAt)
+  )
+    throw new RepositoryError("invalid_input");
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new RepositoryError("persisted_data_corrupt");
   return value as Record<string, unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  const present = Object.keys(value).sort();
+  return (
+    present.length === keys.length &&
+    present.every((key, index) => key === [...keys].sort()[index])
+  );
 }
 
 function isNullableString(value: unknown): value is string | null {

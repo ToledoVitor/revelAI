@@ -11,10 +11,19 @@ export type StoredMedia = Readonly<{
   id: string;
   contentType: string;
   bytes: number;
+  /** Canonical C5 publish time; retention deadlines derive only from it. */
+  uploadedAt: string;
   deleteAt: string;
-  uploadedAt?: string;
-  /** C5 temporary fact deleted atomically with original-retention creation. */
-  transitionResourceId?: string;
+  /**
+   * Durable temporary coverage created by C5 before bytes are staged. Its
+   * resource identity is deliberately the media identity: no caller can swap
+   * cleanup facts between uploads.
+   */
+  transition: Readonly<{
+    kind: "upload-transition";
+    resourceId: string;
+    deleteAt: string;
+  }>;
 }>;
 
 export type CalibrationSessionRecord = Readonly<{

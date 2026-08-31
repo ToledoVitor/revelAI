@@ -11,7 +11,13 @@ const media: StoredMedia = {
   id: "media-a",
   contentType: "video/mp4",
   bytes: 10,
+  uploadedAt: "2030-01-15T13:00:00.000Z",
   deleteAt: "2030-01-16T12:00:00.000Z",
+  transition: {
+    kind: "upload-transition",
+    resourceId: "media-a",
+    deleteAt: "2030-01-15T14:00:00.000Z",
+  },
 } as const;
 
 class AttachmentStore {

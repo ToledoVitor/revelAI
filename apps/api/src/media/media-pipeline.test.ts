@@ -166,7 +166,13 @@ async function* chunks(value: Uint8Array): AsyncIterable<Uint8Array> {
 }
 
 function jpeg(index: number): Uint8Array {
-  return Uint8Array.of(0xff, 0xd8, 0xff, 0xe0, index % 256, 0xff, 0xd9);
+  void index;
+  return Uint8Array.from(
+    Buffer.from(
+      "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAA/AL//2Q==",
+      "base64",
+    ),
+  );
 }
 
 function rawEvidence(
