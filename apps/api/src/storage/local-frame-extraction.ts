@@ -31,6 +31,42 @@ import type {
 
 const localFrameExtractionCapabilities = new WeakSet<object>();
 
+export type LocalFrameExtraction = Readonly<{
+  extract(input: FrameExtractionInput): Promise<ExtractionManifest>;
+  durableReceiptFor(
+    manifest: ExtractionManifest,
+  ): Readonly<{ frameBatchId: string; mediaId: string; sha256: string }>;
+  readFrame(reference: string): Promise<Uint8Array>;
+  readReceipt(
+    input: Readonly<{ frameBatchId: string }>,
+  ): Promise<Readonly<{ bytes: Uint8Array }>>;
+  sourceSha256ForOriginal(
+    input: Readonly<{ mediaId: string }>,
+  ): Promise<string>;
+}>;
+
+export type LocalFrameExtractionInput = Readonly<{
+  root: string;
+  ids: OpaqueMediaIdGenerator;
+  runner: BoundedFrameProcessRunner;
+  retention: FrameRetentionRepository;
+  executable?: string;
+  timeoutMilliseconds?: number;
+  maxFrameBytes?: number;
+}>;
+
+type FrameExtractionInput = Readonly<{
+  mode: "free" | "verified";
+  attemptId: string;
+  generation: number;
+  mediaId: string;
+  mediaSha256: string;
+  probe: MediaProbe;
+  uploadedAt: string;
+  source: "staged";
+  authority: ExtractionAuthority;
+}>;
+
 /** Runtime capability check used only by C5 composition; it never mints. */
 export function isLocalFrameExtractionCapability(
   value: unknown,
@@ -144,8 +180,25 @@ const MAX_SHOWINFO_DIAGNOSTIC_BYTES = 16 * 1024;
 const MAX_SHOWINFO_BYTES =
   640 * MAX_SHOWINFO_RECORD_BYTES + MAX_SHOWINFO_DIAGNOSTIC_BYTES;
 
-/** Private stored-media capability: callers see only opaque IDs and manifests. */
-export class LocalFrameExtraction {
+/** Factory-issued, frozen capability. Its implementation is never exported. */
+export function createLocalFrameExtraction(
+  input: LocalFrameExtractionInput,
+): LocalFrameExtraction {
+  const implementation = new LocalFrameExtractionImplementation(input);
+  const capability: LocalFrameExtraction = Object.freeze({
+    extract: (request) => implementation.extract(request),
+    durableReceiptFor: (manifest) => implementation.durableReceiptFor(manifest),
+    readFrame: (reference) => implementation.readFrame(reference),
+    readReceipt: (request) => implementation.readReceipt(request),
+    sourceSha256ForOriginal: (request) =>
+      implementation.sourceSha256ForOriginal(request),
+  });
+  localFrameExtractionCapabilities.add(capability);
+  return capability;
+}
+
+/** Private stored-media implementation: callers see only opaque capabilities. */
+class LocalFrameExtractionImplementation {
   private readonly root: string;
   private readonly originals: string;
   private readonly frames: string;
@@ -161,17 +214,7 @@ export class LocalFrameExtraction {
     Readonly<{ frameBatchId: string; mediaId: string; sha256: string }>
   >();
 
-  public constructor(
-    input: Readonly<{
-      root: string;
-      ids: OpaqueMediaIdGenerator;
-      runner: BoundedFrameProcessRunner;
-      retention: FrameRetentionRepository;
-      executable?: string;
-      timeoutMilliseconds?: number;
-      maxFrameBytes?: number;
-    }>,
-  ) {
+  public constructor(input: LocalFrameExtractionInput) {
     this.root = resolve(input.root);
     this.originals = join(this.root, "originals");
     this.frames = join(this.root, "frames");
@@ -182,23 +225,10 @@ export class LocalFrameExtraction {
     this.executable = input.executable ?? "ffmpeg";
     this.timeoutMilliseconds = input.timeoutMilliseconds ?? 30_000;
     this.maxFrameBytes = input.maxFrameBytes ?? 52_428;
-    localFrameExtractionCapabilities.add(this);
   }
 
   public async extract(
-    input: Readonly<{
-      mode: "free" | "verified";
-      attemptId: string;
-      generation: number;
-      mediaId: string;
-      mediaSha256: string;
-      probe: MediaProbe;
-      uploadedAt: string;
-      /** Acceptance always extracts from the private staged upload. */
-      source: "staged";
-      /** Required for source digest verification and receipt publication. */
-      authority: ExtractionAuthority;
-    }>,
+    input: FrameExtractionInput,
   ): Promise<ExtractionManifest> {
     const batchId = this.ids.next();
     if (!isOpaqueUuid(batchId) || !isOpaqueUuid(input.mediaId))

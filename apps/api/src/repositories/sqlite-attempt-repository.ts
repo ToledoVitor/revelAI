@@ -43,6 +43,7 @@ import type {
   MediaUploadContext,
   MediaDeliveryRecovery,
   MediaAttachmentRecoveryClaim,
+  MediaDeliveryRedeliveryClaim,
   PersistedProcessingContext,
   StoredMedia,
   TerminalCandidate,
@@ -650,7 +651,8 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       const update = this.raw
         .prepare(
           `UPDATE media_delivery_recovery_records
-              SET state = 'queued', queued_at = COALESCE(queued_at, ?), updated_at = ?
+              SET state = 'queued', requires_rollback = 0,
+                  queued_at = COALESCE(queued_at, ?), updated_at = ?
             WHERE attempt_id = ? AND generation = ? AND state = 'pending-delivery'`,
         )
         .run(now, now, input.attemptId, input.generation);
@@ -704,7 +706,9 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         this.raw
           .prepare(
             `UPDATE media_delivery_recovery_records
-                SET state = 'cleanup-recoverable', updated_at = ?
+                SET state = 'cleanup-recoverable',
+                    recovery_lease_id = NULL, recovery_lease_expires_at = NULL,
+                    updated_at = ?
               WHERE attempt_id = ? AND generation = ? AND media_id = ?`,
           )
           .run(now, input.attemptId, input.generation, input.mediaId);
@@ -852,6 +856,106 @@ export class SQLiteAttemptRepository implements AttemptRepository {
           claims.push(Object.freeze({ ...recovery, leaseId }));
       }
       return Object.freeze(claims);
+    });
+  }
+
+  public async claimMediaDeliveryRedelivery(
+    input: Readonly<{ now: string; limit: number }>,
+  ): Promise<readonly MediaDeliveryRedeliveryClaim[]> {
+    assertRecoveryClaimInput(input);
+    return this.transaction(() => {
+      const candidates = this.raw
+        .prepare(
+          `SELECT attempt_id, generation, media_id, state, requires_rollback,
+                  frame_batch_id, queued_at, rollback_completed_at, cleanup_completed_at,
+                  recovery_lease_id, recovery_lease_expires_at
+             FROM media_delivery_recovery_records
+            WHERE state IN ('pending-delivery', 'queued')
+              AND (recovery_lease_expires_at IS NULL OR recovery_lease_expires_at <= ?)
+            ORDER BY updated_at ASC, attempt_id ASC
+            LIMIT ?`,
+        )
+        .all(input.now, input.limit) as MediaDeliveryRecoveryRow[];
+      const expiresAt = addMilliseconds(input.now, 5 * 60_000);
+      const claims: MediaDeliveryRedeliveryClaim[] = [];
+      for (const candidate of candidates) {
+        const recovery = projectMediaDeliveryRecovery(candidate);
+        if (
+          recovery.state !== "pending-delivery" &&
+          recovery.state !== "queued"
+        ) {
+          throw new RepositoryError("persisted_data_corrupt");
+        }
+        const leaseId = this.ids.next();
+        const update = this.raw
+          .prepare(
+            `UPDATE media_delivery_recovery_records
+                SET recovery_lease_id = ?, recovery_lease_expires_at = ?, updated_at = ?
+              WHERE attempt_id = ? AND generation = ?
+                AND state IN ('pending-delivery', 'queued')
+                AND (recovery_lease_expires_at IS NULL OR recovery_lease_expires_at <= ?)`,
+          )
+          .run(
+            leaseId,
+            expiresAt,
+            input.now,
+            recovery.attemptId,
+            recovery.generation,
+            input.now,
+          );
+        if (update.changes === 1) {
+          const redelivery: MediaDeliveryRedeliveryClaim = Object.freeze({
+            ...recovery,
+            state: recovery.state,
+            leaseId,
+          });
+          claims.push(redelivery);
+        }
+      }
+      return Object.freeze(claims);
+    });
+  }
+
+  public async acknowledgeMediaDeliveryRedelivery(
+    input: Readonly<{ attemptId: string; generation: number; leaseId: string }>,
+  ): Promise<void> {
+    await this.transaction(() => {
+      const now = this.clock.now();
+      const update = this.raw
+        .prepare(
+          `UPDATE media_delivery_recovery_records
+              SET state = 'queued', requires_rollback = 0,
+                  queued_at = COALESCE(queued_at, ?),
+                  recovery_lease_id = NULL, recovery_lease_expires_at = NULL,
+                  updated_at = ?
+            WHERE attempt_id = ? AND generation = ? AND recovery_lease_id = ?
+              AND state IN ('pending-delivery', 'queued')`,
+        )
+        .run(now, now, input.attemptId, input.generation, input.leaseId);
+      if (update.changes !== 1)
+        throw new RepositoryError("invalid_attempt_transition");
+    });
+  }
+
+  public async releaseMediaDeliveryRedelivery(
+    input: Readonly<{ attemptId: string; generation: number; leaseId: string }>,
+  ): Promise<void> {
+    await this.transaction(() => {
+      const update = this.raw
+        .prepare(
+          `UPDATE media_delivery_recovery_records
+              SET recovery_lease_id = NULL, recovery_lease_expires_at = NULL, updated_at = ?
+            WHERE attempt_id = ? AND generation = ? AND recovery_lease_id = ?
+              AND state IN ('pending-delivery', 'queued')`,
+        )
+        .run(
+          this.clock.now(),
+          input.attemptId,
+          input.generation,
+          input.leaseId,
+        );
+      if (update.changes > 1)
+        throw new RepositoryError("persisted_data_corrupt");
     });
   }
 
@@ -1272,7 +1376,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       // normal C5 retention remains independently durable.
       this.raw
         .prepare(
-          "DELETE FROM media_delivery_recovery_records WHERE attempt_id = ? AND generation = ? AND state = 'queued'",
+          "DELETE FROM media_delivery_recovery_records WHERE attempt_id = ? AND generation = ? AND state IN ('pending-delivery', 'queued')",
         )
         .run(input.attemptId, input.generation);
       return Object.freeze({
@@ -1312,9 +1416,14 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         .run(input.attemptId);
       this.raw
         .prepare(
-          "DELETE FROM media_delivery_recovery_records WHERE attempt_id = ?",
+          `UPDATE media_delivery_recovery_records
+              SET state = 'cleanup-recoverable', requires_rollback = 0,
+                  queued_at = NULL, rollback_completed_at = NULL,
+                  recovery_lease_id = NULL, recovery_lease_expires_at = NULL,
+                  updated_at = ?
+            WHERE attempt_id = ? AND state <> 'resolved'`,
         )
-        .run(input.attemptId);
+        .run(now, input.attemptId);
       this.raw
         .prepare(
           "UPDATE media_retention_records SET cleanup_requested_at = ? WHERE attempt_id = ?",
@@ -1916,7 +2025,7 @@ function projectMediaDeliveryRecovery(
     (row.rollback_completed_at !== null && row.requires_rollback !== 1) ||
     (row.recovery_lease_id === null) !==
       (row.recovery_lease_expires_at === null) ||
-    (row.state !== "cleanup-recoverable" &&
+    (row.state === "resolved" &&
       (row.recovery_lease_id !== null ||
         row.recovery_lease_expires_at !== null))
   )
@@ -1929,6 +2038,19 @@ function projectMediaDeliveryRecovery(
     state: row.state,
     requiresRollback: row.requires_rollback === 1,
   });
+}
+
+function assertRecoveryClaimInput(
+  input: Readonly<{ now: string; limit: number }>,
+): void {
+  if (!UtcIsoTimestampSchema.safeParse(input.now).success)
+    throw new RepositoryError("invalid_input");
+  if (
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > 100
+  )
+    throw new RepositoryError("invalid_input");
 }
 
 function assertClaimableProcessingRow(

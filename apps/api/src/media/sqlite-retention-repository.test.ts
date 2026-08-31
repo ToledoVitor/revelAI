@@ -12,7 +12,7 @@ import { createStoredMediaAttachment } from "../repositories/attempt-repository.
 import { QueueUnavailableError } from "../queue/analysis-queue.js";
 import { AttemptService } from "../services/attempt-service.js";
 import { RetentionScavenger } from "./retention-scavenger.js";
-import { LocalMediaStorage } from "../storage/local-media-storage.js";
+import { createLocalMediaStorage } from "../storage/local-media-storage.js";
 import { LocalRetentionObjectStore } from "../storage/local-retention-object-store.js";
 import { SQLiteRetentionRepository } from "./sqlite-retention-repository.js";
 import {
@@ -271,7 +271,7 @@ describe("SQLiteRetentionRepository", () => {
   it("persists a transition fact before upload creation and reopens to delete an unattached published original", async () => {
     const transientMedia = "99999999-9999-4999-8999-999999999999";
     const retention = new SQLiteRetentionRepository({ database });
-    const storage = new LocalMediaStorage({
+    const storage = createLocalMediaStorage({
       root: join(directory, "media"),
       ids: { next: () => transientMedia },
       prober: {
@@ -308,7 +308,7 @@ describe("SQLiteRetentionRepository", () => {
     database.close();
     database = openSqliteDatabase(join(directory, "api.sqlite"));
     const reopened = new SQLiteRetentionRepository({ database });
-    const reopenedStorage = new LocalMediaStorage({
+    const reopenedStorage = createLocalMediaStorage({
       root: join(directory, "media"),
       ids: { next: () => transientMedia },
       prober: {
@@ -422,7 +422,7 @@ describe("SQLiteRetentionRepository", () => {
     expect(due).not.toContainEqual(
       expect.objectContaining({ id: rolledBackMedia, kind: "temporary" }),
     );
-    const reopenedStorage = new LocalMediaStorage({
+    const reopenedStorage = createLocalMediaStorage({
       root: join(directory, "queue-rollback-media"),
       ids: { next: () => rolledBackMedia },
       prober: {

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { MediaAttachmentRecoveryExecutor } from "./media-attachment-recovery.js";
+import {
+  MediaAttachmentRecoveryExecutor,
+  MediaDeliveryRedeliveryExecutor,
+} from "./media-attachment-recovery.js";
 
 const claim = Object.freeze({
   attemptId: "11111111-1111-4111-8111-111111111111",
@@ -54,5 +57,45 @@ describe("MediaAttachmentRecoveryExecutor", () => {
       executor.run({ now: "2030-01-15T12:00:00.000Z", limit: 1 }),
     ).resolves.toBe(0);
     expect(calls).toEqual(["rollback", "log", "release"]);
+  });
+});
+
+describe("MediaDeliveryRedeliveryExecutor", () => {
+  it("releases a failed leased delivery for at-least-once retry without exposing queue detail", async () => {
+    const calls: string[] = [];
+    const executor = new MediaDeliveryRedeliveryExecutor(
+      {
+        claimMediaDeliveryRedelivery: async () => [
+          {
+            ...claim,
+            state: "pending-delivery" as const,
+          },
+        ],
+        acknowledgeMediaDeliveryRedelivery: async () => void calls.push("ack"),
+        releaseMediaDeliveryRedelivery: async () => void calls.push("release"),
+      },
+      {
+        enqueue: async () => {
+          calls.push("enqueue");
+          throw new Error("queue host is private");
+        },
+      },
+      {
+        event: (entry) => {
+          calls.push(
+            `${entry.category}:${"attempt" in entry ? entry.attempt : ""}`,
+          );
+        },
+      },
+    );
+
+    await expect(
+      executor.run({ now: "2030-01-15T12:00:00.000Z", limit: 1 }),
+    ).resolves.toBe(0);
+    expect(calls).toEqual([
+      "enqueue",
+      "media_delivery_redelivery_failed:11111111",
+      "release",
+    ]);
   });
 });

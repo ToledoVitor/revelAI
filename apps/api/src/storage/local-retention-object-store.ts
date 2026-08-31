@@ -2,7 +2,7 @@ import type {
   RetentionObjectStore,
   RetentionRecord,
 } from "../media/retention-scavenger.js";
-import { LocalMediaStorage } from "./local-media-storage.js";
+import type { LocalMediaStorage } from "./local-media-storage.js";
 
 /** Maps opaque retention records to local deletion without exposing a path. */
 export class LocalRetentionObjectStore implements RetentionObjectStore {

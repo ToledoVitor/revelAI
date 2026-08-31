@@ -17,15 +17,15 @@ import {
 import { originalOrFrameDeleteAt } from "./retention-deadlines.js";
 import { temporaryDeleteAt } from "./retention-deadlines.js";
 import {
-  LocalMediaStorage,
   isLocalMediaStorageCapability,
+  type LocalMediaStorage,
   type LocalMediaUploadSession,
   type StoredLocalMedia,
   type UploadRetentionRepository,
 } from "../storage/local-media-storage.js";
 import {
-  LocalFrameExtraction,
   isLocalFrameExtractionCapability,
+  type LocalFrameExtraction,
 } from "../storage/local-frame-extraction.js";
 
 /**
@@ -62,6 +62,13 @@ export type MediaPipelineMultipartAcceptanceInput = Readonly<{
 }>;
 
 const c5HandoffVerifiers = new WeakSet<object>();
+const mediaPipelineCapabilities = new WeakMap<
+  object,
+  Readonly<{ storage: LocalMediaStorage; extraction: LocalFrameExtraction }>
+>();
+
+/** Opaque factory-issued composition token for the production C5 stack. */
+export type MediaPipelineCapability = Readonly<Record<never, never>>;
 
 /** Only a real MediaPipeline can register a verifier in this private registry. */
 export function isC5AcceptedMediaHandoffVerifier(
@@ -84,19 +91,40 @@ export interface C5MediaPipeline {
   ): Promise<AcceptedMedia>;
 }
 
-/** C5-owned composition point. Both inputs are concrete runtime capabilities. */
-export function createMediaPipeline(
+/**
+ * Combines two independently factory-issued local capabilities. Callers can
+ * neither inspect nor replace the private storage/extractor implementations.
+ */
+export function createMediaPipelineCapability(
   input: Readonly<{
     storage: LocalMediaStorage;
     extraction: LocalFrameExtraction;
   }>,
-): C5MediaPipeline {
+): MediaPipelineCapability {
   if (
     !isLocalMediaStorageCapability(input.storage) ||
     !isLocalFrameExtractionCapability(input.extraction)
   )
-    throw new Error("C5 media pipeline requires local storage and extraction.");
-  return new MediaPipeline(input.storage, input.extraction);
+    throw new Error("C5 media pipeline requires factory capabilities.");
+  const capability: MediaPipelineCapability = Object.freeze({});
+  mediaPipelineCapabilities.set(
+    capability,
+    Object.freeze({ storage: input.storage, extraction: input.extraction }),
+  );
+  return capability;
+}
+
+/** C5 accepts only an exact factory-issued composition capability. */
+export function createMediaPipeline(
+  capability: MediaPipelineCapability,
+): C5MediaPipeline {
+  const topology =
+    typeof capability === "object" && capability !== null
+      ? mediaPipelineCapabilities.get(capability)
+      : undefined;
+  if (!topology)
+    throw new Error("C5 media pipeline requires a factory capability.");
+  return new MediaPipeline(topology.storage, topology.extraction).publicApi();
 }
 
 /** The public acceptance capability cannot publish a probe-only upload. */
@@ -116,6 +144,16 @@ class MediaPipeline implements C5MediaPipeline {
         this.issuedHandoffs.has(value),
     });
     c5HandoffVerifiers.add(this.verifier);
+  }
+
+  /** A frozen closure facade prevents property/prototype method replacement. */
+  public publicApi(): C5MediaPipeline {
+    return Object.freeze({
+      handoffVerifier: () => this.handoffVerifier(),
+      accept: (input: MediaPipelineAcceptanceInput) => this.accept(input),
+      acceptMultipart: (input: MediaPipelineMultipartAcceptanceInput) =>
+        this.acceptMultipart(input),
+    });
   }
 
   /** Composition gives C4 this verifier; no caller receives an issuer. */

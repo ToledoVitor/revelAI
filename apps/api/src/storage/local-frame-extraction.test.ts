@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type MediaProbe } from "../media/probe.js";
 import { verifiedExtractionCapability } from "../media/extraction-manifest.js";
-import { LocalFrameExtraction } from "./local-frame-extraction.js";
+import { createLocalFrameExtraction } from "./local-frame-extraction.js";
 
 const attemptId = "11111111-1111-4111-8111-111111111111";
 const mediaId = "22222222-2222-4222-8222-222222222222";
@@ -52,7 +52,7 @@ describe("LocalFrameExtraction", () => {
   it("uses process-parsed decoded timestamps and scene records before publishing an opaque readable set", async () => {
     const root = await setupRoot(roots);
     const calls: unknown[] = [];
-    const extractor = new LocalFrameExtraction({
+    const extractor = createLocalFrameExtraction({
       root,
       ids: { next: () => batchId },
       runner: {
@@ -91,7 +91,7 @@ describe("LocalFrameExtraction", () => {
 
   it("materializes zero-based image2 output and retains a bounded complete Verified showinfo stream", async () => {
     const root = await setupRoot(roots);
-    const extractor = new LocalFrameExtraction({
+    const extractor = createLocalFrameExtraction({
       root,
       ids: { next: () => batchId },
       runner: {
@@ -131,7 +131,7 @@ describe("LocalFrameExtraction", () => {
 
   it("rejects a claimed source digest before it can issue a durable receipt", async () => {
     const root = await setupRoot(roots);
-    const extractor = new LocalFrameExtraction({
+    const extractor = createLocalFrameExtraction({
       root,
       ids: { next: () => batchId },
       runner: {
@@ -159,7 +159,7 @@ describe("LocalFrameExtraction", () => {
 
   it("rejects marker-only JPEG output before exposing a frame reference", async () => {
     const root = await setupRoot(roots);
-    const extractor = new LocalFrameExtraction({
+    const extractor = createLocalFrameExtraction({
       root,
       ids: { next: () => batchId },
       runner: {
@@ -213,7 +213,7 @@ describe("LocalFrameExtraction", () => {
       "truncated",
     ] as const) {
       const root = await setupRoot(roots);
-      const extractor = new LocalFrameExtraction({
+      const extractor = createLocalFrameExtraction({
         root,
         ids: { next: () => batchId },
         runner: {
@@ -250,7 +250,7 @@ describe("LocalFrameExtraction", () => {
   it("makes opaque reads re-validate structural JPEG evidence", async () => {
     const root = await setupRoot(roots);
     const timeline = Array.from({ length: 37 }, (_, index) => index / 12);
-    const extractor = new LocalFrameExtraction({
+    const extractor = createLocalFrameExtraction({
       root,
       ids: { next: () => batchId },
       runner: {
@@ -285,7 +285,7 @@ describe("LocalFrameExtraction", () => {
   it("re-validates semantic baseline JPEG failures through opaque frame reads", async () => {
     const root = await setupRoot(roots);
     const timeline = Array.from({ length: 37 }, (_, index) => index / 12);
-    const extractor = new LocalFrameExtraction({
+    const extractor = createLocalFrameExtraction({
       root,
       ids: { next: () => batchId },
       runner: {
@@ -340,7 +340,7 @@ describe("LocalFrameExtraction", () => {
         { length: fps * 3 + 1 },
         (_, index) => index / fps,
       );
-      const extractor = new LocalFrameExtraction({
+      const extractor = createLocalFrameExtraction({
         root,
         ids: { next: () => batchId },
         runner: {
@@ -370,7 +370,7 @@ describe("LocalFrameExtraction", () => {
 
   it("rejects missing, discontinuous, or oversized process evidence before any frame set is visible", async () => {
     const root = await setupRoot(roots);
-    const extractor = new LocalFrameExtraction({
+    const extractor = createLocalFrameExtraction({
       root,
       ids: { next: () => batchId },
       runner: {
@@ -406,7 +406,7 @@ describe("LocalFrameExtraction", () => {
 
   it("binds each verified active scene score to its selected decoded timestamp", async () => {
     const root = await setupRoot(roots);
-    const extractor = new LocalFrameExtraction({
+    const extractor = createLocalFrameExtraction({
       root,
       ids: { next: () => batchId },
       runner: {
@@ -440,7 +440,7 @@ describe("LocalFrameExtraction", () => {
     const existing = join(root, "frames", batchId);
     await mkdir(existing, { mode: 0o700 });
     await writeFile(join(existing, ".complete"), "v1", { mode: 0o600 });
-    const extractor = new LocalFrameExtraction({
+    const extractor = createLocalFrameExtraction({
       root,
       ids: { next: () => batchId },
       runner: {
@@ -472,7 +472,7 @@ describe("LocalFrameExtraction", () => {
 
   it("rejects fabricated NDJSON because the runner contract carries raw FFmpeg output", async () => {
     const root = await setupRoot(roots);
-    const extractor = new LocalFrameExtraction({
+    const extractor = createLocalFrameExtraction({
       root,
       ids: { next: () => batchId },
       runner: {
@@ -530,7 +530,7 @@ describe("LocalFrameExtraction", () => {
     const generatedSourceSha256 = createHash("sha256")
       .update(await readFile(staged))
       .digest("hex");
-    const extractor = new LocalFrameExtraction({
+    const extractor = createLocalFrameExtraction({
       root,
       ids: { next: () => batchId },
       runner: {

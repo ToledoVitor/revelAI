@@ -1213,6 +1213,114 @@ describe("SQLiteAttemptRepository", () => {
     );
   });
 
+  it("leases pending delivery for at-least-once redelivery before recording a coherent queue acknowledgement", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await attachMedia(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const recovery = fixture.repository as unknown as {
+      claimMediaDeliveryRedelivery?: (
+        input: Readonly<{
+          now: string;
+          limit: number;
+        }>,
+      ) => Promise<readonly Readonly<{ leaseId: string; state: string }>[]>;
+      acknowledgeMediaDeliveryRedelivery?: (
+        input: Readonly<{
+          attemptId: string;
+          generation: number;
+          leaseId: string;
+        }>,
+      ) => Promise<void>;
+    };
+
+    expect(typeof recovery.claimMediaDeliveryRedelivery).toBe("function");
+    expect(typeof recovery.acknowledgeMediaDeliveryRedelivery).toBe("function");
+    if (
+      !recovery.claimMediaDeliveryRedelivery ||
+      !recovery.acknowledgeMediaDeliveryRedelivery
+    )
+      return;
+
+    const claims = await recovery.claimMediaDeliveryRedelivery({
+      now: fixture.clock.now(),
+      limit: 1,
+    });
+    expect(claims).toHaveLength(1);
+    expect(claims[0]).toMatchObject({ state: "pending-delivery" });
+    await expect(
+      recovery.claimMediaDeliveryRedelivery({
+        now: fixture.clock.now(),
+        limit: 1,
+      }),
+    ).resolves.toEqual([]);
+    fixture.clock.advance(5 * 60_000);
+    const reclaimed = await recovery.claimMediaDeliveryRedelivery({
+      now: fixture.clock.now(),
+      limit: 1,
+    });
+    expect(reclaimed).toHaveLength(1);
+    expect(reclaimed[0]!.leaseId).not.toBe(claims[0]!.leaseId);
+    await recovery.acknowledgeMediaDeliveryRedelivery({
+      ...job,
+      leaseId: reclaimed[0]!.leaseId,
+    });
+    await expect(
+      fixture.repository.getMediaDeliveryRecovery(job),
+    ).resolves.toEqual(
+      expect.objectContaining({ state: "queued", requiresRollback: false }),
+    );
+  });
+
+  it("turns a tombstoned pending delivery into exact cleanup recovery instead of orphaning its resources", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await attachMedia(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+
+    await fixture.repository.tombstoneAttempt({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+    });
+
+    await expect(
+      fixture.repository.getMediaDeliveryRecovery(job),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        state: "cleanup-recoverable",
+        requiresRollback: false,
+      }),
+    );
+    await expect(
+      fixture.repository.claimMediaAttachmentRecovery({
+        now: fixture.clock.now(),
+        limit: 1,
+      }),
+    ).resolves.toHaveLength(1);
+  });
+
   it("rejects every impossible durable recovery lifecycle shape", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
@@ -1246,7 +1354,6 @@ describe("SQLiteAttemptRepository", () => {
       "UPDATE media_delivery_recovery_records SET state = 'cleanup-recoverable', cleanup_completed_at = '2030-01-15T12:00:00.000Z' WHERE attempt_id = ? AND generation = ?",
       "UPDATE media_delivery_recovery_records SET state = 'resolved' WHERE attempt_id = ? AND generation = ?",
       "UPDATE media_delivery_recovery_records SET state = 'cleanup-recoverable', recovery_lease_id = 'ffffffff-ffff-4fff-8fff-ffffffffffff' WHERE attempt_id = ? AND generation = ?",
-      "UPDATE media_delivery_recovery_records SET recovery_lease_id = 'ffffffff-ffff-4fff-8fff-ffffffffffff', recovery_lease_expires_at = '2030-01-15T12:05:00.000Z' WHERE attempt_id = ? AND generation = ?",
     ] as const;
     for (const statement of impossible) {
       reset();
@@ -1369,6 +1476,9 @@ describe("SQLiteAttemptRepository", () => {
         })
       ).entries,
     ).toEqual([]);
+    await expect(
+      fixture.repository.getMediaDeliveryRecovery(job),
+    ).resolves.toBeNull();
   });
 
   it("serializes independently-run ranked completions into frozen cohorts while preserving live ties", async () => {
@@ -3389,7 +3499,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toEqual({ count: 18 });
+    ).toEqual({ count: 19 });
     reopened.close();
   });
 
@@ -3444,10 +3554,15 @@ describe("SQLiteAttemptRepository", () => {
     expect(
       upgraded.raw
         .prepare(
-          "SELECT frame_batch_id FROM media_delivery_recovery_records WHERE attempt_id = ? AND generation = 1",
+          "SELECT frame_batch_id, state, requires_rollback, queued_at FROM media_delivery_recovery_records WHERE attempt_id = ? AND generation = 1",
         )
         .get(ATTEMPT_A),
-    ).toEqual({ frame_batch_id: frameBatchId });
+    ).toEqual({
+      frame_batch_id: frameBatchId,
+      state: "pending-delivery",
+      requires_rollback: 1,
+      queued_at: null,
+    });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -3459,6 +3574,149 @@ describe("SQLiteAttemptRepository", () => {
         .get(ATTEMPT_A),
     ).toEqual({ count: 1 });
     reopened.close();
+  });
+
+  it("normalizes a valid v18 processing recovery conflict to the queued redelivery lifecycle", () => {
+    const filename = join(
+      fixture.directory,
+      "delivery-recovery-v18-processing.sqlite",
+    );
+    const predecessor = openSqliteDatabaseAtVersionForTest(filename, 18);
+    const uploadedAt = fixture.clock.now();
+    const mediaId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const frameBatchId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    predecessor.raw
+      .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+      .run(ATHLETE_A, uploadedAt);
+    predecessor.raw
+      .prepare(
+        "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, created_at, updated_at, processing_context_json, media_sha256, processing_receipt_id, processing_receipt_sha256) VALUES (?, ?, 'free', NULL, NULL, NULL, 'processing', 'active', ?, 1, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        ATTEMPT_A,
+        ATHLETE_A,
+        JSON.stringify(preparedStoredMedia({ id: mediaId, uploadedAt })),
+        uploadedAt,
+        uploadedAt,
+        JSON.stringify({
+          upload: {
+            attemptId: ATTEMPT_A,
+            athleteId: ATHLETE_A,
+            mode: "free",
+            generation: 1,
+            uploadedAt,
+            verified: null,
+          },
+          processing: freeProcessingContext({
+            attemptId: ATTEMPT_A,
+            generation: 1,
+            mediaId,
+          }),
+          sourceSha256: "e".repeat(64),
+        }),
+        "e".repeat(64),
+        frameBatchId,
+        "d".repeat(64),
+      );
+    predecessor.raw
+      .prepare(
+        "INSERT INTO media_delivery_recovery_records (attempt_id, generation, media_id, frame_batch_id, state, requires_rollback, created_at, updated_at) VALUES (?, 1, ?, ?, 'pending-delivery', 1, ?, ?)",
+      )
+      .run(ATTEMPT_A, mediaId, frameBatchId, uploadedAt, uploadedAt);
+    predecessor.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT state, requires_rollback, queued_at, rollback_completed_at, cleanup_completed_at, recovery_lease_id, recovery_lease_expires_at FROM media_delivery_recovery_records WHERE attempt_id = ? AND generation = 1",
+        )
+        .get(ATTEMPT_A),
+    ).toMatchObject({
+      state: "queued",
+      requires_rollback: 0,
+      queued_at: expect.any(String),
+      rollback_completed_at: null,
+      cleanup_completed_at: null,
+      recovery_lease_id: null,
+      recovery_lease_expires_at: null,
+    });
+    upgraded.close();
+  });
+
+  it("fails closed during v19 when a v18 delivery row preserves a mismatched source digest", () => {
+    const filename = join(
+      fixture.directory,
+      "delivery-recovery-v18-bad-source.sqlite",
+    );
+    const predecessor = openSqliteDatabaseAtVersionForTest(filename, 18);
+    const uploadedAt = fixture.clock.now();
+    const mediaId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const frameBatchId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    predecessor.raw
+      .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+      .run(ATHLETE_A, uploadedAt);
+    predecessor.raw
+      .prepare(
+        "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, created_at, updated_at, processing_context_json, media_sha256, processing_receipt_id, processing_receipt_sha256) VALUES (?, ?, 'free', NULL, NULL, NULL, 'uploaded', 'active', ?, 1, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        ATTEMPT_A,
+        ATHLETE_A,
+        JSON.stringify(preparedStoredMedia({ id: mediaId, uploadedAt })),
+        uploadedAt,
+        uploadedAt,
+        JSON.stringify({
+          upload: {
+            attemptId: ATTEMPT_A,
+            athleteId: ATHLETE_A,
+            mode: "free",
+            generation: 1,
+            uploadedAt,
+            verified: null,
+          },
+          processing: freeProcessingContext({
+            attemptId: ATTEMPT_A,
+            generation: 1,
+            mediaId,
+          }),
+          sourceSha256: "e".repeat(64),
+        }),
+        "f".repeat(64),
+        frameBatchId,
+        "d".repeat(64),
+      );
+    predecessor.raw
+      .prepare(
+        "INSERT INTO media_delivery_recovery_records (attempt_id, generation, media_id, frame_batch_id, state, requires_rollback, created_at, updated_at) VALUES (?, 1, ?, ?, 'pending-delivery', 1, ?, ?)",
+      )
+      .run(ATTEMPT_A, mediaId, frameBatchId, uploadedAt, uploadedAt);
+    predecessor.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT status, processing_generation, media_json, media_sha256, processing_context_json, processing_receipt_id, processing_receipt_sha256 FROM attempts WHERE id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toEqual({
+      status: "awaiting-upload",
+      processing_generation: 2,
+      media_json: null,
+      media_sha256: null,
+      processing_context_json: null,
+      processing_receipt_id: null,
+      processing_receipt_sha256: null,
+    });
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM media_delivery_recovery_records WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toEqual({ count: 0 });
+    upgraded.close();
   });
 
   it("resets contextless legacy uploads for a fresh generation during repeated reopen", async () => {
@@ -3568,7 +3826,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 18 });
+    ).toMatchObject({ count: 19 });
     reopened.close();
     upgraded.close();
 
@@ -4017,7 +4275,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 18 });
+    ).toMatchObject({ count: 19 });
     reopened.close();
     upgraded.close();
   });
@@ -4098,7 +4356,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 18 });
+    ).toMatchObject({ count: 19 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -4250,7 +4508,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 18 });
+    ).toMatchObject({ count: 19 });
     reopened.close();
   });
 
@@ -4523,7 +4781,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 18 });
+    ).toMatchObject({ count: 19 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);

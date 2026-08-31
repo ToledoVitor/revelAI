@@ -732,6 +732,16 @@ const migrations: readonly Migration[] = [
     `,
     afterApply: backfillDeliveryRecoveryV18,
   },
+  {
+    // v18 only had enough information to add a frame identifier. It did not
+    // prove that the independently persisted receipt, source digest, and
+    // delivery tuple agreed. Repair those rows once, without changing v18:
+    // malformed authority is retired for a fresh upload and exact live work
+    // gets the one coherent recovery state it can safely resume from.
+    version: 19,
+    sql: "SELECT 1;",
+    afterApply: normalizeDeliveryRecoveryV19,
+  },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {
@@ -1031,6 +1041,373 @@ function legacyDeliveryIdentity(
   } catch {
     return null;
   }
+}
+
+type V19DeliveryAuthorityRow = Readonly<{
+  id: string;
+  athlete_id: string;
+  mode: "free" | "verified";
+  challenge_id: string | null;
+  challenge_version: number | null;
+  calibration_session_id: string | null;
+  calibration_nonce: string | null;
+  status: "uploaded" | "processing";
+  processing_generation: number;
+  media_json: string | null;
+  media_sha256: string | null;
+  processing_context_json: string | null;
+  processing_receipt_id: string | null;
+  processing_receipt_sha256: string | null;
+}>;
+
+type V19DeliveryRecoveryRow = Readonly<{
+  attempt_id: string;
+  generation: number;
+  media_id: string;
+  frame_batch_id: string | null;
+  state: string;
+  requires_rollback: number;
+}>;
+
+/**
+ * v19 is intentionally a complete repair pass rather than a tweak to v18.
+ * The delivery journal is recoverable work, never its own source of upload
+ * authority. A row is retained only when every duplicated C5 fact agrees.
+ */
+function normalizeDeliveryRecoveryV19(raw: Database.Database): void {
+  const now = new Date().toISOString();
+  const liveRows = raw
+    .prepare(
+      `SELECT a.id, a.athlete_id, a.mode, a.challenge_id,
+              a.challenge_version, a.calibration_session_id,
+              s.nonce AS calibration_nonce, a.status,
+              a.processing_generation, a.media_json, a.media_sha256,
+              a.processing_context_json, a.processing_receipt_id,
+              a.processing_receipt_sha256
+         FROM attempts a
+         LEFT JOIN calibration_sessions s ON s.id = a.calibration_session_id
+        WHERE a.deletion_state = 'active'
+          AND a.status IN ('uploaded', 'processing')`,
+    )
+    .all() as readonly V19DeliveryAuthorityRow[];
+  const recoveryRows = raw
+    .prepare(
+      `SELECT attempt_id, generation, media_id, frame_batch_id, state,
+              requires_rollback
+         FROM media_delivery_recovery_records`,
+    )
+    .all() as readonly V19DeliveryRecoveryRow[];
+  const recoveryByAttempt = new Map<string, V19DeliveryRecoveryRow[]>();
+  for (const recovery of recoveryRows) {
+    const current = recoveryByAttempt.get(recovery.attempt_id) ?? [];
+    current.push(recovery);
+    recoveryByAttempt.set(recovery.attempt_id, current);
+  }
+
+  const deleteRecovery = raw.prepare(
+    "DELETE FROM media_delivery_recovery_records WHERE attempt_id = ?",
+  );
+  const reset = raw.prepare(
+    `UPDATE attempts
+        SET media_json = NULL, media_sha256 = NULL, processing_context_json = NULL,
+            processing_receipt_id = NULL, processing_receipt_sha256 = NULL,
+            status = 'awaiting-upload', processing_generation = processing_generation + 1,
+            processing_lease_id = NULL, processing_lease_expires_at = NULL
+      WHERE id = ? AND deletion_state = 'active'
+        AND status IN ('uploaded', 'processing')`,
+  );
+  const insert = raw.prepare(
+    `INSERT INTO media_delivery_recovery_records
+       (attempt_id, generation, media_id, frame_batch_id, state,
+        requires_rollback, queued_at, rollback_completed_at,
+        cleanup_completed_at, recovery_lease_id, recovery_lease_expires_at,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)`,
+  );
+
+  for (const row of liveRows) {
+    const authority = strictV19DeliveryAuthority(row);
+    const existing = recoveryByAttempt.get(row.id) ?? [];
+    if (
+      authority === null ||
+      existing.some(
+        (recovery) =>
+          recovery.generation !== row.processing_generation ||
+          recovery.media_id !== authority?.mediaId ||
+          recovery.frame_batch_id !== authority?.frameBatchId,
+      )
+    ) {
+      deleteRecovery.run(row.id);
+      reset.run(row.id);
+      continue;
+    }
+
+    // Delete then insert makes v19 authoritative over every legacy flag,
+    // timestamp, lease, and conflicting state while retaining only the exact
+    // tuple that the attempt row independently proves.
+    deleteRecovery.run(row.id);
+    const pending = row.status === "uploaded";
+    insert.run(
+      row.id,
+      row.processing_generation,
+      authority.mediaId,
+      authority.frameBatchId,
+      pending ? "pending-delivery" : "queued",
+      pending ? 1 : 0,
+      pending ? null : now,
+      now,
+      now,
+    );
+    recoveryByAttempt.delete(row.id);
+  }
+
+  // A terminal or fresh-upload attempt has no redelivery authority. A
+  // tombstone retains only an exact resource pair, converted to cleanup so it
+  // can never be redelivered after the owning attempt disappeared.
+  const tombstoned = raw
+    .prepare(
+      "SELECT id, processing_generation FROM attempts WHERE deletion_state = 'tombstoned'",
+    )
+    .all() as readonly Readonly<{
+    id: string;
+    processing_generation: number;
+  }>[];
+  const tombstonedIds = new Set(tombstoned.map((row) => row.id));
+  for (const [attemptId, records] of recoveryByAttempt) {
+    if (!tombstonedIds.has(attemptId)) {
+      deleteRecovery.run(attemptId);
+      continue;
+    }
+    const tombstone = tombstoned.find((row) => row.id === attemptId)!;
+    const exact = records.length === 1 ? records[0] : null;
+    if (
+      exact === null ||
+      !isExactV19CleanupTuple(exact, tombstone.processing_generation)
+    ) {
+      deleteRecovery.run(attemptId);
+      continue;
+    }
+    deleteRecovery.run(attemptId);
+    insert.run(
+      exact.attempt_id,
+      exact.generation,
+      exact.media_id,
+      exact.frame_batch_id,
+      "cleanup-recoverable",
+      0,
+      null,
+      now,
+      now,
+    );
+  }
+}
+
+function strictV19DeliveryAuthority(
+  row: V19DeliveryAuthorityRow,
+): Readonly<{ mediaId: string; frameBatchId: string }> | null {
+  try {
+    if (
+      !isUuidV19(row.id) ||
+      !isUuidV19(row.athlete_id) ||
+      !Number.isSafeInteger(row.processing_generation) ||
+      row.processing_generation < 1 ||
+      row.media_json === null ||
+      row.media_sha256 === null ||
+      row.processing_context_json === null ||
+      row.processing_receipt_id === null ||
+      row.processing_receipt_sha256 === null ||
+      !isDigestV19(row.media_sha256) ||
+      !isUuidV19(row.processing_receipt_id) ||
+      !isDigestV19(row.processing_receipt_sha256)
+    )
+      return null;
+    const media = parseV19Media(row.media_json);
+    const context = parseV19ProcessingContext(row.processing_context_json);
+    if (
+      media === null ||
+      context === null ||
+      context.sourceSha256 !== row.media_sha256 ||
+      context.receipt.frameBatchId !== row.processing_receipt_id ||
+      context.receipt.sha256 !== row.processing_receipt_sha256 ||
+      context.receipt.mediaId !== media.id ||
+      !matchesV19UploadContext(row, media.uploadedAt, context.upload)
+    )
+      return null;
+    return Object.freeze({
+      mediaId: media.id,
+      frameBatchId: context.receipt.frameBatchId,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function parseV19Media(
+  value: string,
+): Readonly<{ id: string; uploadedAt: string }> | null {
+  const media = parseV19JsonRecord(value);
+  if (
+    media === null ||
+    !hasExactObjectKeys(media, [
+      "id",
+      "contentType",
+      "bytes",
+      "uploadedAt",
+      "deleteAt",
+      "transition",
+    ]) ||
+    typeof media.id !== "string" ||
+    media.id.length === 0 ||
+    typeof media.contentType !== "string" ||
+    media.contentType.length === 0 ||
+    typeof media.bytes !== "number" ||
+    !Number.isSafeInteger(media.bytes) ||
+    media.bytes < 0 ||
+    typeof media.uploadedAt !== "string" ||
+    !isCanonicalIso(media.uploadedAt) ||
+    typeof media.deleteAt !== "string" ||
+    media.deleteAt !==
+      new Date(
+        Date.parse(media.uploadedAt) + 23 * 60 * 60 * 1000,
+      ).toISOString() ||
+    !isPlainRecord(media.transition) ||
+    !hasExactObjectKeys(media.transition, ["kind", "resourceId", "deleteAt"]) ||
+    media.transition.kind !== "upload-transition" ||
+    media.transition.resourceId !== media.id ||
+    media.transition.deleteAt !==
+      new Date(Date.parse(media.uploadedAt) + 60 * 60 * 1000).toISOString()
+  )
+    return null;
+  return Object.freeze({ id: media.id, uploadedAt: media.uploadedAt });
+}
+
+function parseV19ProcessingContext(value: string): Readonly<{
+  sourceSha256: string;
+  receipt: Readonly<{ frameBatchId: string; mediaId: string; sha256: string }>;
+  upload: Record<string, unknown>;
+}> | null {
+  const context = parseV19JsonRecord(value);
+  if (
+    context === null ||
+    !hasExactObjectKeys(context, ["processing", "sourceSha256", "upload"]) ||
+    !isDigestV19(context.sourceSha256) ||
+    !isPlainRecord(context.processing) ||
+    !hasExactObjectKeys(context.processing, ["kind", "receipt"]) ||
+    context.processing.kind !== "c5-durable-processing-context-v2" ||
+    !isPlainRecord(context.processing.receipt) ||
+    !hasExactObjectKeys(context.processing.receipt, [
+      "frameBatchId",
+      "mediaId",
+      "sha256",
+    ]) ||
+    !isUuidV19(context.processing.receipt.frameBatchId) ||
+    typeof context.processing.receipt.mediaId !== "string" ||
+    context.processing.receipt.mediaId.length === 0 ||
+    !isDigestV19(context.processing.receipt.sha256) ||
+    !isPlainRecord(context.upload)
+  )
+    return null;
+  return Object.freeze({
+    sourceSha256: context.sourceSha256,
+    receipt: Object.freeze({
+      frameBatchId: context.processing.receipt.frameBatchId,
+      mediaId: context.processing.receipt.mediaId,
+      sha256: context.processing.receipt.sha256,
+    }),
+    upload: context.upload,
+  });
+}
+
+function matchesV19UploadContext(
+  row: V19DeliveryAuthorityRow,
+  uploadedAt: string,
+  upload: Record<string, unknown>,
+): boolean {
+  if (
+    !hasExactObjectKeys(upload, [
+      "attemptId",
+      "athleteId",
+      "mode",
+      "generation",
+      "uploadedAt",
+      "verified",
+    ]) ||
+    upload.attemptId !== row.id ||
+    upload.athleteId !== row.athlete_id ||
+    upload.mode !== row.mode ||
+    upload.generation !== row.processing_generation ||
+    upload.uploadedAt !== uploadedAt
+  )
+    return false;
+  if (row.mode === "free")
+    return (
+      row.challenge_id === null &&
+      row.challenge_version === null &&
+      row.calibration_session_id === null &&
+      upload.verified === null
+    );
+  if (
+    row.challenge_id !== "wall-pass" ||
+    row.challenge_version !== 1 ||
+    !isUuidV19(row.calibration_session_id) ||
+    typeof row.calibration_nonce !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(row.calibration_nonce) ||
+    !isPlainRecord(upload.verified) ||
+    !hasExactObjectKeys(upload.verified, [
+      "challenge",
+      "calibrationSessionId",
+      "calibrationNonce",
+    ]) ||
+    !isPlainRecord(upload.verified.challenge) ||
+    !hasExactObjectKeys(upload.verified.challenge, ["id", "version"])
+  )
+    return false;
+  return (
+    upload.verified.challenge.id === "wall-pass" &&
+    upload.verified.challenge.version === 1 &&
+    upload.verified.calibrationSessionId === row.calibration_session_id &&
+    upload.verified.calibrationNonce === row.calibration_nonce
+  );
+}
+
+function isExactV19CleanupTuple(
+  row: V19DeliveryRecoveryRow,
+  tombstoneGeneration: number,
+): row is V19DeliveryRecoveryRow & Readonly<{ frame_batch_id: string }> {
+  return (
+    Number.isSafeInteger(row.generation) &&
+    row.generation >= 1 &&
+    Number.isSafeInteger(tombstoneGeneration) &&
+    row.generation + 1 === tombstoneGeneration &&
+    typeof row.media_id === "string" &&
+    row.media_id.length > 0 &&
+    typeof row.frame_batch_id === "string" &&
+    isUuidV19(row.frame_batch_id) &&
+    ["pending-delivery", "queued", "cleanup-recoverable"].includes(row.state) &&
+    (row.requires_rollback === 0 || row.requires_rollback === 1)
+  );
+}
+
+function parseV19JsonRecord(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isPlainRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isDigestV19(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/i.test(value);
+}
+
+function isUuidV19(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+  );
 }
 
 function upgradeCompetitivePolicyEvidenceVersionsV15(

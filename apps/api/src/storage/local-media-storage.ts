@@ -28,6 +28,35 @@ export interface OpaqueMediaIdGenerator {
 
 const localMediaStorageCapabilities = new WeakSet<object>();
 
+export type LocalMediaStorage = Readonly<{
+  initialize(): Promise<void>;
+  createUploadSession(input: UploadOptions): Promise<LocalMediaUploadSession>;
+  store(
+    input: Readonly<{
+      source: AsyncIterable<Uint8Array>;
+      maxBytes: number;
+      validate?: (
+        input: Readonly<{ bytes: number; probe: MediaProbe }>,
+      ) => void | Promise<void>;
+      retention: UploadOptions["retention"];
+    }>,
+  ): Promise<StoredLocalMedia>;
+  delete(id: string): Promise<void>;
+  deleteFrame(id: string): Promise<void>;
+  deleteTemporary(id: string): Promise<void>;
+  discoverReservedOrphans(
+    limit: number,
+  ): Promise<readonly Readonly<{ id: string; kind: "temporary" | "frame" }>[]>;
+}>;
+
+export type LocalMediaStorageInput = Readonly<{
+  root: string;
+  ids: OpaqueMediaIdGenerator;
+  prober: LocalMediaProber;
+  publisher?: NoReplacePublisher;
+  cleanupLog?: UploadCleanupLog;
+}>;
+
 /** Runtime capability check used only by C5 composition; it never mints. */
 export function isLocalMediaStorageCapability(
   value: unknown,
@@ -129,10 +158,30 @@ type UploadOptions = Readonly<{
 }>;
 
 /**
- * Local-only media capability. Paths never leave this module's storage API.
- * A session owns exactly one O_EXCL temporary, validation, and publication.
+ * The only storage constructor exported by C5. The returned object has no
+ * prototype methods to override and is registered by identity for composition.
  */
-export class LocalMediaStorage {
+export function createLocalMediaStorage(
+  input: LocalMediaStorageInput,
+): LocalMediaStorage {
+  const implementation = new LocalMediaStorageImplementation(input);
+  const capability: LocalMediaStorage = Object.freeze({
+    initialize: () => implementation.initialize(),
+    createUploadSession: (options) =>
+      implementation.createUploadSession(options),
+    store: (options) => implementation.store(options),
+    delete: (id) => implementation.delete(id),
+    deleteFrame: (id) => implementation.deleteFrame(id),
+    deleteTemporary: (id) => implementation.deleteTemporary(id),
+    discoverReservedOrphans: (limit) =>
+      implementation.discoverReservedOrphans(limit),
+  });
+  localMediaStorageCapabilities.add(capability);
+  return capability;
+}
+
+/** Paths remain private to this unexported implementation. */
+class LocalMediaStorageImplementation {
   private readonly root: string;
   private readonly originals: string;
   private readonly frames: string;
@@ -142,15 +191,7 @@ export class LocalMediaStorage {
   private readonly publisher: NoReplacePublisher;
   private readonly cleanupLog: UploadCleanupLog | undefined;
 
-  public constructor(
-    input: Readonly<{
-      root: string;
-      ids: OpaqueMediaIdGenerator;
-      prober: LocalMediaProber;
-      publisher?: NoReplacePublisher;
-      cleanupLog?: UploadCleanupLog;
-    }>,
-  ) {
+  public constructor(input: LocalMediaStorageInput) {
     this.root = resolve(input.root);
     this.originals = join(this.root, "originals");
     this.frames = join(this.root, "frames");
@@ -159,7 +200,6 @@ export class LocalMediaStorage {
     this.prober = input.prober;
     this.publisher = input.publisher ?? { publish: publishNoReplace };
     this.cleanupLog = input.cleanupLog;
-    localMediaStorageCapabilities.add(this);
   }
 
   public async initialize(): Promise<void> {

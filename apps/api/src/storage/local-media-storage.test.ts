@@ -18,7 +18,7 @@ import {
   type RetentionRecord,
 } from "../media/retention-scavenger.js";
 import { LocalRetentionObjectStore } from "./local-retention-object-store.js";
-import { LocalMediaStorage } from "./local-media-storage.js";
+import { createLocalMediaStorage } from "./local-media-storage.js";
 
 const MEDIA_ID = "11111111-1111-4111-8111-111111111111";
 const validMp4 = Buffer.from([
@@ -56,7 +56,7 @@ describe("LocalMediaStorage", () => {
 
   it("writes only an opaque 0600 final after streaming, sniffing, and probing", async () => {
     const root = await temporaryRoot(directories);
-    const storage = new LocalMediaStorage({
+    const storage = createLocalMediaStorage({
       root,
       ids: { next: () => MEDIA_ID },
       prober: { probe: async () => probe },
@@ -90,7 +90,7 @@ describe("LocalMediaStorage", () => {
 
   it("accepts exact stream limit and removes all temporary bytes on first byte over", async () => {
     const root = await temporaryRoot(directories);
-    const storage = new LocalMediaStorage({
+    const storage = createLocalMediaStorage({
       root,
       ids: { next: () => MEDIA_ID },
       prober: { probe: async () => probe },
@@ -117,7 +117,7 @@ describe("LocalMediaStorage", () => {
     const root = await temporaryRoot(directories);
     const originalDirectory = join(root, "originals");
     await writeFile(join(root, ".keep"), "");
-    const storage = new LocalMediaStorage({
+    const storage = createLocalMediaStorage({
       root,
       ids: { next: () => MEDIA_ID },
       prober: { probe: async () => probe },
@@ -164,7 +164,7 @@ describe("LocalMediaStorage", () => {
         acknowledged.push(fact.id);
       },
     };
-    const storage = new LocalMediaStorage({
+    const storage = createLocalMediaStorage({
       root,
       ids: { next: () => MEDIA_ID },
       prober: { probe: async () => probe },
@@ -223,7 +223,7 @@ describe("LocalMediaStorage", () => {
         acknowledged.push(fact.id);
       },
     };
-    const storage = new LocalMediaStorage({
+    const storage = createLocalMediaStorage({
       root,
       ids: { next: () => MEDIA_ID },
       prober: { probe: async () => probe },
@@ -261,7 +261,7 @@ describe("LocalMediaStorage", () => {
 
   it("does not create a temporary when durable transition scheduling fails", async () => {
     const root = await temporaryRoot(directories);
-    const storage = new LocalMediaStorage({
+    const storage = createLocalMediaStorage({
       root,
       ids: { next: () => MEDIA_ID },
       prober: { probe: async () => probe },
@@ -284,7 +284,7 @@ describe("LocalMediaStorage", () => {
 
   it("never removes another same-id session's exclusive temporary on collision", async () => {
     const root = await temporaryRoot(directories);
-    const storage = new LocalMediaStorage({
+    const storage = createLocalMediaStorage({
       root,
       ids: { next: () => MEDIA_ID },
       prober: { probe: async () => probe },
@@ -319,7 +319,7 @@ describe("LocalMediaStorage", () => {
         acknowledged.push(fact.id);
       },
     };
-    const storage = new LocalMediaStorage({
+    const storage = createLocalMediaStorage({
       root,
       ids: { next: () => MEDIA_ID },
       prober: { probe: async () => probe },

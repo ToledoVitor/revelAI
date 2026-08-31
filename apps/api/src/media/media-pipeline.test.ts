@@ -2,10 +2,13 @@ import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { LocalMediaStorage } from "../storage/local-media-storage.js";
-import { LocalFrameExtraction } from "../storage/local-frame-extraction.js";
+import { createLocalMediaStorage } from "../storage/local-media-storage.js";
+import { createLocalFrameExtraction } from "../storage/local-frame-extraction.js";
 import { RawMultipartByteCounter } from "./multipart-intake.js";
-import { createMediaPipeline } from "./media-pipeline.js";
+import {
+  createMediaPipeline,
+  createMediaPipelineCapability,
+} from "./media-pipeline.js";
 import { MediaPipelineError } from "./probe.js";
 import { isC5AcceptedMediaHandoffVerifier } from "./media-pipeline.js";
 import { reconstructDurableProcessingContext } from "./extraction-manifest.js";
@@ -32,6 +35,13 @@ const retention = {
     verified: null,
   },
 };
+
+function createPipeline(
+  input: Parameters<typeof createMediaPipelineCapability>[0],
+) {
+  return createMediaPipeline(createMediaPipelineCapability(input));
+}
+
 describe("MediaPipeline", () => {
   const roots: string[] = [];
   afterEach(async () => {
@@ -43,7 +53,7 @@ describe("MediaPipeline", () => {
   it("keeps Free eligibility independent from verified-only timeline checks", async () => {
     const root = await mkdtemp(join(tmpdir(), "revelai-c5-pipeline-"));
     roots.push(root);
-    const storage = new LocalMediaStorage({
+    const storage = createLocalMediaStorage({
       root,
       ids: { next: () => mediaId },
       prober: {
@@ -58,7 +68,7 @@ describe("MediaPipeline", () => {
         }),
       },
     });
-    const extraction = new LocalFrameExtraction({
+    const extraction = createLocalFrameExtraction({
       root,
       ids: { next: () => frameBatchId },
       runner: {
@@ -78,7 +88,7 @@ describe("MediaPipeline", () => {
       },
       retention: { schedule: async () => ({ kind: "created" as const }) },
     });
-    const pipeline = createMediaPipeline({
+    const pipeline = createPipeline({
       storage,
       extraction,
     });
@@ -136,7 +146,7 @@ describe("MediaPipeline", () => {
       cleanup: { cleanup: async () => undefined },
     });
     const verifier = pipeline.handoffVerifier();
-    const separateTopology = createMediaPipeline({ storage, extraction });
+    const separateTopology = createPipeline({ storage, extraction });
     expect(isC5AcceptedMediaHandoffVerifier(verifier)).toBe(true);
     expect(verifier.accepts(accepted)).toBe(true);
     expect(verifier.accepts(reflectedClone)).toBe(false);
@@ -157,8 +167,8 @@ describe("MediaPipeline", () => {
   it("rejects verified ineligible media before an original becomes visible", async () => {
     const root = await mkdtemp(join(tmpdir(), "revelai-c5-pipeline-"));
     roots.push(root);
-    const pipeline = createMediaPipeline({
-      storage: new LocalMediaStorage({
+    const pipeline = createPipeline({
+      storage: createLocalMediaStorage({
         root,
         ids: { next: () => mediaId },
         prober: {
@@ -173,7 +183,7 @@ describe("MediaPipeline", () => {
           }),
         },
       }),
-      extraction: new LocalFrameExtraction({
+      extraction: createLocalFrameExtraction({
         root,
         ids: { next: () => frameBatchId },
         runner: {
@@ -204,7 +214,7 @@ describe("MediaPipeline", () => {
     roots.push(root);
     expect(() =>
       createMediaPipeline({
-        storage: new LocalMediaStorage({
+        storage: createLocalMediaStorage({
           root,
           ids: { next: () => mediaId },
           prober: {
@@ -230,13 +240,13 @@ describe("MediaPipeline", () => {
           }),
         },
       } as never),
-    ).toThrow("C5 media pipeline requires local storage and extraction");
+    ).toThrow("C5 media pipeline requires a factory capability");
   });
 
   it("feeds the sole validated multipart file into the same pipeline session", async () => {
     const root = await mkdtemp(join(tmpdir(), "revelai-c5-pipeline-"));
     roots.push(root);
-    const storage = new LocalMediaStorage({
+    const storage = createLocalMediaStorage({
       root,
       ids: { next: () => mediaId },
       prober: {
@@ -251,9 +261,9 @@ describe("MediaPipeline", () => {
         }),
       },
     });
-    const pipeline = createMediaPipeline({
+    const pipeline = createPipeline({
       storage,
-      extraction: new LocalFrameExtraction({
+      extraction: createLocalFrameExtraction({
         root,
         ids: { next: () => frameBatchId },
         runner: {

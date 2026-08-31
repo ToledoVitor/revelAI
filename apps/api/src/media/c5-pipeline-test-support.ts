@@ -5,12 +5,16 @@ import type {
   MediaUploadContext,
   StoredMediaAttachment,
 } from "../repositories/attempt-repository.js";
-import { LocalFrameExtraction } from "../storage/local-frame-extraction.js";
+import { createLocalFrameExtraction } from "../storage/local-frame-extraction.js";
 import {
-  LocalMediaStorage,
+  createLocalMediaStorage,
   type UploadRetentionRepository,
 } from "../storage/local-media-storage.js";
-import { createMediaPipeline, type C5MediaPipeline } from "./media-pipeline.js";
+import {
+  createMediaPipeline,
+  createMediaPipelineCapability,
+  type C5MediaPipeline,
+} from "./media-pipeline.js";
 
 const sourceBytes = Uint8Array.from([
   0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 1, 2, 3, 4,
@@ -40,7 +44,7 @@ export function createC5PipelineTestSupport(
   let nextMediaId: string | undefined;
   let currentMode: "free" | "verified" = "free";
   let frameSequence = 0;
-  const storage = new LocalMediaStorage({
+  const storage = createLocalMediaStorage({
     root: input.root,
     ids: {
       next: () => {
@@ -62,7 +66,7 @@ export function createC5PipelineTestSupport(
       }),
     },
   });
-  const extraction = new LocalFrameExtraction({
+  const extraction = createLocalFrameExtraction({
     root: input.root,
     ids: {
       next: () => {
@@ -112,7 +116,9 @@ export function createC5PipelineTestSupport(
     },
     retention: { schedule: async () => ({ kind: "created" as const }) },
   });
-  const pipeline = createMediaPipeline({ storage, extraction });
+  const pipeline = createMediaPipeline(
+    createMediaPipelineCapability({ storage, extraction }),
+  );
   return Object.freeze({
     handoffVerifier: pipeline.handoffVerifier(),
     accept: async (context, media, options) => {

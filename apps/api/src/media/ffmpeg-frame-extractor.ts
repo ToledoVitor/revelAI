@@ -4,7 +4,8 @@
  * cannot provide, learn, or persist media paths.
  */
 export {
-  LocalFrameExtraction as FfmpegFrameExtractor,
+  createLocalFrameExtraction as createFfmpegFrameExtractor,
+  type LocalFrameExtraction as FfmpegFrameExtractor,
   type BoundedFrameProcessRunner as FrameExtractionRunner,
   type FrameRetentionRepository,
 } from "../storage/local-frame-extraction.js";

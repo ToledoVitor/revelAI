@@ -2,7 +2,7 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { LocalMediaStorage } from "../storage/local-media-storage.js";
+import { createLocalMediaStorage } from "../storage/local-media-storage.js";
 import {
   acceptSingleMediaPart,
   RawMultipartByteCounter,
@@ -44,7 +44,7 @@ describe("media upload composition", () => {
   it("counts a chunked raw envelope, validates the staged upload, and publishes only after commit", async () => {
     const root = await mkdtemp(join(tmpdir(), "revelai-c5-composition-"));
     roots.push(root);
-    const storage = new LocalMediaStorage({
+    const storage = createLocalMediaStorage({
       root,
       ids: { next: () => mediaId },
       prober: { probe: async () => probe },
@@ -92,7 +92,7 @@ describe("media upload composition", () => {
   it("aborts the sole session when raw transport or multipart shape fails", async () => {
     const root = await mkdtemp(join(tmpdir(), "revelai-c5-composition-"));
     roots.push(root);
-    const storage = new LocalMediaStorage({
+    const storage = createLocalMediaStorage({
       root,
       ids: { next: () => mediaId },
       prober: { probe: async () => probe },

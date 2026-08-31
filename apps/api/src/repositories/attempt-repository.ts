@@ -198,6 +198,16 @@ export type MediaDeliveryRecovery = Readonly<{
 export type MediaAttachmentRecoveryClaim = MediaDeliveryRecovery &
   Readonly<{ leaseId: string }>;
 
+/** A leased at-least-once delivery retry; physical bytes remain untouched. */
+export type MediaDeliveryRedeliveryClaim = Omit<
+  MediaDeliveryRecovery,
+  "state"
+> &
+  Readonly<{
+    state: "pending-delivery" | "queued";
+    leaseId: string;
+  }>;
+
 /** A durable non-terminal recovery state after bounded terminalization fails. */
 export type DeadLetterProcessingClaimOutcome =
   | Readonly<{ kind: "dead-lettered" }>
@@ -317,6 +327,15 @@ export interface AttemptRepository {
   claimMediaAttachmentRecovery(
     input: Readonly<{ now: string; limit: number }>,
   ): Promise<readonly MediaAttachmentRecoveryClaim[]>;
+  claimMediaDeliveryRedelivery(
+    input: Readonly<{ now: string; limit: number }>,
+  ): Promise<readonly MediaDeliveryRedeliveryClaim[]>;
+  acknowledgeMediaDeliveryRedelivery(
+    input: Readonly<{ attemptId: string; generation: number; leaseId: string }>,
+  ): Promise<void>;
+  releaseMediaDeliveryRedelivery(
+    input: Readonly<{ attemptId: string; generation: number; leaseId: string }>,
+  ): Promise<void>;
   releaseMediaAttachmentRecovery(
     input: Readonly<{ attemptId: string; generation: number; leaseId: string }>,
   ): Promise<void>;
