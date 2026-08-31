@@ -593,7 +593,7 @@ describe("verified integrity evaluator", () => {
     });
   });
 
-  it("redacts valid, invalid, and temporary serialized/log/error paths and makes equivalent evidence deterministic", async () => {
+  it("redacts public decisions and invalid-candidate errors while keeping equivalent evidence deterministic", async () => {
     const input = await validInput();
     const valid = evaluateVerifiedIntegrity(input);
     const invalid = evaluateVerifiedIntegrity({
@@ -604,14 +604,7 @@ describe("verified integrity evaluator", () => {
 
     for (const decision of [valid, invalid, temporary]) {
       const serialized = JSON.stringify(serializeIntegrityDecision(decision));
-      const logPayload = JSON.stringify({
-        event: "verified-integrity-decision",
-        decision: serializeIntegrityDecision(decision),
-      });
       expect(serialized).not.toMatch(
-        /sha|nonce|frame|confidence|drift|media|session/i,
-      );
-      expect(logPayload).not.toMatch(
         /sha|nonce|frame|confidence|drift|media|session/i,
       );
     }

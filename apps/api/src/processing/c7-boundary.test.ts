@@ -232,7 +232,7 @@ describe("C7 decision-layer boundary", () => {
     expect(legacyRebindIdentifiers).toEqual([]);
   });
 
-  it("resolves constant-computed capability and aliased score/policy calls before accepting a topology proof", () => {
+  it("resolves constant-computed and local-alias capability, score, and policy calls before accepting a topology proof", () => {
     const program = virtualProgram({
       "/capability.ts": "export function c5BoundEvidenceExecution() {}",
       "/domain.ts": [
@@ -244,12 +244,18 @@ describe("C7 decision-layer boundary", () => {
         'import * as capability from "./capability";',
         'import { evaluateWallPassV1 as scoreByAlias, evaluateCompetitiveEligibility as policyByAlias } from "./domain";',
         'const capabilityKey = "c5BoundEvidenceExecution" as const;',
+        "const capabilityByLocalAlias = capabilityByAlias;",
+        "const scoreByLocalAlias = scoreByAlias;",
+        "const policyByLocalAlias = policyByAlias;",
         "capabilityByAlias();",
         "capability.c5BoundEvidenceExecution();",
         'capability["c5BoundEvidenceExecution"]();',
         "capability[capabilityKey]();",
+        "capabilityByLocalAlias();",
         "scoreByAlias();",
+        "scoreByLocalAlias();",
         "policyByAlias();",
+        "policyByLocalAlias();",
       ].join("\n"),
     });
     const checker = program.getTypeChecker();
@@ -264,21 +270,21 @@ describe("C7 decision-layer boundary", () => {
       "c5BoundEvidenceExecution",
     );
 
-    expect(callSitesForSymbol(checker, [entry], target)).toHaveLength(4);
+    expect(callSitesForSymbol(checker, [entry], target)).toHaveLength(5);
     expect(
       callSitesForSymbol(
         checker,
         [entry],
         declaredSymbol(checker, domain, "evaluateWallPassV1"),
       ),
-    ).toEqual(["/entry.ts"]);
+    ).toEqual(["/entry.ts", "/entry.ts"]);
     expect(
       callSitesForSymbol(
         checker,
         [entry],
         declaredSymbol(checker, domain, "evaluateCompetitiveEligibility"),
       ),
-    ).toEqual(["/entry.ts"]);
+    ).toEqual(["/entry.ts", "/entry.ts"]);
   });
 });
 
@@ -470,23 +476,69 @@ function callSymbol(
   checker: ts.TypeChecker,
   call: ts.CallExpression,
 ): ts.Symbol | undefined {
-  const expression = call.expression;
+  return calledExpressionSymbol(checker, call.expression, new Set());
+}
+
+function calledExpressionSymbol(
+  checker: ts.TypeChecker,
+  expression: ts.Expression,
+  visited: ReadonlySet<ts.Symbol>,
+): ts.Symbol | undefined {
   if (ts.isIdentifier(expression))
-    return checker.getSymbolAtLocation(expression);
+    return resolveLocalConstAlias(
+      checker,
+      checker.getSymbolAtLocation(expression),
+      visited,
+    );
   if (ts.isPropertyAccessExpression(expression))
-    return checker.getSymbolAtLocation(expression.name);
+    return resolveLocalConstAlias(
+      checker,
+      checker.getSymbolAtLocation(expression.name),
+      visited,
+    );
   if (ts.isElementAccessExpression(expression)) {
     const argument = expression.argumentExpression;
     const key = ts.isStringLiteral(argument)
       ? argument.text
       : literalStringValue(checker.getTypeAtLocation(argument));
     if (key)
-      return checker.getPropertyOfType(
-        checker.getTypeAtLocation(expression.expression),
-        key,
+      return resolveLocalConstAlias(
+        checker,
+        checker.getPropertyOfType(
+          checker.getTypeAtLocation(expression.expression),
+          key,
+        ),
+        visited,
       );
   }
   return undefined;
+}
+
+function resolveLocalConstAlias(
+  checker: ts.TypeChecker,
+  symbol: ts.Symbol | undefined,
+  visited: ReadonlySet<ts.Symbol>,
+): ts.Symbol | undefined {
+  if (!symbol) return undefined;
+  const resolved =
+    symbol.flags & ts.SymbolFlags.Alias
+      ? checker.getAliasedSymbol(symbol)
+      : symbol;
+  if (visited.has(resolved)) return resolved;
+  const declaration = resolved.valueDeclaration;
+  if (
+    !declaration ||
+    !ts.isVariableDeclaration(declaration) ||
+    !ts.isVariableDeclarationList(declaration.parent) ||
+    !(declaration.parent.flags & ts.NodeFlags.Const) ||
+    !declaration.initializer
+  )
+    return resolved;
+  return calledExpressionSymbol(
+    checker,
+    declaration.initializer,
+    new Set([...visited, resolved]),
+  );
 }
 
 function literalStringValue(type: ts.Type): string | undefined {

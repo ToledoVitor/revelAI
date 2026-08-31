@@ -3824,6 +3824,52 @@ describe("SQLiteAttemptRepository", () => {
     await fixture.policy.deactivateCompetitivePolicy({ id: renewedPolicy.id });
   });
 
+  it.each([
+    ["status", "status", "failed"],
+    ["run time", "run_at", "2030-01-01T12:00:01.000Z"],
+    ["expiry", "valid_until", "2030-01-31T12:00:01.000Z"],
+    ["invalidation time", "invalidated_at", "2030-01-15T12:00:00.000Z"],
+  ] as const)(
+    "rejects idempotent receipt storage when the durable %s contradicts its canonical JSON",
+    async (_, column, contradiction) => {
+      await fixture.policy.storeBenchmarkReceipt(
+        passingWorkflowBenchmarkReceiptFixture,
+      );
+      fixture.database.raw
+        .prepare(
+          `UPDATE workflow_benchmark_receipts SET ${column} = ? WHERE id = ?`,
+        )
+        .run(contradiction, passingWorkflowBenchmarkReceiptFixture.id);
+
+      await expect(
+        fixture.policy.storeBenchmarkReceipt(
+          passingWorkflowBenchmarkReceiptFixture,
+        ),
+      ).rejects.toMatchObject({
+        code: "competitive_policy_persisted_data_corrupt",
+      });
+      expect(
+        fixture.database.raw
+          .prepare(
+            `SELECT ${column} AS value FROM workflow_benchmark_receipts WHERE id = ?`,
+          )
+          .get(passingWorkflowBenchmarkReceiptFixture.id),
+      ).toMatchObject({ value: contradiction });
+    },
+  );
+
+  it("accepts an idempotent receipt store only when every durable duplicate matches", async () => {
+    await fixture.policy.storeBenchmarkReceipt(
+      passingWorkflowBenchmarkReceiptFixture,
+    );
+
+    await expect(
+      fixture.policy.storeBenchmarkReceipt(
+        passingWorkflowBenchmarkReceiptFixture,
+      ),
+    ).resolves.toEqual(passingWorkflowBenchmarkReceiptFixture);
+  });
+
   it("normalizes optional-millisecond invalidation timestamps before persistence", async () => {
     await fixture.policy.storeBenchmarkReceipt(
       passingWorkflowBenchmarkReceiptFixture,

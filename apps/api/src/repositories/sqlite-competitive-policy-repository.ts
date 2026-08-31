@@ -41,17 +41,44 @@ export class SQLiteCompetitivePolicyRepository
     return this.transaction(() => {
       const existing = this.raw
         .prepare(
-          "SELECT receipt_sha256, receipt_json FROM workflow_benchmark_receipts WHERE id = ?",
+          "SELECT receipt_sha256, schema_version, workflow_id, workflow_version, model_bundle_id, provider_version, status, run_at, valid_until, invalidated_at, receipt_json FROM workflow_benchmark_receipts WHERE id = ?",
         )
         .get(parsed.id) as
-        | { receipt_sha256: string; receipt_json: string }
+        | {
+            receipt_sha256: string;
+            schema_version: string;
+            workflow_id: string;
+            workflow_version: string;
+            model_bundle_id: string;
+            provider_version: string;
+            status: string;
+            run_at: string;
+            valid_until: string;
+            invalidated_at: string | null;
+            receipt_json: string;
+          }
         | undefined;
       if (existing) {
         if (
           existing.receipt_sha256 === parsed.receiptSha256 &&
           existing.receipt_json === stableJson(parsed)
-        )
+        ) {
+          parseStoredBenchmarkReceipt({
+            id: parsed.id,
+            receiptSha256: existing.receipt_sha256,
+            schemaVersion: existing.schema_version,
+            workflowId: existing.workflow_id,
+            workflowVersion: existing.workflow_version,
+            modelBundleId: existing.model_bundle_id,
+            providerVersion: existing.provider_version,
+            status: existing.status,
+            runAt: existing.run_at,
+            validUntil: existing.valid_until,
+            invalidatedAt: existing.invalidated_at,
+            receiptJson: existing.receipt_json,
+          });
           return parsed;
+        }
         throw new CompetitivePolicyRepositoryError(
           "competitive_policy_conflict",
         );
