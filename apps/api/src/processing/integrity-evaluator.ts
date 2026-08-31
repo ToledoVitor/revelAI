@@ -15,8 +15,7 @@ import {
 import {
   c5BoundEvidenceExecution,
   isC5BoundVerifiedEvidence,
-} from "./verified-observation-execution.js";
-import { verifiedVisionRequestExecutionData } from "./frame-extractor.js";
+} from "./observation-assembler.js";
 import { isMediaProbeAdmissible } from "../media/eligibility.js";
 import {
   parseExtractionManifest,
@@ -50,6 +49,8 @@ type CandidateData = Readonly<{
   scoreEvidence: VerifiedObservationEvidence["canonicalEvents"];
   provenance: VerifiedObservationEvidence["provenance"];
   calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1";
+  extractionEvidenceVersion: "c5-frame-manifest-v1";
+  observationEvidenceVersion: "wall-pass-geometry-evidence-v1";
   execution: Readonly<{
     schedulerId: "verified-wall-pass-image-scheduler-v1";
     samplingId: "wall-pass-v1-10fps-640-v1";
@@ -97,6 +98,8 @@ export type PublicIntegrityDecision =
 export type CandidatePolicyFacts = Readonly<{
   provenance: VerifiedObservationEvidence["provenance"];
   calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1";
+  extractionEvidenceVersion: "c5-frame-manifest-v1";
+  observationEvidenceVersion: "wall-pass-geometry-evidence-v1";
   execution: Readonly<{
     schedulerId: "verified-wall-pass-image-scheduler-v1";
     samplingId: "wall-pass-v1-10fps-640-v1";
@@ -111,8 +114,7 @@ export function evaluateVerifiedIntegrity(input: unknown): IntegrityDecision {
   if (!manifest || !isMediaProbeAdmissible("verified", manifest.probe))
     return invalid("video_not_continuous");
   const execution = c5BoundEvidenceExecution(parsed.evidence);
-  const executionData = verifiedVisionRequestExecutionData(execution);
-  if (!sameBinding(parsed.evidence, manifest, parsed.expected, executionData))
+  if (!sameBinding(parsed.evidence, manifest, parsed.expected, execution))
     return invalid("video_not_continuous");
   if (!hasVerifiedCalibration(parsed.evidence))
     return invalid("calibration_not_verified");
@@ -133,9 +135,11 @@ export function evaluateVerifiedIntegrity(input: unknown): IntegrityDecision {
       scoreEvidence: parsed.evidence.canonicalEvents,
       provenance: parsed.evidence.provenance,
       calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+      extractionEvidenceVersion: manifest.extractionVersion,
+      observationEvidenceVersion: "wall-pass-geometry-evidence-v1",
       execution: Object.freeze({
-        schedulerId: executionData.schedulerId,
-        samplingId: executionData.samplingId,
+        schedulerId: execution.schedulerId,
+        samplingId: execution.samplingId,
       }),
     }),
   );
@@ -158,6 +162,8 @@ export function candidatePolicyFacts(
   return Object.freeze({
     provenance: data.provenance,
     calibrationEvidenceVersion: data.calibrationEvidenceVersion,
+    extractionEvidenceVersion: data.extractionEvidenceVersion,
+    observationEvidenceVersion: data.observationEvidenceVersion,
     execution: data.execution,
   });
 }

@@ -101,6 +101,92 @@ describe("C7 decision-layer boundary", () => {
       ),
     ).toBe("VerifiedAttemptCandidate");
   });
+
+  it("allows exactly one C5-to-C6 compositor and no exported structural rebind", async () => {
+    const apiSource = resolve(processingDirectory, "..");
+    const modules = await productionModules(apiSource);
+    const ownedBatchCalls: string[] = [];
+    const ownedBatchCapabilityConsumes: string[] = [];
+    const verifiedC5Readers: string[] = [];
+    const c6Assemblies: string[] = [];
+    const evidenceRegistrations: string[] = [];
+    const c7ExecutionReads: string[] = [];
+    const legacyRebindIdentifiers: string[] = [];
+
+    for (const filename of modules) {
+      const source = ts.createSourceFile(
+        filename,
+        await readFile(filename, "utf8"),
+        ts.ScriptTarget.ES2023,
+        true,
+      );
+      const visit = (node: ts.Node): void => {
+        if (
+          ts.isCallExpression(node) &&
+          ts.isIdentifier(node.expression) &&
+          node.expression.text === "analyzeOwnedVerifiedBatch"
+        )
+          ownedBatchCalls.push(relative(apiSource, filename));
+        if (
+          ts.isCallExpression(node) &&
+          ts.isIdentifier(node.expression) &&
+          node.expression.text === "assertOwnedVerifiedVisionBatchForRequests"
+        )
+          ownedBatchCapabilityConsumes.push(relative(apiSource, filename));
+        if (
+          ts.isCallExpression(node) &&
+          ts.isIdentifier(node.expression) &&
+          node.expression.text === "extractionManifestToVisionRequests"
+        ) {
+          const owner = enclosingFunctionName(node);
+          if (owner === "assembleVerifiedObservation")
+            verifiedC5Readers.push(relative(apiSource, filename));
+        }
+        if (
+          ts.isCallExpression(node) &&
+          ts.isIdentifier(node.expression) &&
+          node.expression.text === "assembleVerifiedEvidence"
+        )
+          c6Assemblies.push(relative(apiSource, filename));
+        if (
+          ts.isCallExpression(node) &&
+          ts.isPropertyAccessExpression(node.expression) &&
+          node.expression.name.text === "set" &&
+          node.expression.expression.getText() === "c5BoundEvidence"
+        )
+          evidenceRegistrations.push(relative(apiSource, filename));
+        if (
+          ts.isCallExpression(node) &&
+          ts.isIdentifier(node.expression) &&
+          node.expression.text === "c5BoundEvidenceExecution"
+        )
+          c7ExecutionReads.push(relative(apiSource, filename));
+        if (
+          ts.isIdentifier(node) &&
+          [
+            "bindVerifiedVisionRequestExecution",
+            "registerC5BoundVerifiedEvidence",
+            "verifiedVisionRequestExecution",
+          ].includes(node.text)
+        )
+          legacyRebindIdentifiers.push(relative(apiSource, filename));
+        ts.forEachChild(node, visit);
+      };
+      visit(source);
+    }
+
+    expect(ownedBatchCalls).toEqual(["processing/observation-assembler.ts"]);
+    expect(ownedBatchCapabilityConsumes).toEqual([
+      "processing/observation-assembler.ts",
+    ]);
+    expect(verifiedC5Readers).toEqual(["processing/observation-assembler.ts"]);
+    expect(c6Assemblies).toEqual(["processing/observation-assembler.ts"]);
+    expect(evidenceRegistrations).toEqual([
+      "processing/observation-assembler.ts",
+    ]);
+    expect(c7ExecutionReads).toEqual(["processing/integrity-evaluator.ts"]);
+    expect(legacyRebindIdentifiers).toEqual([]);
+  });
 });
 
 async function productionModules(
@@ -143,4 +229,17 @@ function candidateParameterType(
       ts.isPropertySignature(member) && member.name.getText() === "candidate",
   );
   return property?.type?.getText();
+}
+
+function enclosingFunctionName(node: ts.Node): string | undefined {
+  let parent = node.parent;
+  while (parent) {
+    if (
+      (ts.isFunctionDeclaration(parent) || ts.isFunctionExpression(parent)) &&
+      parent.name
+    )
+      return parent.name.text;
+    parent = parent.parent;
+  }
+  return undefined;
 }

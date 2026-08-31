@@ -59,25 +59,51 @@ describe("verified integrity evaluator", () => {
     });
   });
 
-  it("accepts C6 geometry with seven RANSAC inliers rather than requiring eight", async () => {
+  it.each([
+    ["attempt", { attemptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }],
+    ["generation", { generation: 2 }],
+    [
+      "session",
+      { calibrationSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    ],
+    ["nonce", { calibrationNonce: "d".repeat(43) }],
+    ["media", { mediaId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }],
+    ["media hash", { mediaSha256: "b".repeat(64) }],
+    ["raw pre-roll hash", { rawPreRollSha256: "b".repeat(64) }],
+  ] as const)(
+    "gives the C5 binding failure precedence for a %s mismatch",
+    async (_, expectedPatch) => {
+      const input = await validInput();
+      expect(
+        evaluateVerifiedIntegrity({
+          ...input,
+          expected: { ...input.expected, ...expectedPatch },
+        }),
+      ).toMatchObject({ code: "video_not_continuous" });
+    },
+  );
+
+  it("rejects a structural Roboflow-shaped provider before it can produce C7 evidence", async () => {
     const demo = createDemoVisionProvider();
-    const sevenInlierProvider: VisionProvider = Object.freeze({
+    const structuralRoboflow: VisionProvider = Object.freeze({
       ...demo,
-      async analyzeVerified(request, signal, deadline) {
-        const observation = await demo.analyzeVerified(
-          request,
-          signal,
-          deadline,
-        );
-        return Object.freeze({
-          ...observation,
-          fiducialCorners: observation.fiducialCorners.map((corner, index) =>
-            index === 0 ? { ...corner, x: corner.x + 100 } : corner,
-          ),
-        });
-      },
+      verifiedProvenance: Object.freeze({
+        kind: "roboflow" as const,
+        workspaceId: "revelai-workspace",
+        workflowId: "revelai-wall-pass-geometry-v1" as const,
+        workflowVersion: "1.0.0" as const,
+        modelBundleId: "wall-pass-bundle-v1",
+        providerVersion: "roboflow-inference-v1",
+      }),
     });
-    const input = await validInput(sevenInlierProvider);
+
+    await expect(validInput(structuralRoboflow)).rejects.toMatchObject({
+      code: "provider_output_invalid",
+    });
+  });
+
+  it("accepts C6 geometry with seven RANSAC inliers rather than requiring eight", async () => {
+    const input = await validInput(fixtureProvider({ inlierCount: 7 }));
 
     expect(evaluateVerifiedIntegrity(input)).toMatchObject({
       kind: "integrity-valid",
@@ -100,6 +126,55 @@ describe("verified integrity evaluator", () => {
       ).toBe(expected);
     },
   );
+
+  it("rejects a gradual active H_t drift from actual C5 to C6 evidence", async () => {
+    expect(
+      evaluateVerifiedIntegrity(
+        await validInput(fixtureProvider({ gradualFiducialXDrift: true })),
+      ),
+    ).toMatchObject({ code: "calibration_not_verified" });
+  });
+
+  it.each([
+    [7, "integrity-valid"],
+    [8, "integrity-valid"],
+    [9, "calibration_not_verified"],
+  ] as const)(
+    "enforces the C6 wall-edge error %i boundary from actual evidence",
+    async (wallEdgeOffset, expected) => {
+      const decision = evaluateVerifiedIntegrity(
+        await validInput(fixtureProvider({ wallEdgeOffset })),
+      );
+      expect(
+        decision.kind === "integrity-valid" ? decision.kind : decision.code,
+      ).toBe(expected);
+    },
+  );
+
+  it.each([
+    [6, "integrity-valid"],
+    [7, "calibration_not_verified"],
+  ] as const)(
+    "enforces active H_t drift %i from actual evidence",
+    async (activeFiducialXOffset, expected) => {
+      const decision = evaluateVerifiedIntegrity(
+        await validInput(fixtureProvider({ activeFiducialXOffset })),
+      );
+      expect(
+        decision.kind === "integrity-valid" ? decision.kind : decision.code,
+      ).toBe(expected);
+    },
+  );
+
+  it.each([
+    ["mirrored geometry", { mirroredGeometry: true }],
+    ["wrong wall side", { wrongWallSide: true }],
+    ["singular geometry", { singularGeometry: true }],
+  ] as const)("rejects %s from actual C5 to C6 evidence", async (_, fault) => {
+    expect(
+      evaluateVerifiedIntegrity(await validInput(fixtureProvider(fault))),
+    ).toMatchObject({ code: "calibration_not_verified" });
+  });
 
   it.each([
     [0.799, "calibration_not_verified"],
@@ -194,6 +269,31 @@ describe("verified integrity evaluator", () => {
       retryable: true,
     });
   });
+
+  it("redacts invalid and temporary outcomes and makes equivalent evidence deterministic", async () => {
+    const input = await validInput();
+    const invalid = evaluateVerifiedIntegrity({
+      ...input,
+      manifest: structuredClone(input.manifest),
+    });
+    const temporary = temporaryIntegrityDecision();
+
+    for (const decision of [invalid, temporary])
+      expect(JSON.stringify(serializeIntegrityDecision(decision))).not.toMatch(
+        /sha|nonce|frame|confidence|drift|media|session/i,
+      );
+
+    const replay = evaluateVerifiedIntegrity(input);
+    const first = evaluateVerifiedIntegrity(input);
+    expect(serializeIntegrityDecision(replay)).toEqual(
+      serializeIntegrityDecision(first),
+    );
+    if (replay.kind !== "integrity-valid" || first.kind !== "integrity-valid")
+      throw new Error("fixture must produce two valid candidates");
+    expect(scoreVerifiedCandidate(replay.candidate)).toEqual(
+      scoreVerifiedCandidate(first.candidate),
+    );
+  });
 });
 
 async function validInput(
@@ -263,14 +363,19 @@ type FixtureFault = Readonly<{
   inlierCount?: 3 | 4 | 5 | 7 | 8;
   calibrationConfidence?: number;
   footConfidence?: number;
+  wallEdgeOffset?: number;
+  activeFiducialXOffset?: number;
+  gradualFiducialXDrift?: boolean;
+  mirroredGeometry?: boolean;
+  wrongWallSide?: boolean;
+  singularGeometry?: boolean;
 }>;
 
 function fixtureProvider(fault: FixtureFault): VisionProvider {
-  const demo = createDemoVisionProvider();
-  return Object.freeze({
-    ...demo,
-    async analyzeVerified(request, signal, deadline) {
-      const observation = await demo.analyzeVerified(request, signal, deadline);
+  return createDemoVisionProvider({
+    free: "free-well-framed-active-v1",
+    verified: "wall-pass-balanced-v1",
+    verifiedFixtureTransform(observation, request) {
       const activeIndex = request.frame.index - 40;
       const missingPreRoll = request.frame.index < (fault.missingPreRoll ?? 0);
       const missingStable = isEvenlyRemoved(
@@ -281,6 +386,43 @@ function fixtureProvider(fault: FixtureFault): VisionProvider {
         activeIndex >= 0 && activeIndex < (fault.unstableRun ?? 0);
       const missingTrack =
         activeIndex >= 0 && activeIndex < (fault.missingTracks ?? 0);
+      const activeFiducialXOffset =
+        activeIndex < 0
+          ? 0
+          : (fault.activeFiducialXOffset ?? 0) +
+            (fault.gradualFiducialXDrift ? activeIndex / 85 : 0);
+      const fiducialCorners = fault.singularGeometry
+        ? observation.fiducialCorners.map((corner) =>
+            Object.freeze({ ...corner, x: 400, y: 400 }),
+          )
+        : fault.mirroredGeometry
+          ? observation.fiducialCorners.map((corner) =>
+              Object.freeze({ ...corner, y: 720 - corner.y }),
+            )
+          : observation.fiducialCorners.map((corner) =>
+              Object.freeze({ ...corner, x: corner.x + activeFiducialXOffset }),
+            );
+      const wallFloorEdge = observation.wallFloorEdge
+        ? fault.mirroredGeometry
+          ? Object.freeze({
+              ...observation.wallFloorEdge,
+              y1: 720,
+              y2: 720,
+            })
+          : fault.wrongWallSide
+            ? Object.freeze({
+                ...observation.wallFloorEdge,
+                y1: 719,
+                y2: 719,
+              })
+            : Object.freeze({
+                ...observation.wallFloorEdge,
+                x1: observation.wallFloorEdge.x1 + activeFiducialXOffset,
+                x2: observation.wallFloorEdge.x2 + activeFiducialXOffset,
+                y1: observation.wallFloorEdge.y1 + (fault.wallEdgeOffset ?? 0),
+                y2: observation.wallFloorEdge.y2 + (fault.wallEdgeOffset ?? 0),
+              })
+        : undefined;
       return Object.freeze({
         ...observation,
         ...(missingPreRoll || missingStable || unstable
@@ -290,8 +432,13 @@ function fixtureProvider(fault: FixtureFault): VisionProvider {
         ...(fault.inlierCount === undefined
           ? {}
           : {
-              fiducialCorners: fixtureCorners(observation, fault.inlierCount),
+              fiducialCorners: fixtureCorners(
+                Object.freeze({ ...observation, fiducialCorners }),
+                fault.inlierCount,
+              ),
             }),
+        ...(fault.inlierCount === undefined ? { fiducialCorners } : {}),
+        ...(wallFloorEdge ? { wallFloorEdge } : {}),
         ...(fault.calibrationConfidence === undefined
           ? {}
           : calibrationConfidence(observation, fault.calibrationConfidence)),

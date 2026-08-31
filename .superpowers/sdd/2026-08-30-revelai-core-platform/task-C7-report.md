@@ -96,6 +96,13 @@ rtk git diff --check
   passed
 ```
 
+```text
+rtk pnpm check
+  format, lint, typecheck, test and all six builds passed
+  API: 21 files / 190 tests; Vision: 6 files / 74 tests;
+  Contracts: 6 files / 33 tests; Domain: 50 tests
+```
+
 ## Full gates and concern
 
 `rtk pnpm install --frozen-lockfile`, root `rtk pnpm check`, root
@@ -217,3 +224,109 @@ write, terminal-result or leaderboard transition; C8 remains responsible for
 the eventual transaction orchestration. The C5/C6 capability APIs are internal
 API modules and deliberately not a serialized/public client contract. No
 unresolved fail-open policy or evidence path is known from this round.
+
+---
+
+## Round 3 correction — factory-owned C5 → C6 analysis capabilities
+
+### Status and commits
+
+- Carry remains `55076e3c5ffbe2d695e90cf11087f0b5200f6073`
+  (`fix(vision): resolve computed alias bindings`).
+- Round-1 prerequisite remains
+  `11ead24e1512ab89185893bbc21ad2b57902b557`
+  (`fix(api): harden competitive policy receipts`).
+- Round-1 C5/C6/C7 correction remains
+  `bb66668c88949caa8799967609fba018c917cf8b`
+  (`fix(api): harden verified evidence execution`).
+- This round is pending its local correction commit; it is not pushed.
+
+### Decision, capability and precedence
+
+`analyzeOwnedVerifiedBatch` is the sole Vision factory operation that can issue
+a non-serializable batch capability. It requires the exact frozen request array
+and exact factory provider. The private capability retains the produced batch,
+ordered source SHA-256 values, ordered encoded SHA-256 values, scheduler and
+sampling IDs, immutable provenance and the factory-owned runtime identity.
+Roboflow requires the factory runtime receipt; demo requires the exact demo
+factory identity and cannot acquire Roboflow provenance by object spreading.
+
+`assembleVerifiedObservation` is the only C5→C6 compositor. It reads the C5
+opaque reader, obtains that capability for the same request-array identity,
+checks C5 continuity/source bytes and C6 encoded bindings, then privately
+registers the immutable execution identity. C7 can only read that private
+registration. The former raw bind/register APIs were removed. Thus an A-batch
+/ B-execution swap, structural provider, detached evidence or replayed manifest
+cannot reach the valid candidate seam.
+
+The safe precedence is unchanged: malformed/probe/continuity/binding faults
+become `video_not_continuous`; C6 geometry, reference, orientation, wall-side,
+drift and graph faults become `calibration_not_verified`; only an otherwise
+valid chain with fewer than 480 usable tracks becomes `tracking_insufficient`.
+Temporary infrastructure remains retryable and has no candidate.
+
+### Exact policy tuple and durability
+
+The strict benchmark receipt, durable C4 activation key/query and C7 candidate
+now include the literal `c5-frame-manifest-v1` extraction version and
+`wall-pass-geometry-evidence-v1` observation version. Migration 15 upgrades a
+verified v14 predecessor transactionally and preserves/reopens the exact parsed
+receipt. C4 rejects a stored policy whose receipt workspace, workflow, model,
+provider or any of its calibration/extraction/observation evidence versions do
+not exactly correlate with the parsed receipt.
+
+| Candidate and receipt state                                                                | Decision                                                            |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| valid demo                                                                                 | `demo`; no repository lookup                                        |
+| forged/Free/structural provider or invalid C5/C6 binding                                   | `experimental` or the safe integrity invalid decision; never ranked |
+| Roboflow with any tuple, receipt ID/SHA/schema, extraction or observation version mismatch | `experimental`                                                      |
+| Roboflow, exact approved parsed current receipt, `runAt <= now < validUntil`               | `ranked`                                                            |
+| typed repository availability failure                                                      | retryable `analysis_temporary_unavailable`                          |
+| persisted/malformed/outage-other-than-typed failure                                        | `experimental`                                                      |
+
+### RED → GREEN and adversarial evidence
+
+- RED: an execution token could be paired with a detached C6 batch. GREEN:
+  A-batch/B-request capability swaps fail for both actual demo and actual
+  Roboflow factories; a non-factory spread fails before analysis.
+- RED: a demo object spread could claim Roboflow and reach policy. GREEN: an
+  actual C5→C6→C7 structural-Roboflow probe is rejected because the provider
+  is not in the factory-owned identity map; ranked fixtures use the real
+  Roboflow factory receipt.
+- RED: C4 could not express extraction/observation revision approval. GREEN:
+  independent candidate/policy/receipt version mismatches are experimental and
+  a corrupt durable version correlation throws the typed corruption error.
+- Actual C5→C6→C7 table coverage includes source attempt/generation/session/
+  nonce/media/raw-hash mismatches, 31/32/33 pre-roll, 575/576/577 stable,
+  3/4/5 unstable, 479/480/481 track frames, confidence 0.799/0.800/0.801,
+  foot 0.64/0.65/0.66, inliers 3/4/5/7/8, wall-edge 7/8/9, static H_t drift
+  6/7, gradual drift, mirrored orientation and wrong wall side.
+- Serialized valid, invalid and temporary decisions are redacted; equivalent
+  accepted evidence has byte-equivalent public decisions and C3 score output.
+- The TypeScript topology guard now proves C5 verified reader → exact owned
+  batch issuance/consumption → one C6 assembly/registration → only C7
+  execution read. It also rejects all former raw binding symbols and keeps C3/
+  policy consumers behind the opaque candidate.
+
+### Verification (Round 3, before full root gates)
+
+```text
+rtk pnpm --filter @revelai/api test -- integrity-evaluator.test.ts c7-boundary.test.ts
+  21 API files, 190 tests passed
+
+rtk pnpm --filter @revelai/vision test -- providers.test.ts
+  6 Vision files, 74 tests passed
+
+rtk pnpm format
+rtk git diff --check
+  passed
+```
+
+### Self-review / concern
+
+The opaque capability uses process-local `WeakMap` identity intentionally: it
+is an internal execution seam, not a transferable protocol. This is
+fail-closed across process boundaries; C8 must compose extraction, analysis and
+integrity in one worker process rather than attempting to persist the
+capability. No route, provider dispatch, media I/O, score formula, policy
+activation or leaderboard write was added to C7.

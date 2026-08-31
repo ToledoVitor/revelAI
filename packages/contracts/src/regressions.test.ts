@@ -571,6 +571,7 @@ describe("review regression contracts", () => {
       id: payload.id,
       scheduler: payload.scheduler,
       sampling: payload.sampling,
+      evidence: payload.evidence,
       manifestSet: payload.manifestSet,
       runs: payload.runs,
       pooledDispatchToObservationP95Ms:

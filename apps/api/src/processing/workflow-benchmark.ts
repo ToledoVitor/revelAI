@@ -112,6 +112,11 @@ export function createWorkflowBenchmarkReceipt(
       activeFrames: 600 as const,
       totalFramesPerBatch: 640 as const,
     },
+    evidence: {
+      calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1" as const,
+      extractionEvidenceVersion: "c5-frame-manifest-v1" as const,
+      observationEvidenceVersion: "wall-pass-geometry-evidence-v1" as const,
+    },
     manifestSet: {
       sha256: manifestSetDigest(manifests),
       manifestIds: exactTuple(manifestIds),

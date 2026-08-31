@@ -76,6 +76,8 @@ export type CompetitivePolicyTuple = Readonly<{
   workflowVersion: "1.0.0";
   providerVersion: string;
   calibrationEvidenceVersion: string;
+  extractionEvidenceVersion: "c5-frame-manifest-v1";
+  observationEvidenceVersion: "wall-pass-geometry-evidence-v1";
   challengeId: "wall-pass";
   challengeVersion: 1;
   ruleVersion: "wall-pass-v1-score-1";

@@ -147,14 +147,22 @@ export class SQLiteCompetitivePolicyRepository
         providerVersion: receipt.provider_version,
         receiptJson: receipt.receipt_json,
       });
-      if (parsedReceipt.workflow.workspaceId !== input.workspaceId)
+      if (
+        parsedReceipt.workflow.workspaceId !== input.workspaceId ||
+        parsedReceipt.evidence.calibrationEvidenceVersion !==
+          input.calibrationEvidenceVersion ||
+        parsedReceipt.evidence.extractionEvidenceVersion !==
+          input.extractionEvidenceVersion ||
+        parsedReceipt.evidence.observationEvidenceVersion !==
+          input.observationEvidenceVersion
+      )
         throw new CompetitivePolicyRepositoryError(
           "competitive_policy_receipt_mismatch",
         );
       try {
         this.raw
           .prepare(
-            "UPDATE approved_competitive_model_policies SET active = 0 WHERE active = 1 AND workspace_id = ? AND model_bundle_id = ? AND workflow_id = ? AND workflow_version = ? AND provider_version = ? AND calibration_evidence_version = ? AND challenge_id = ? AND challenge_version = ? AND rule_version = ?",
+            "UPDATE approved_competitive_model_policies SET active = 0 WHERE active = 1 AND workspace_id = ? AND model_bundle_id = ? AND workflow_id = ? AND workflow_version = ? AND provider_version = ? AND calibration_evidence_version = ? AND extraction_evidence_version = ? AND observation_evidence_version = ? AND challenge_id = ? AND challenge_version = ? AND rule_version = ?",
           )
           .run(
             input.workspaceId,
@@ -163,13 +171,15 @@ export class SQLiteCompetitivePolicyRepository
             input.workflowVersion,
             input.providerVersion,
             input.calibrationEvidenceVersion,
+            input.extractionEvidenceVersion,
+            input.observationEvidenceVersion,
             input.challengeId,
             input.challengeVersion,
             input.ruleVersion,
           );
         this.raw
           .prepare(
-            "INSERT INTO approved_competitive_model_policies (id, receipt_id, receipt_sha256, receipt_schema_version, workspace_id, model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, challenge_id, challenge_version, rule_version, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+            "INSERT INTO approved_competitive_model_policies (id, receipt_id, receipt_sha256, receipt_schema_version, workspace_id, model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, extraction_evidence_version, observation_evidence_version, challenge_id, challenge_version, rule_version, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
           )
           .run(
             input.id,
@@ -182,6 +192,8 @@ export class SQLiteCompetitivePolicyRepository
             input.workflowVersion,
             input.providerVersion,
             input.calibrationEvidenceVersion,
+            input.extractionEvidenceVersion,
+            input.observationEvidenceVersion,
             input.challengeId,
             input.challengeVersion,
             input.ruleVersion,
@@ -286,7 +298,7 @@ export class SQLiteCompetitivePolicyRepository
     try {
       row = this.raw
         .prepare(
-          `SELECT p.id, p.receipt_id, p.receipt_sha256, p.receipt_schema_version, p.workspace_id, p.model_bundle_id, p.workflow_id, p.workflow_version, p.provider_version, p.calibration_evidence_version, p.challenge_id, p.challenge_version, p.rule_version,
+          `SELECT p.id, p.receipt_id, p.receipt_sha256, p.receipt_schema_version, p.workspace_id, p.model_bundle_id, p.workflow_id, p.workflow_version, p.provider_version, p.calibration_evidence_version, p.extraction_evidence_version, p.observation_evidence_version, p.challenge_id, p.challenge_version, p.rule_version,
                 r.receipt_json, r.receipt_sha256 AS source_receipt_sha256, r.schema_version AS source_schema_version, r.model_bundle_id AS source_model_bundle_id, r.workflow_id AS source_workflow_id, r.workflow_version AS source_workflow_version, r.provider_version AS source_provider_version
          FROM approved_competitive_model_policies p
          INNER JOIN workflow_benchmark_receipts r
@@ -300,7 +312,7 @@ export class SQLiteCompetitivePolicyRepository
          LEFT JOIN workflow_benchmark_receipt_invalidations i ON i.receipt_id = r.id
          LEFT JOIN workflow_benchmark_receipt_invalidation_quarantine q ON q.receipt_id = r.id
          WHERE p.active = 1 AND r.status = 'passed' AND r.invalidated_at IS NULL AND i.receipt_id IS NULL AND q.receipt_id IS NULL AND r.valid_until > ?
-           AND p.workspace_id = ? AND p.model_bundle_id = ? AND p.workflow_id = ? AND p.workflow_version = ? AND p.provider_version = ? AND p.calibration_evidence_version = ? AND p.challenge_id = ? AND p.challenge_version = ? AND p.rule_version = ?`,
+           AND p.workspace_id = ? AND p.model_bundle_id = ? AND p.workflow_id = ? AND p.workflow_version = ? AND p.provider_version = ? AND p.calibration_evidence_version = ? AND p.extraction_evidence_version = ? AND p.observation_evidence_version = ? AND p.challenge_id = ? AND p.challenge_version = ? AND p.rule_version = ?`,
         )
         .get(
           this.clock.now(),
@@ -310,6 +322,8 @@ export class SQLiteCompetitivePolicyRepository
           tuple.workflowVersion,
           tuple.providerVersion,
           tuple.calibrationEvidenceVersion,
+          tuple.extractionEvidenceVersion,
+          tuple.observationEvidenceVersion,
           tuple.challengeId,
           tuple.challengeVersion,
           tuple.ruleVersion,
@@ -425,6 +439,8 @@ function parsePolicyRow(row: unknown): CompetitivePolicyActivation {
     "workflow_version",
     "provider_version",
     "calibration_evidence_version",
+    "extraction_evidence_version",
+    "observation_evidence_version",
     "challenge_id",
     "rule_version",
     "receipt_json",
@@ -443,6 +459,8 @@ function parsePolicyRow(row: unknown): CompetitivePolicyActivation {
     value.receipt_schema_version !== "workflow-benchmark-receipt-v1" ||
     value.workflow_id !== "revelai-wall-pass-geometry-v1" ||
     value.workflow_version !== "1.0.0" ||
+    value.extraction_evidence_version !== "c5-frame-manifest-v1" ||
+    value.observation_evidence_version !== "wall-pass-geometry-evidence-v1" ||
     value.challenge_id !== "wall-pass" ||
     typeof value.challenge_version !== "number" ||
     value.challenge_version !== 1 ||
@@ -461,7 +479,19 @@ function parsePolicyRow(row: unknown): CompetitivePolicyActivation {
     providerVersion: value.source_provider_version as string,
     receiptJson: value.receipt_json as string,
   });
-  if (value.workspace_id !== receipt.workflow.workspaceId)
+  if (
+    value.workspace_id !== receipt.workflow.workspaceId ||
+    value.model_bundle_id !== receipt.workflow.modelBundleId ||
+    value.workflow_id !== receipt.workflow.workflowId ||
+    value.workflow_version !== receipt.workflow.workflowVersion ||
+    value.provider_version !== receipt.workflow.providerVersion ||
+    value.calibration_evidence_version !==
+      receipt.evidence.calibrationEvidenceVersion ||
+    value.extraction_evidence_version !==
+      receipt.evidence.extractionEvidenceVersion ||
+    value.observation_evidence_version !==
+      receipt.evidence.observationEvidenceVersion
+  )
     throw new CompetitivePolicyRepositoryError(
       "competitive_policy_persisted_data_corrupt",
     );
@@ -476,6 +506,8 @@ function parsePolicyRow(row: unknown): CompetitivePolicyActivation {
     workflowVersion: "1.0.0",
     providerVersion: value.provider_version as string,
     calibrationEvidenceVersion: value.calibration_evidence_version as string,
+    extractionEvidenceVersion: "c5-frame-manifest-v1",
+    observationEvidenceVersion: "wall-pass-geometry-evidence-v1",
     challengeId: "wall-pass",
     challengeVersion: 1,
     ruleVersion: "wall-pass-v1-score-1",

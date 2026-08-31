@@ -210,6 +210,15 @@ export const WorkflowBenchmarkReceiptSchema = z
         totalFramesPerBatch: z.literal(640),
       })
       .strict(),
+    evidence: z
+      .object({
+        calibrationEvidenceVersion: z.literal(
+          "wall-pass-calibration-evidence-v1",
+        ),
+        extractionEvidenceVersion: z.literal("c5-frame-manifest-v1"),
+        observationEvidenceVersion: z.literal("wall-pass-geometry-evidence-v1"),
+      })
+      .strict(),
     manifestSet: z
       .object({
         sha256: Sha256Schema,
@@ -331,6 +340,11 @@ const passingReceiptPayload = {
     preRollFrames: 40,
     activeFrames: 600,
     totalFramesPerBatch: 640,
+  },
+  evidence: {
+    calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+    extractionEvidenceVersion: "c5-frame-manifest-v1",
+    observationEvidenceVersion: "wall-pass-geometry-evidence-v1",
   },
   manifestSet: {
     sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

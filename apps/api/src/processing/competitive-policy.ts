@@ -62,6 +62,8 @@ export async function evaluateCompetitiveEligibility(
     modelBundleId: facts.provenance.modelBundleId,
     providerVersion: facts.provenance.providerVersion,
     calibrationEvidenceVersion: facts.calibrationEvidenceVersion,
+    extractionEvidenceVersion: facts.extractionEvidenceVersion,
+    observationEvidenceVersion: facts.observationEvidenceVersion,
     challengeId: "wall-pass",
     challengeVersion: 1,
     ruleVersion: "wall-pass-v1-score-1",
@@ -115,6 +117,12 @@ function isCurrentExactPolicy(
     receipt.data.workflow.workflowVersion === activation.workflowVersion &&
     receipt.data.workflow.modelBundleId === activation.modelBundleId &&
     receipt.data.workflow.providerVersion === activation.providerVersion &&
+    receipt.data.evidence.calibrationEvidenceVersion ===
+      activation.calibrationEvidenceVersion &&
+    receipt.data.evidence.extractionEvidenceVersion ===
+      activation.extractionEvidenceVersion &&
+    receipt.data.evidence.observationEvidenceVersion ===
+      activation.observationEvidenceVersion &&
     receipt.data.scheduler.id === execution.schedulerId &&
     receipt.data.sampling.id === execution.samplingId &&
     receipt.data.status === "passed" &&
@@ -137,6 +145,9 @@ function sameTuple(
     activation.providerVersion === query.providerVersion &&
     activation.calibrationEvidenceVersion ===
       query.calibrationEvidenceVersion &&
+    activation.extractionEvidenceVersion === query.extractionEvidenceVersion &&
+    activation.observationEvidenceVersion ===
+      query.observationEvidenceVersion &&
     activation.challengeId === query.challengeId &&
     activation.challengeVersion === query.challengeVersion &&
     activation.ruleVersion === query.ruleVersion

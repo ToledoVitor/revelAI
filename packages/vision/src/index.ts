@@ -39,6 +39,8 @@ export {
 } from "./transform.js";
 export {
   analyzeBatch,
+  analyzeOwnedVerifiedBatch,
+  assertOwnedVerifiedVisionBatchForRequests,
   analyzeOwnedRoboflowBenchmarkFrame,
   createDemoVisionProvider,
   createRoboflowVisionProvider,
@@ -48,6 +50,8 @@ export {
   type FrameTransformer,
   type OwnedRoboflowBenchmarkFrame,
   type OwnedRoboflowBenchmarkFrameIdentity,
+  type OwnedVerifiedVisionBatch,
+  type OwnedVerifiedVisionBatchData,
   type ProviderFetch,
   type ProviderHttpResponse,
   type RoboflowVisionConfig,

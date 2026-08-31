@@ -1,4 +1,8 @@
 import Database from "better-sqlite3";
+import {
+  WorkflowBenchmarkReceiptSchema,
+  workflowBenchmarkReceiptDigest,
+} from "@revelai/contracts";
 import { parseStoredBenchmarkReceipt } from "../repositories/competitive-policy-repository.js";
 
 type Migration = Readonly<{
@@ -621,6 +625,23 @@ const migrations: readonly Migration[] = [
     `,
     afterApply: bindCompetitivePolicyWorkspacesV14,
   },
+  {
+    // Extraction and observation revisions are independently operator-approved
+    // facts. Historical v14 rows receive only the one receipt-schema literals;
+    // any future revision requires a new exact policy tuple.
+    version: 15,
+    sql: `
+      ALTER TABLE approved_competitive_model_policies
+      ADD COLUMN extraction_evidence_version TEXT NOT NULL DEFAULT 'c5-frame-manifest-v1';
+      ALTER TABLE approved_competitive_model_policies
+      ADD COLUMN observation_evidence_version TEXT NOT NULL DEFAULT 'wall-pass-geometry-evidence-v1';
+      DROP INDEX IF EXISTS active_competitive_policy_tuple_v14;
+      CREATE UNIQUE INDEX active_competitive_policy_tuple_v15
+        ON approved_competitive_model_policies(workspace_id, model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, extraction_evidence_version, observation_evidence_version, challenge_id, challenge_version, rule_version)
+        WHERE active = 1;
+    `,
+    afterApply: upgradeCompetitivePolicyEvidenceVersionsV15,
+  },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {
@@ -798,6 +819,124 @@ function bindCompetitivePolicyWorkspacesV14(raw: Database.Database): void {
        ON approved_competitive_model_policies(workspace_id, model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, challenge_id, challenge_version, rule_version)
        WHERE active = 1;`,
   );
+}
+
+/**
+ * v14 receipts predate the explicit evidence-version object. This exact
+ * predecessor is upgraded only after its old canonical digest verifies; the
+ * new canonical receipt hash and every linked policy hash move atomically.
+ */
+function upgradeCompetitivePolicyEvidenceVersionsV15(
+  raw: Database.Database,
+): void {
+  const rows = raw
+    .prepare(
+      "SELECT id, receipt_sha256, receipt_json FROM workflow_benchmark_receipts",
+    )
+    .all() as readonly Readonly<{
+    id: string;
+    receipt_sha256: string;
+    receipt_json: string;
+  }>[];
+  const policiesForReceipt = raw.prepare(
+    "SELECT id, receipt_id, receipt_sha256, receipt_schema_version, workspace_id, model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, extraction_evidence_version, observation_evidence_version, challenge_id, challenge_version, rule_version, active, created_at FROM approved_competitive_model_policies WHERE receipt_id = ? AND receipt_sha256 = ?",
+  );
+  const deletePolicies = raw.prepare(
+    "DELETE FROM approved_competitive_model_policies WHERE receipt_id = ? AND receipt_sha256 = ?",
+  );
+  const insertPolicy = raw.prepare(
+    "INSERT INTO approved_competitive_model_policies (id, receipt_id, receipt_sha256, receipt_schema_version, workspace_id, model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, extraction_evidence_version, observation_evidence_version, challenge_id, challenge_version, rule_version, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  const updateReceipt = raw.prepare(
+    "UPDATE workflow_benchmark_receipts SET receipt_sha256 = ?, receipt_json = ? WHERE id = ? AND receipt_sha256 = ?",
+  );
+  for (const row of rows) {
+    let parsed: Record<string, unknown>;
+    try {
+      const value = JSON.parse(row.receipt_json);
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new Error("invalid receipt");
+      parsed = value as Record<string, unknown>;
+    } catch {
+      throw new Error("invalid v14 benchmark receipt");
+    }
+    if ("evidence" in parsed) {
+      if (!WorkflowBenchmarkReceiptSchema.safeParse(parsed).success)
+        throw new Error("invalid v15 benchmark receipt");
+      continue;
+    }
+    const oldHash = parsed.receiptSha256;
+    const oldPayload = { ...parsed };
+    delete oldPayload.receiptSha256;
+    if (
+      oldHash !== row.receipt_sha256 ||
+      typeof oldHash !== "string" ||
+      workflowBenchmarkReceiptDigest(oldPayload as never) !== oldHash
+    )
+      throw new Error("invalid v14 benchmark receipt");
+    const nextPayload = {
+      ...oldPayload,
+      evidence: {
+        calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+        extractionEvidenceVersion: "c5-frame-manifest-v1",
+        observationEvidenceVersion: "wall-pass-geometry-evidence-v1",
+      },
+    };
+    const nextHash = workflowBenchmarkReceiptDigest(nextPayload as never);
+    const next = WorkflowBenchmarkReceiptSchema.parse({
+      ...nextPayload,
+      receiptSha256: nextHash,
+    });
+    const policies = policiesForReceipt.all(
+      row.id,
+      row.receipt_sha256,
+    ) as readonly Readonly<{
+      id: string;
+      receipt_id: string;
+      receipt_sha256: string;
+      receipt_schema_version: string;
+      workspace_id: string;
+      model_bundle_id: string;
+      workflow_id: string;
+      workflow_version: string;
+      provider_version: string;
+      calibration_evidence_version: string;
+      extraction_evidence_version: string;
+      observation_evidence_version: string;
+      challenge_id: string;
+      challenge_version: number;
+      rule_version: string;
+      active: number;
+      created_at: string;
+    }>[];
+    deletePolicies.run(row.id, row.receipt_sha256);
+    updateReceipt.run(
+      nextHash,
+      JSON.stringify(next),
+      row.id,
+      row.receipt_sha256,
+    );
+    for (const policy of policies)
+      insertPolicy.run(
+        policy.id,
+        policy.receipt_id,
+        nextHash,
+        policy.receipt_schema_version,
+        policy.workspace_id,
+        policy.model_bundle_id,
+        policy.workflow_id,
+        policy.workflow_version,
+        policy.provider_version,
+        policy.calibration_evidence_version,
+        policy.extraction_evidence_version,
+        policy.observation_evidence_version,
+        policy.challenge_id,
+        policy.challenge_version,
+        policy.rule_version,
+        policy.active,
+        policy.created_at,
+      );
+  }
 }
 
 function canonicalizeStoredMediaV13Value(value: string): string {

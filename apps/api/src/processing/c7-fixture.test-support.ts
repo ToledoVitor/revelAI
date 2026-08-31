@@ -1,4 +1,10 @@
-import { createDemoVisionProvider, type VisionProvider } from "@revelai/vision";
+import {
+  createDemoVisionProvider,
+  createRoboflowVisionProvider,
+  type VisionProvider,
+} from "@revelai/vision";
+import { createHash } from "node:crypto";
+import { encode } from "jpeg-js";
 import {
   attestVerifiedExtractionContinuity,
   createExtractionManifest,
@@ -14,6 +20,19 @@ const mediaId = "22222222-2222-4222-8222-222222222222";
 const sessionId = "33333333-3333-4333-8333-333333333333";
 const nonce = "c".repeat(43);
 const mediaSha256 = "a".repeat(64);
+const fixtureJpeg = new Uint8Array(
+  encode(
+    {
+      width: 1280,
+      height: 720,
+      data: new Uint8Array(1280 * 720 * 4).fill(255),
+    },
+    80,
+  ).data,
+);
+const fixtureJpegSha256 = createHash("sha256")
+  .update(fixtureJpeg)
+  .digest("hex");
 
 export async function verifiedCandidateFixture(
   provenance: "demo" | "roboflow" = "demo",
@@ -36,7 +55,7 @@ export async function verifiedCandidateFixture(
     frames: Array.from({ length: 640 }, (_, index) => ({
       timestampSeconds: index / 10,
       reference: `frame_${index}`,
-      rawBytes: Uint8Array.of(index % 256),
+      rawBytes: fixtureJpeg,
     })),
   });
   if (manifest.mode !== "verified") throw new Error("fixture must be verified");
@@ -54,7 +73,8 @@ export async function verifiedCandidateFixture(
     calibrationNonce: nonce,
     frames: {
       async readFrame(reference) {
-        return Uint8Array.of(Number(reference.replace("frame_", "")) % 256);
+        void reference;
+        return fixtureJpeg;
       },
     },
   });
@@ -78,37 +98,113 @@ export async function verifiedCandidateFixture(
 }
 
 function fixtureProvider(provenance: "demo" | "roboflow"): VisionProvider {
-  const demo = createDemoVisionProvider();
-  if (provenance === "demo") return demo;
-  return Object.freeze({
-    ...demo,
-    verifiedProvenance: Object.freeze({
-      kind: "roboflow" as const,
+  if (provenance === "demo") return createDemoVisionProvider();
+  const frameIndexes: number[] = [];
+  return createRoboflowVisionProvider({
+    config: {
+      apiUrl: "http://127.0.0.1:9001",
       workspaceId: "revelai-workspace",
-      workflowId: "revelai-wall-pass-geometry-v1" as const,
-      workflowVersion: "1.0.0" as const,
-      modelBundleId: "wall-pass-bundle-v1",
-      providerVersion: "roboflow-inference-v1",
-    }),
-    async analyzeVerified(input, signal, deadline) {
-      const observation = await demo.analyzeVerified(input, signal, deadline);
-      return Object.freeze({
-        ...observation,
-        inference: Object.freeze({
-          sha256: "d".repeat(64),
-          transform: Object.freeze({
-            sourceWidth: 1280,
-            sourceHeight: 720,
-            inferenceWidth: 1280 as const,
-            inferenceHeight: 720 as const,
-            scale: 1,
-            scaledWidth: 1280,
-            scaledHeight: 720,
-            padLeft: 0,
-            padTop: 0,
-          }),
-        }),
-      });
+      freeModelBundleId: "free-bundle-v1",
+      verifiedModelBundleId: "wall-pass-bundle-v1",
+      freeProviderVersion: "roboflow-inference-v1",
+      verifiedProviderVersion: "roboflow-inference-v1",
+    },
+    transformer: {
+      async transform(frame, transform, signal) {
+        void signal;
+        frameIndexes.push(frame.index);
+        return Object.freeze({
+          jpeg: fixtureJpeg,
+          sha256: fixtureJpegSha256,
+          transform,
+        });
+      },
+    },
+    fetch: async (_url, init) => {
+      void init;
+      const index = frameIndexes.shift();
+      if (index === undefined) throw new Error("fixture frame index required");
+      return {
+        status: 200,
+        json: async () => ({ outputs: [roboflowOutput(index)] }),
+      };
     },
   });
+}
+
+function roboflowOutput(frameIndex: number) {
+  const activeIndex = frameIndex - 40;
+  const active = activeIndex >= 0 && activeIndex < 600;
+  const phase = activeIndex >= 0 ? activeIndex % 5 : 0;
+  const contact = active && activeIndex < 597 && (phase === 0 || phase === 1);
+  const ballY =
+    !active || activeIndex >= 597
+      ? undefined
+      : phase === 0 || phase === 1
+        ? 530
+        : phase === 2
+          ? 100
+          : phase === 3
+            ? 10
+            : 40;
+  const side = Math.floor(activeIndex / 5) % 2 === 0 ? "left" : "right";
+  return {
+    kind: "wall-pass-geometry-v1",
+    image: { width: 1280, height: 720, coordinateSystem: "inference_pixels" },
+    workflow: {
+      id: "revelai-wall-pass-geometry-v1",
+      version: "1.0.0",
+      modelBundleId: "wall-pass-bundle-v1",
+      providerVersion: "roboflow-inference-v1",
+    },
+    detections: [
+      {
+        class: "athlete",
+        xMin: 400,
+        yMin: 100,
+        xMax: 800,
+        yMax: 650,
+        confidence: 0.93,
+      },
+      ...(ballY === undefined
+        ? []
+        : [
+            {
+              class: "ball",
+              xMin: 500,
+              yMin: Math.max(0, ballY - 15),
+              xMax: 530,
+              yMax: ballY,
+              confidence: 0.88,
+            },
+          ]),
+    ],
+    keypoints: [
+      {
+        class: "left_foot",
+        x: 515,
+        y: ballY ?? 515,
+        confidence: contact && side === "left" ? 0.9 : 0.1,
+      },
+      {
+        class: "right_foot",
+        x: 515,
+        y: ballY ?? 515,
+        confidence: contact && side === "right" ? 0.9 : 0.1,
+      },
+    ],
+    fiducials: [
+      ["a-top-left", 140, 290],
+      ["a-top-right", 160, 290],
+      ["a-bottom-right", 160, 310],
+      ["a-bottom-left", 140, 310],
+      ["b-top-left", 440, 290],
+      ["b-top-right", 460, 290],
+      ["b-bottom-right", 460, 310],
+      ["b-bottom-left", 440, 310],
+    ].map(([name, x, y]) => ({ class: name, x, y, confidence: 0.92 })),
+    geometry: {
+      wallFloorEdge: { x1: 0, y1: 0, x2: 800, y2: 0, confidence: 0.94 },
+    },
+  };
 }

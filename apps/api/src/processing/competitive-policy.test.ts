@@ -107,6 +107,8 @@ describe("competitive eligibility policy", () => {
       { modelBundleId: "wrong" },
       { providerVersion: "wrong" },
       { calibrationEvidenceVersion: "wrong" },
+      { extractionEvidenceVersion: "wrong" },
+      { observationEvidenceVersion: "wrong" },
       { challengeId: "wrong" },
       { challengeVersion: 2 },
       { ruleVersion: "wrong" },
@@ -269,6 +271,8 @@ describe("competitive eligibility policy", () => {
         workflowVersion: receipt.workflow.workflowVersion,
         providerVersion: receipt.workflow.providerVersion,
         calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+        extractionEvidenceVersion: "c5-frame-manifest-v1" as const,
+        observationEvidenceVersion: "wall-pass-geometry-evidence-v1" as const,
         challengeId: "wall-pass" as const,
         challengeVersion: 1 as const,
         ruleVersion: "wall-pass-v1-score-1" as const,
@@ -293,6 +297,28 @@ describe("competitive eligibility policy", () => {
           repository: lookup,
         }),
       ).resolves.toMatchObject({ competitiveStatus: "ranked" });
+
+      database.raw
+        .prepare(
+          "UPDATE approved_competitive_model_policies SET calibration_evidence_version = ? WHERE id = ?",
+        )
+        .run("wrong-evidence-version", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+      await expect(
+        repository.getActiveCompetitivePolicy({
+          ...tuple,
+          calibrationEvidenceVersion: "wrong-evidence-version",
+        }),
+      ).rejects.toMatchObject({
+        code: "competitive_policy_persisted_data_corrupt",
+      });
+      database.raw
+        .prepare(
+          "UPDATE approved_competitive_model_policies SET calibration_evidence_version = ? WHERE id = ?",
+        )
+        .run(
+          "wall-pass-calibration-evidence-v1",
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        );
 
       database.raw
         .prepare(
@@ -326,6 +352,8 @@ function approvedPolicy(
     modelBundleId: "wall-pass-bundle-v1",
     providerVersion: "roboflow-inference-v1",
     calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+    extractionEvidenceVersion: "c5-frame-manifest-v1",
+    observationEvidenceVersion: "wall-pass-geometry-evidence-v1",
     challengeId: "wall-pass",
     challengeVersion: 1,
     ruleVersion: "wall-pass-v1-score-1",

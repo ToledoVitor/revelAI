@@ -3,6 +3,8 @@ import { encode } from "jpeg-js";
 import { describe, expect, it } from "vitest";
 import {
   analyzeBatch,
+  analyzeOwnedVerifiedBatch,
+  assertOwnedVerifiedVisionBatchForRequests,
   createDemoVisionProvider,
   createRoboflowVisionProvider,
   VisionProviderError,
@@ -1107,5 +1109,46 @@ describe("vision providers", () => {
       code: "provider_output_invalid",
     });
     expect(fetches).toBe(0);
+  });
+
+  it("rejects A-batch/B-execution swaps for both factory-owned demo and Roboflow batches", async () => {
+    const providers = [
+      createDemoVisionProvider(),
+      createRoboflowVisionProvider({
+        config: {
+          apiUrl: "http://127.0.0.1:9001",
+          workspaceId: "revelai",
+          freeModelBundleId: "free-bundle-v1",
+          verifiedModelBundleId: "verified-bundle-v1",
+          freeProviderVersion: "provider-v1",
+          verifiedProviderVersion: "provider-v1",
+        },
+        fetch: async () => ({
+          status: 200,
+          json: async () => ({ outputs: [verifiedWorkflowOutput()] }),
+        }),
+      }),
+    ];
+
+    for (const provider of providers) {
+      const requestsA = Object.freeze([verifiedRequest(0)]);
+      const requestsB = Object.freeze([verifiedRequest(0)]);
+      const batchA = await analyzeOwnedVerifiedBatch(provider, requestsA);
+      const batchB = await analyzeOwnedVerifiedBatch(provider, requestsB);
+
+      expect(batchA.kind).toBe("owned-verified-vision-batch");
+      expect(
+        assertOwnedVerifiedVisionBatchForRequests(batchA, requestsA).requests,
+      ).toBe(requestsA);
+      expect(() =>
+        assertOwnedVerifiedVisionBatchForRequests(batchA, requestsB),
+      ).toThrow("provider_output_invalid");
+      expect(() =>
+        assertOwnedVerifiedVisionBatchForRequests(batchB, requestsA),
+      ).toThrow("provider_output_invalid");
+      await expect(
+        analyzeOwnedVerifiedBatch(Object.freeze({ ...provider }), requestsA),
+      ).rejects.toMatchObject({ code: "provider_output_invalid" });
+    }
   });
 });

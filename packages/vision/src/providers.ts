@@ -83,6 +83,40 @@ export type VisionProvider = Readonly<{
 }>;
 
 /**
+ * Opaque analysis capability. It is issued only by the verified analysis
+ * owner after one factory-owned provider has consumed one immutable request
+ * array. A parsed batch has no authority to stand in for this receipt.
+ */
+export type OwnedVerifiedVisionBatch = Readonly<{
+  kind: "owned-verified-vision-batch";
+}>;
+
+export type OwnedVerifiedVisionBatchData = Readonly<{
+  batch: VerifiedVisionObservationBatch;
+  requests: readonly VerifiedVisionFrameRequest[];
+  sourceSha256: readonly string[];
+  encodedSha256: readonly (string | null)[];
+  schedulerId: "verified-wall-pass-image-scheduler-v1";
+  samplingId: "wall-pass-v1-10fps-640-v1";
+  provenance: VerifiedAnalysisProvenance;
+}>;
+
+type FactoryOwnedVerifiedProvider = Readonly<{
+  provenance: VerifiedAnalysisProvenance;
+  /** Roboflow has a separate factory-issued runtime receipt. */
+  runtimeReceipt: object | null;
+}>;
+
+const factoryOwnedVerifiedProviders = new WeakMap<
+  VisionProvider,
+  FactoryOwnedVerifiedProvider
+>();
+const ownedVerifiedVisionBatchData = new WeakMap<
+  OwnedVerifiedVisionBatch,
+  OwnedVerifiedVisionBatchData
+>();
+
+/**
  * Opaque factory-owned receipt for the operator-only benchmark runner. Its
  * identity is registered in a module-private WeakMap; a structural
  * VisionProvider or caller-authored observation cannot manufacture one.
@@ -115,6 +149,11 @@ const ownedBenchmarkFrameIdentities = new WeakMap<
 export type DemoFixtureSelection = Readonly<{
   free: "free-well-framed-active-v1" | "free-limited-ball-v1";
   verified: "wall-pass-balanced-v1" | "wall-pass-insufficient-v1";
+  /** Keeps deterministic C6 boundary fixtures factory-owned. */
+  verifiedFixtureTransform?: (
+    observation: WallPassFrameObservation,
+    request: VerifiedVisionFrameRequest,
+  ) => WallPassFrameObservation;
 }>;
 
 export function createDemoVisionProvider(
@@ -133,7 +172,7 @@ export function createDemoVisionProvider(
     fixtureId: selection.verified,
     providerVersion: "demo-observations-v1" as const,
   });
-  return Object.freeze({
+  const provider: VisionProvider = Object.freeze({
     freeProvenance,
     verifiedProvenance,
     async analyzeFree(input) {
@@ -195,7 +234,7 @@ export function createDemoVisionProvider(
         contact && ballY !== undefined
           ? [pointAt(frame, side, 515, ballY, 0.9)]
           : [];
-      return WallPassFrameObservationSchema.parse({
+      const observation = WallPassFrameObservationSchema.parse({
         kind: "verified-wall-pass" as const,
         frameIndex: frame.index,
         timestampMs: frame.timestampMs,
@@ -224,8 +263,18 @@ export function createDemoVisionProvider(
           confidence: 0.94,
         },
       });
+      return selection.verifiedFixtureTransform
+        ? WallPassFrameObservationSchema.parse(
+            selection.verifiedFixtureTransform(observation, request),
+          )
+        : observation;
     },
   });
+  factoryOwnedVerifiedProviders.set(
+    provider,
+    Object.freeze({ provenance: verifiedProvenance, runtimeReceipt: null }),
+  );
+  return provider;
 }
 
 export type RoboflowVisionConfig = Readonly<{
@@ -318,6 +367,15 @@ export function createRoboflowVisionProvider(
     },
   };
   const frozenProvider = Object.freeze(provider);
+  factoryOwnedVerifiedProviders.set(
+    frozenProvider,
+    Object.freeze({
+      provenance: verifiedProvenance,
+      runtimeReceipt: Object.freeze({
+        kind: "roboflow-verified-runtime-receipt-v1" as const,
+      }),
+    }),
+  );
   ownedBenchmarkRunners.set(
     frozenProvider,
     async (request, signal, deadline) => {
@@ -426,6 +484,79 @@ export async function analyzeBatch(
   });
 }
 
+/**
+ * The only C6 capability producer. It binds the exact C5 request-array
+ * identity, parsed result object, ordered source/encoded digests, normative
+ * scheduling contract, and a provider identity issued by this factory.
+ */
+export async function analyzeOwnedVerifiedBatch(
+  provider: VisionProvider,
+  requests: readonly VerifiedVisionFrameRequest[],
+  scheduler: VisionBatchScheduler = new VisionBatchScheduler(),
+  signal?: AbortSignal,
+): Promise<OwnedVerifiedVisionBatch> {
+  const owner = factoryOwnedVerifiedProviders.get(provider);
+  if (
+    !owner ||
+    provider.verifiedProvenance !== owner.provenance ||
+    (owner.provenance.kind === "roboflow" && owner.runtimeReceipt === null) ||
+    (owner.provenance.kind === "demo" && owner.runtimeReceipt !== null) ||
+    !Object.isFrozen(requests) ||
+    requests.length === 0
+  )
+    throw new VisionProviderError("provider_output_invalid");
+  if (requests.some((request) => request.kind !== "verified-wall-pass"))
+    throw new VisionProviderError("provider_output_invalid");
+  const batch = await analyzeBatch(provider, requests, scheduler, signal);
+  if (batch.kind !== "verified-wall-pass")
+    throw new VisionProviderError("provider_output_invalid");
+  const sourceSha256 = Object.freeze(
+    requests.map((request) =>
+      createHash("sha256").update(request.frame.jpeg).digest("hex"),
+    ),
+  );
+  const encodedSha256 = Object.freeze(
+    batch.frames.map((frame) => frame.inference?.sha256 ?? null),
+  );
+  if (
+    sourceSha256.length !== batch.frames.length ||
+    (owner.provenance.kind === "roboflow" &&
+      encodedSha256.some((digest) => digest === null)) ||
+    (owner.provenance.kind === "demo" &&
+      encodedSha256.some((digest) => digest !== null))
+  )
+    throw new VisionProviderError("provider_output_invalid");
+  const owned = Object.freeze({
+    kind: "owned-verified-vision-batch" as const,
+  });
+  const data: OwnedVerifiedVisionBatchData = Object.freeze({
+    batch: deepFreeze(batch),
+    requests,
+    sourceSha256,
+    encodedSha256,
+    schedulerId: "verified-wall-pass-image-scheduler-v1",
+    samplingId: "wall-pass-v1-10fps-640-v1",
+    provenance: owner.provenance,
+  });
+  ownedVerifiedVisionBatchData.set(owned, data);
+  return owned;
+}
+
+/**
+ * Rejects a capability/request-array swap. This is the sole data-bearing
+ * consume operation; a caller can never attach an owned result to B after A
+ * was dispatched.
+ */
+export function assertOwnedVerifiedVisionBatchForRequests(
+  value: OwnedVerifiedVisionBatch,
+  requests: readonly VerifiedVisionFrameRequest[],
+): OwnedVerifiedVisionBatchData {
+  const data = ownedVerifiedVisionBatchData.get(value);
+  if (!data || data.requests !== requests)
+    throw new VisionProviderError("provider_output_invalid");
+  return data;
+}
+
 function parseFreeObservationBatch(input: unknown): FreeVisionObservationBatch {
   const parsed = FreeVisionObservationBatchSchema.safeParse(input);
   if (!parsed.success) throw new VisionProviderError("provider_output_invalid");
@@ -462,6 +593,14 @@ function assertFrameCorrelation(
     )
       throw new VisionProviderError("provider_output_invalid");
   }
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object") {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
 }
 
 function assertNotAborted(signal: AbortSignal): void {

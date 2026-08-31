@@ -17,13 +17,13 @@ describe("workflow benchmark receipt contract", () => {
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     );
     expect(passingWorkflowBenchmarkReceiptFixture.receiptSha256).toBe(
-      "16100d95caa25eb8ec6a6bfc545943e01d19b02af90f8a071ab6a9e2fe9f86e0",
+      "9f11f281981819f30a081d738ca17be07f37f98aa5e56d835ae3a4602bed09ad",
     );
     expect(failedWorkflowBenchmarkReceiptFixture.receiptSha256).toBe(
-      "cb74f6a175859d55f7b4d0519789cde12fabd8e6ce6e228a45c99011b953c945",
+      "21832a403eb4341e4bcbc03b31333ed393a9ee969eba0329a7688cd231490d88",
     );
     expect(staleWorkflowBenchmarkReceiptFixture.receiptSha256).toBe(
-      "f0106ea9f2bb49eb465a48687d6aa6deab05798559ad1b4220e37b0a89e50532",
+      "4113823410311b63c329368a0b9306270532130f9060704b589898c6b204a9a8",
     );
     expect(
       WorkflowBenchmarkReceiptSchema.safeParse(
@@ -47,6 +47,14 @@ describe("workflow benchmark receipt contract", () => {
     ).toBe(false);
   });
 
+  it("binds the exact C5 extraction and C6 observation revisions into approval", () => {
+    expect(passingWorkflowBenchmarkReceiptFixture.evidence).toEqual({
+      calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+      extractionEvidenceVersion: "c5-frame-manifest-v1",
+      observationEvidenceVersion: "wall-pass-geometry-evidence-v1",
+    });
+  });
+
   it("binds receipt content to its canonical digest independently of object key order", () => {
     const { receiptSha256, ...payload } =
       passingWorkflowBenchmarkReceiptFixture;
@@ -57,6 +65,7 @@ describe("workflow benchmark receipt contract", () => {
       id: payload.id,
       scheduler: payload.scheduler,
       sampling: payload.sampling,
+      evidence: payload.evidence,
       manifestSet: payload.manifestSet,
       runs: payload.runs,
       pooledDispatchToObservationP95Ms:

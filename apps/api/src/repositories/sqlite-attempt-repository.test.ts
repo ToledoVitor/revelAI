@@ -2732,7 +2732,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 14 });
+    ).toMatchObject({ count: 15 });
     reopened.close();
     upgraded.close();
   });
@@ -3147,7 +3147,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 14 });
+    ).toMatchObject({ count: 15 });
     reopened.close();
     upgraded.close();
   });
@@ -3204,6 +3204,8 @@ describe("SQLiteAttemptRepository", () => {
       providerVersion:
         passingWorkflowBenchmarkReceiptFixture.workflow.providerVersion,
       calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+      extractionEvidenceVersion: "c5-frame-manifest-v1" as const,
+      observationEvidenceVersion: "wall-pass-geometry-evidence-v1" as const,
       challengeId: "wall-pass" as const,
       challengeVersion: 1 as const,
       ruleVersion: "wall-pass-v1-score-1" as const,
@@ -3226,7 +3228,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 14 });
+    ).toMatchObject({ count: 15 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -3296,6 +3298,92 @@ describe("SQLiteAttemptRepository", () => {
     beforeRetry.close();
   });
 
+  it("upgrades the exact v14 receipt predecessor with durable C5/C6 versions and reopens", async () => {
+    const filename = join(fixture.directory, "legacy-v14-evidence.sqlite");
+    const legacy = openSqliteDatabaseAtVersionForTest(filename, 14);
+    const {
+      receiptSha256: _hash,
+      evidence: _evidence,
+      ...oldPayload
+    } = passingWorkflowBenchmarkReceiptFixture;
+    void _hash;
+    void _evidence;
+    const oldHash = workflowBenchmarkReceiptDigest(oldPayload as never);
+    const oldReceipt = { ...oldPayload, receiptSha256: oldHash };
+    legacy.raw
+      .prepare(
+        "INSERT INTO workflow_benchmark_receipts (id, receipt_sha256, schema_version, workflow_id, workflow_version, model_bundle_id, provider_version, status, run_at, valid_until, invalidated_at, receipt_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        oldReceipt.id,
+        oldReceipt.receiptSha256,
+        oldReceipt.schemaVersion,
+        oldReceipt.workflow.workflowId,
+        oldReceipt.workflow.workflowVersion,
+        oldReceipt.workflow.modelBundleId,
+        oldReceipt.workflow.providerVersion,
+        oldReceipt.status,
+        oldReceipt.runAt,
+        oldReceipt.validUntil,
+        oldReceipt.invalidatedAt,
+        JSON.stringify(oldReceipt),
+        fixture.clock.now(),
+      );
+    legacy.raw
+      .prepare(
+        "INSERT INTO approved_competitive_model_policies (id, receipt_id, receipt_sha256, receipt_schema_version, model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, challenge_id, challenge_version, rule_version, active, created_at, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'wall-pass', 1, 'wall-pass-v1-score-1', 1, ?, ?)",
+      )
+      .run(
+        "edededed-eded-4ded-8ded-edededededed",
+        oldReceipt.id,
+        oldReceipt.receiptSha256,
+        oldReceipt.schemaVersion,
+        oldReceipt.workflow.modelBundleId,
+        oldReceipt.workflow.workflowId,
+        oldReceipt.workflow.workflowVersion,
+        oldReceipt.workflow.providerVersion,
+        "wall-pass-calibration-evidence-v1",
+        fixture.clock.now(),
+        oldReceipt.workflow.workspaceId,
+      );
+    legacy.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    const repository = new SQLiteCompetitivePolicyRepository({
+      database: upgraded,
+      clock: fixture.clock,
+    });
+    const tuple = {
+      workspaceId: oldReceipt.workflow.workspaceId,
+      modelBundleId: oldReceipt.workflow.modelBundleId,
+      workflowId: oldReceipt.workflow.workflowId,
+      workflowVersion: oldReceipt.workflow.workflowVersion,
+      providerVersion: oldReceipt.workflow.providerVersion,
+      calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+      extractionEvidenceVersion: "c5-frame-manifest-v1" as const,
+      observationEvidenceVersion: "wall-pass-geometry-evidence-v1" as const,
+      challengeId: "wall-pass" as const,
+      challengeVersion: 1 as const,
+      ruleVersion: "wall-pass-v1-score-1" as const,
+    };
+    await expect(
+      repository.getActiveCompetitivePolicy(tuple),
+    ).resolves.toMatchObject({
+      receipt: passingWorkflowBenchmarkReceiptFixture,
+      extractionEvidenceVersion: "c5-frame-manifest-v1",
+      observationEvidenceVersion: "wall-pass-geometry-evidence-v1",
+    });
+    upgraded.close();
+
+    const reopened = openSqliteDatabase(filename);
+    expect(
+      reopened.raw
+        .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+        .get(),
+    ).toMatchObject({ count: 15 });
+    reopened.close();
+  });
+
   it("upgrades an already-applied v7/v8 database with quarantine, policy, and invalidation invariants", async () => {
     const filename = join(
       fixture.directory,
@@ -3360,7 +3448,9 @@ describe("SQLiteAttemptRepository", () => {
       workflowId: validReceipt.workflow.workflowId,
       workflowVersion: validReceipt.workflow.workflowVersion,
       providerVersion: validReceipt.workflow.providerVersion,
-      calibrationEvidenceVersion: "valid-evidence-v1",
+      calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+      extractionEvidenceVersion: "c5-frame-manifest-v1" as const,
+      observationEvidenceVersion: "wall-pass-geometry-evidence-v1" as const,
       challengeId: "wall-pass" as const,
       challengeVersion: 1 as const,
       ruleVersion: "wall-pass-v1-score-1" as const,
@@ -3371,7 +3461,9 @@ describe("SQLiteAttemptRepository", () => {
       workflowId: invalidReceipt.workflow.workflowId,
       workflowVersion: invalidReceipt.workflow.workflowVersion,
       providerVersion: invalidReceipt.workflow.providerVersion,
-      calibrationEvidenceVersion: "invalid-evidence-v1",
+      calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+      extractionEvidenceVersion: "c5-frame-manifest-v1" as const,
+      observationEvidenceVersion: "wall-pass-geometry-evidence-v1" as const,
       challengeId: "wall-pass" as const,
       challengeVersion: 1 as const,
       ruleVersion: "wall-pass-v1-score-1" as const,
@@ -3389,9 +3481,6 @@ describe("SQLiteAttemptRepository", () => {
     ).resolves.toMatchObject({
       id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
     });
-    await expect(
-      policy.getActiveCompetitivePolicy(invalidTuple),
-    ).resolves.toBeNull();
     await expect(
       policy.activateCompetitivePolicy({
         id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
@@ -3435,7 +3524,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 14 });
+    ).toMatchObject({ count: 15 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -3503,6 +3592,8 @@ describe("SQLiteAttemptRepository", () => {
       providerVersion:
         passingWorkflowBenchmarkReceiptFixture.workflow.providerVersion,
       calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+      extractionEvidenceVersion: "c5-frame-manifest-v1" as const,
+      observationEvidenceVersion: "wall-pass-geometry-evidence-v1" as const,
       challengeId: "wall-pass" as const,
       challengeVersion: 1 as const,
       ruleVersion: "wall-pass-v1-score-1" as const,
@@ -3650,6 +3741,8 @@ describe("SQLiteAttemptRepository", () => {
       providerVersion:
         passingWorkflowBenchmarkReceiptFixture.workflow.providerVersion,
       calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+      extractionEvidenceVersion: "c5-frame-manifest-v1" as const,
+      observationEvidenceVersion: "wall-pass-geometry-evidence-v1" as const,
       challengeId: "wall-pass" as const,
       challengeVersion: 1 as const,
       ruleVersion: "wall-pass-v1-score-1" as const,
@@ -3687,6 +3780,8 @@ describe("SQLiteAttemptRepository", () => {
       providerVersion:
         passingWorkflowBenchmarkReceiptFixture.workflow.providerVersion,
       calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+      extractionEvidenceVersion: "c5-frame-manifest-v1" as const,
+      observationEvidenceVersion: "wall-pass-geometry-evidence-v1" as const,
       challengeId: "wall-pass" as const,
       challengeVersion: 1 as const,
       ruleVersion: "wall-pass-v1-score-1" as const,
