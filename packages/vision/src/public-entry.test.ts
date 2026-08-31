@@ -81,6 +81,43 @@ describe("vision public boundary", () => {
     );
   });
 
+  it("resolves an externally aliased computed destructuring binding", () => {
+    const program = fixtureProgram(
+      new Map([
+        [
+          "/vision-guard/index.ts",
+          [
+            'import * as neutral from "./neutral.js";',
+            'const key = "allowed" as const;',
+            "const { [key]: leaked } = neutral;",
+            "export { leaked };",
+          ].join("\n"),
+        ],
+        [
+          "/vision-guard/neutral.ts",
+          'export { VerifiedResultSchema as allowed } from "./external.js";',
+        ],
+        [
+          "/vision-guard/external.ts",
+          "export const VerifiedResultSchema = Object.freeze({});",
+        ],
+      ]),
+    );
+    const entry = program.getSourceFile("/vision-guard/index.ts");
+    expect(entry).toBeDefined();
+    if (!entry) throw new Error("fixture entry source was not loaded");
+
+    expect(
+      collectPublicBoundaryViolations(program, entry, (file) =>
+        file.startsWith("/vision-guard/"),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("binding:allowed->VerifiedResultSchema"),
+      ]),
+    );
+  });
+
   it("rejects VisionProvider generic constraints and defaults", () => {
     const program = fixtureProgram(
       new Map([
@@ -273,11 +310,35 @@ function reportBindingElement(
   const propertyName = node.propertyName;
   if (propertyName && ts.isComputedPropertyName(propertyName)) {
     const literalName = literalPropertyName(propertyName.expression, checker);
-    if (literalName && forbiddenPublicName.test(literalName))
+    const initializer = bindingInitializer(node);
+    const initializerSymbol =
+      initializer && checker.getSymbolAtLocation(initializer);
+    const namespace =
+      initializerSymbol && resolveAlias(initializerSymbol, checker);
+    const property =
+      literalName && namespace
+        ? checker
+            .getExportsOfModule(namespace)
+            .find((candidate) => candidate.getName() === literalName)
+        : literalName && initializer
+          ? checker.getTypeAtLocation(initializer).getProperty(literalName)
+          : undefined;
+    if (property && literalName)
+      reportResolvedSymbol(property, checker, violations, "binding", literalName);
+    else if (literalName && forbiddenPublicName.test(literalName))
       violations.add(`binding:${literalName}`);
     return;
   }
   reportSymbol(propertyName ?? node.name, checker, violations, "binding");
+}
+
+function bindingInitializer(node: ts.BindingElement): ts.Expression | undefined {
+  const pattern = node.parent;
+  const declaration =
+    pattern && ts.isObjectBindingPattern(pattern) ? pattern.parent : undefined;
+  return declaration && ts.isVariableDeclaration(declaration)
+    ? declaration.initializer
+    : undefined;
 }
 
 function literalPropertyName(
