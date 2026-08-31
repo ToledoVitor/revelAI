@@ -3499,7 +3499,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toEqual({ count: 19 });
+    ).toEqual({ count: 20 });
     reopened.close();
   });
 
@@ -3548,6 +3548,16 @@ describe("SQLiteAttemptRepository", () => {
         "INSERT INTO media_delivery_recovery_records (attempt_id, generation, media_id, state, requires_rollback, created_at, updated_at) VALUES (?, 1, ?, 'pending-delivery', 1, ?, ?)",
       )
       .run(ATTEMPT_A, mediaId, uploadedAt, uploadedAt);
+    predecessor.raw
+      .prepare(
+        "INSERT INTO media_retention_records (media_id, attempt_id, metadata_json, delete_at, created_at) VALUES (?, ?, '{}', ?, ?)",
+      )
+      .run(mediaId, ATTEMPT_A, "2030-01-16T12:00:00.000Z", uploadedAt);
+    predecessor.raw
+      .prepare(
+        "INSERT INTO retention_cleanup_records (resource_id, attempt_id, resource_kind, delete_at, created_at) VALUES (?, ?, 'frame', ?, ?)",
+      )
+      .run(frameBatchId, ATTEMPT_A, "2030-01-16T12:00:00.000Z", uploadedAt);
     predecessor.close();
 
     const upgraded = openSqliteDatabase(filename);
@@ -3623,6 +3633,16 @@ describe("SQLiteAttemptRepository", () => {
         "INSERT INTO media_delivery_recovery_records (attempt_id, generation, media_id, frame_batch_id, state, requires_rollback, created_at, updated_at) VALUES (?, 1, ?, ?, 'pending-delivery', 1, ?, ?)",
       )
       .run(ATTEMPT_A, mediaId, frameBatchId, uploadedAt, uploadedAt);
+    predecessor.raw
+      .prepare(
+        "INSERT INTO media_retention_records (media_id, attempt_id, metadata_json, delete_at, created_at) VALUES (?, ?, '{}', ?, ?)",
+      )
+      .run(mediaId, ATTEMPT_A, "2030-01-16T12:00:00.000Z", uploadedAt);
+    predecessor.raw
+      .prepare(
+        "INSERT INTO retention_cleanup_records (resource_id, attempt_id, resource_kind, delete_at, created_at) VALUES (?, ?, 'frame', ?, ?)",
+      )
+      .run(frameBatchId, ATTEMPT_A, "2030-01-16T12:00:00.000Z", uploadedAt);
     predecessor.close();
 
     const upgraded = openSqliteDatabase(filename);
@@ -3691,6 +3711,16 @@ describe("SQLiteAttemptRepository", () => {
         "INSERT INTO media_delivery_recovery_records (attempt_id, generation, media_id, frame_batch_id, state, requires_rollback, created_at, updated_at) VALUES (?, 1, ?, ?, 'pending-delivery', 1, ?, ?)",
       )
       .run(ATTEMPT_A, mediaId, frameBatchId, uploadedAt, uploadedAt);
+    predecessor.raw
+      .prepare(
+        "INSERT INTO media_retention_records (media_id, attempt_id, metadata_json, delete_at, created_at) VALUES (?, ?, '{}', ?, ?)",
+      )
+      .run(mediaId, ATTEMPT_A, "2030-01-16T12:00:00.000Z", uploadedAt);
+    predecessor.raw
+      .prepare(
+        "INSERT INTO retention_cleanup_records (resource_id, attempt_id, resource_kind, delete_at, created_at) VALUES (?, ?, 'frame', ?, ?)",
+      )
+      .run(frameBatchId, ATTEMPT_A, "2030-01-16T12:00:00.000Z", uploadedAt);
     predecessor.close();
 
     const upgraded = openSqliteDatabase(filename);
@@ -3717,6 +3747,189 @@ describe("SQLiteAttemptRepository", () => {
         .get(ATTEMPT_A),
     ).toEqual({ count: 0 });
     upgraded.close();
+  });
+
+  it.each([
+    "absent",
+    "cross-media",
+    "cross-frame",
+    "cross-both",
+    "wrong-frame-kind",
+    "swapped-pair",
+  ] as const)(
+    "fails closed during v19 when a v18 live delivery lacks exact %s retention ownership",
+    (ownership) => {
+      const filename = join(
+        fixture.directory,
+        `delivery-recovery-v18-${ownership}.sqlite`,
+      );
+      const predecessor = openSqliteDatabaseAtVersionForTest(filename, 18);
+      const uploadedAt = fixture.clock.now();
+      const mediaId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const frameBatchId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+      const swappedMediaId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+      const swappedFrameId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+      predecessor.raw
+        .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+        .run(ATHLETE_A, uploadedAt);
+      predecessor.raw
+        .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+        .run(ATHLETE_B, uploadedAt);
+      predecessor.raw
+        .prepare(
+          "INSERT INTO attempts (id, athlete_id, mode, status, deletion_state, created_at, updated_at) VALUES (?, ?, 'free', 'awaiting-upload', 'active', ?, ?)",
+        )
+        .run(ATTEMPT_B, ATHLETE_B, uploadedAt, uploadedAt);
+      predecessor.raw
+        .prepare(
+          "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, created_at, updated_at, processing_context_json, media_sha256, processing_receipt_id, processing_receipt_sha256) VALUES (?, ?, 'free', NULL, NULL, NULL, 'uploaded', 'active', ?, 1, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          ATTEMPT_A,
+          ATHLETE_A,
+          JSON.stringify(preparedStoredMedia({ id: mediaId, uploadedAt })),
+          uploadedAt,
+          uploadedAt,
+          JSON.stringify({
+            upload: {
+              attemptId: ATTEMPT_A,
+              athleteId: ATHLETE_A,
+              mode: "free",
+              generation: 1,
+              uploadedAt,
+              verified: null,
+            },
+            processing: freeProcessingContext({
+              attemptId: ATTEMPT_A,
+              generation: 1,
+              mediaId,
+            }),
+            sourceSha256: "e".repeat(64),
+          }),
+          "e".repeat(64),
+          frameBatchId,
+          "d".repeat(64),
+        );
+      predecessor.raw
+        .prepare(
+          "INSERT INTO media_delivery_recovery_records (attempt_id, generation, media_id, frame_batch_id, state, requires_rollback, created_at, updated_at) VALUES (?, 1, ?, ?, 'pending-delivery', 1, ?, ?)",
+        )
+        .run(ATTEMPT_A, mediaId, frameBatchId, uploadedAt, uploadedAt);
+      const insertOriginal = (attemptId: string, id: string) =>
+        predecessor.raw
+          .prepare(
+            "INSERT INTO media_retention_records (media_id, attempt_id, metadata_json, delete_at, created_at) VALUES (?, ?, '{}', ?, ?)",
+          )
+          .run(id, attemptId, "2030-01-16T12:00:00.000Z", uploadedAt);
+      const insertFrame = (attemptId: string, id: string, kind = "frame") =>
+        predecessor.raw
+          .prepare(
+            "INSERT INTO retention_cleanup_records (resource_id, attempt_id, resource_kind, delete_at, created_at) VALUES (?, ?, ?, ?, ?)",
+          )
+          .run(id, attemptId, kind, "2030-01-16T12:00:00.000Z", uploadedAt);
+      if (ownership === "cross-media" || ownership === "cross-both")
+        insertOriginal(ATTEMPT_B, mediaId);
+      if (ownership === "cross-frame" || ownership === "cross-both")
+        insertFrame(ATTEMPT_B, frameBatchId);
+      if (ownership === "cross-media" || ownership === "cross-frame") {
+        if (ownership === "cross-media") insertFrame(ATTEMPT_A, frameBatchId);
+        if (ownership === "cross-frame") insertOriginal(ATTEMPT_A, mediaId);
+      }
+      if (ownership === "wrong-frame-kind") {
+        insertOriginal(ATTEMPT_A, mediaId);
+        insertFrame(ATTEMPT_A, frameBatchId, "temporary");
+      }
+      if (ownership === "swapped-pair") {
+        insertOriginal(ATTEMPT_A, swappedMediaId);
+        insertFrame(ATTEMPT_A, swappedFrameId);
+      }
+      predecessor.close();
+
+      const upgraded = openSqliteDatabase(filename);
+      expect(
+        upgraded.raw
+          .prepare(
+            "SELECT status, processing_generation, media_json, media_sha256, processing_context_json, processing_receipt_id, processing_receipt_sha256 FROM attempts WHERE id = ?",
+          )
+          .get(ATTEMPT_A),
+      ).toEqual({
+        status: "awaiting-upload",
+        processing_generation: 2,
+        media_json: null,
+        media_sha256: null,
+        processing_context_json: null,
+        processing_receipt_id: null,
+        processing_receipt_sha256: null,
+      });
+      expect(
+        upgraded.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM media_delivery_recovery_records WHERE attempt_id = ?",
+          )
+          .get(ATTEMPT_A),
+      ).toEqual({ count: 0 });
+      upgraded.close();
+    },
+  );
+
+  it("retains only an exact owned v18 tombstone pair as cleanup recovery across reopen", () => {
+    const filename = join(
+      fixture.directory,
+      "delivery-recovery-v18-tombstone-owned.sqlite",
+    );
+    const predecessor = openSqliteDatabaseAtVersionForTest(filename, 18);
+    const now = fixture.clock.now();
+    const mediaId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const frameBatchId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    predecessor.raw
+      .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+      .run(ATHLETE_A, now);
+    predecessor.raw
+      .prepare(
+        "INSERT INTO attempts (id, athlete_id, mode, status, deletion_state, processing_generation, created_at, updated_at, tombstoned_at) VALUES (?, ?, 'free', 'awaiting-upload', 'tombstoned', 2, ?, ?, ?)",
+      )
+      .run(ATTEMPT_A, ATHLETE_A, now, now, now);
+    predecessor.raw
+      .prepare(
+        "INSERT INTO media_delivery_recovery_records (attempt_id, generation, media_id, frame_batch_id, state, requires_rollback, created_at, updated_at) VALUES (?, 1, ?, ?, 'queued', 0, ?, ?)",
+      )
+      .run(ATTEMPT_A, mediaId, frameBatchId, now, now);
+    predecessor.raw
+      .prepare(
+        "INSERT INTO media_retention_records (media_id, attempt_id, metadata_json, delete_at, created_at) VALUES (?, ?, '{}', ?, ?)",
+      )
+      .run(mediaId, ATTEMPT_A, "2030-01-16T12:00:00.000Z", now);
+    predecessor.raw
+      .prepare(
+        "INSERT INTO retention_cleanup_records (resource_id, attempt_id, resource_kind, delete_at, created_at) VALUES (?, ?, 'frame', ?, ?)",
+      )
+      .run(frameBatchId, ATTEMPT_A, "2030-01-16T12:00:00.000Z", now);
+    predecessor.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT state, requires_rollback, media_id, frame_batch_id FROM media_delivery_recovery_records WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toEqual({
+      state: "cleanup-recoverable",
+      requires_rollback: 0,
+      media_id: mediaId,
+      frame_batch_id: frameBatchId,
+    });
+    upgraded.close();
+
+    const reopened = openSqliteDatabase(filename);
+    expect(
+      reopened.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM media_delivery_recovery_records WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toEqual({ count: 1 });
+    reopened.close();
   });
 
   it("resets contextless legacy uploads for a fresh generation during repeated reopen", async () => {
@@ -3826,7 +4039,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 19 });
+    ).toMatchObject({ count: 20 });
     reopened.close();
     upgraded.close();
 
@@ -4275,7 +4488,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 19 });
+    ).toMatchObject({ count: 20 });
     reopened.close();
     upgraded.close();
   });
@@ -4356,7 +4569,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 19 });
+    ).toMatchObject({ count: 20 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -4508,7 +4721,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 19 });
+    ).toMatchObject({ count: 20 });
     reopened.close();
   });
 
@@ -4781,7 +4994,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 19 });
+    ).toMatchObject({ count: 20 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);

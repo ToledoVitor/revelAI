@@ -49,6 +49,19 @@ import type {
   TerminalCandidate,
 } from "./attempt-repository.js";
 
+const c4SqliteRepositoryCapabilities = new WeakSet<object>();
+
+/** Runtime composition guard for C8's retention-backed local cleaner. */
+export function isC4SqliteRepositoryCapability(
+  value: unknown,
+): value is SQLiteAttemptRepository {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    c4SqliteRepositoryCapabilities.has(value)
+  );
+}
+
 const MAX_RECOVERY_ATTEMPTS = Number.MAX_SAFE_INTEGER;
 const CLEAR_ATTACHED_MEDIA_COLUMNS =
   "media_json = NULL, media_sha256 = NULL, processing_context_json = NULL, processing_receipt_id = NULL, processing_receipt_sha256 = NULL";
@@ -236,6 +249,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     )
       throw new Error("C5 handoff verifier is required from MediaPipeline.");
     this.handoffVerifier = input.handoffVerifier;
+    c4SqliteRepositoryCapabilities.add(this);
   }
 
   public async issueCalibrationSession(
@@ -805,6 +819,37 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     return this.transaction(() => {
       const delivery = this.deliveryRecovery(input);
       return delivery ? projectMediaDeliveryRecovery(delivery) : null;
+    });
+  }
+
+  /**
+   * C8's local cleaner can delete only a pair independently retained for the
+   * same attempt. It intentionally returns a boolean, never storage detail.
+   */
+  public async hasExactAcceptedMediaCleanupOwnership(
+    input: Readonly<{
+      attemptId: string;
+      mediaId: string;
+      frameBatchId: string;
+    }>,
+  ): Promise<boolean> {
+    return this.transaction(() => {
+      const row = this.raw
+        .prepare(
+          `SELECT
+             (SELECT COUNT(*) FROM media_retention_records
+               WHERE attempt_id = ? AND media_id = ?) AS originals,
+             (SELECT COUNT(*) FROM retention_cleanup_records
+               WHERE attempt_id = ? AND resource_id = ?
+                 AND resource_kind = 'frame') AS frames`,
+        )
+        .get(
+          input.attemptId,
+          input.mediaId,
+          input.attemptId,
+          input.frameBatchId,
+        ) as Readonly<{ originals: number; frames: number }>;
+      return row.originals === 1 && row.frames === 1;
     });
   }
 

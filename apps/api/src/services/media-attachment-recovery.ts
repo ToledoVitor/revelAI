@@ -8,7 +8,11 @@ import type { AnalysisQueue } from "../queue/analysis-queue.js";
 /** C5 receives only opaque identifiers; this port cannot reveal a path. */
 export interface OpaqueAcceptedMediaCleaner {
   cleanup(
-    input: Readonly<{ mediaId: string; frameBatchId: string }>,
+    input: Readonly<{
+      attemptId: string;
+      mediaId: string;
+      frameBatchId: string;
+    }>,
   ): Promise<void>;
 }
 
@@ -59,6 +63,18 @@ export interface HourlyRecoveryScheduler {
   cancel(handle: unknown): void;
 }
 
+/** App shutdown boundary for the auto-started C8 recovery composition. */
+export interface C8RecoveryRuntimeHandle {
+  stop(): Promise<void>;
+  drain(): Promise<void>;
+}
+
+/** One app composition owns one scheduler for one C4 repository instance. */
+const productionRuntimeByRepository = new WeakMap<
+  object,
+  C8RecoveryRuntimeHandle
+>();
+
 /**
  * Bounded durable compensation executor. C4 owns state transitions and C5
  * owns byte deletion; a failure keeps the leased journal item retriable.
@@ -91,6 +107,7 @@ export class MediaAttachmentRecoveryExecutor {
           generation: claim.generation,
         });
       await this.cleaner.cleanup({
+        attemptId: claim.attemptId,
         mediaId: claim.mediaId,
         frameBatchId: claim.frameBatchId,
       });
@@ -209,11 +226,16 @@ export function createC8RecoveryRuntime(
     maxBatchSize: number;
     now?: () => string;
   }>,
-): C8RecoveryRuntime {
-  return new C8RecoveryRuntime(input);
+): C8RecoveryRuntimeHandle {
+  const existing = productionRuntimeByRepository.get(input.repository);
+  if (existing) return existing;
+  const runtime = new C8RecoveryRuntime(input);
+  productionRuntimeByRepository.set(input.repository, runtime);
+  runtime.start();
+  return runtime;
 }
 
-export class C8RecoveryRuntime {
+class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
   private readonly delivery: MediaDeliveryRedeliveryExecutor;
   private readonly cleanup: MediaAttachmentRecoveryExecutor;
   private readonly scheduler: HourlyRecoveryScheduler | undefined;
@@ -221,6 +243,11 @@ export class C8RecoveryRuntime {
   private readonly maxBatchSize: number;
   private readonly now: () => string;
   private running = false;
+  private started = false;
+  private stopped = false;
+  private scheduledHandle: unknown;
+  private inFlight: Promise<void> | undefined;
+  private stopping: Promise<void> | undefined;
 
   public constructor(
     input: Readonly<{
@@ -255,25 +282,64 @@ export class C8RecoveryRuntime {
   }
 
   public start(now = this.now()): () => void {
-    void this.runSafely(now);
-    const handle = this.scheduler?.everyHour(() => {
-      try {
-        void this.runSafely(this.now());
-      } catch {
-        this.logRunFailure();
-      }
-    });
+    if (!this.started && !this.stopped) {
+      this.started = true;
+      this.startRun(now);
+      this.scheduledHandle = this.scheduler?.everyHour(() => {
+        try {
+          this.startRun(this.now());
+        } catch {
+          this.logRunFailure();
+        }
+      });
+    }
     return () => {
-      if (handle !== undefined) this.scheduler?.cancel(handle);
+      void this.stop();
     };
   }
 
-  public async run(
+  /** Shutdown first prevents new callbacks, then drains active recovery. */
+  public stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
+    this.stopped = true;
+    const handle = this.scheduledHandle;
+    this.scheduledHandle = undefined;
+    if (handle !== undefined)
+      try {
+        this.scheduler?.cancel(handle);
+      } catch {
+        this.logRunFailure();
+      }
+    this.stopping = this.drain();
+    return this.stopping;
+  }
+
+  /** Exposes an awaitable boundary for dependency teardown ordering. */
+  public async drain(): Promise<void> {
+    await this.inFlight;
+  }
+
+  private run(
     now: string,
   ): Promise<
     | Readonly<{ kind: "completed"; redelivered: number; cleaned: number }>
     | Readonly<{ kind: "skipped-overlap" }>
+    | Readonly<{ kind: "skipped-stopped" }>
   > {
+    const operation = this.execute(now);
+    if (!this.inFlight) this.trackInFlight(operation);
+    return operation;
+  }
+
+  private async execute(
+    now: string,
+  ): Promise<
+    | Readonly<{ kind: "completed"; redelivered: number; cleaned: number }>
+    | Readonly<{ kind: "skipped-overlap" }>
+    | Readonly<{ kind: "skipped-stopped" }>
+  > {
+    if (this.stopped)
+      return Object.freeze({ kind: "skipped-stopped" as const });
     if (this.running)
       return Object.freeze({ kind: "skipped-overlap" as const });
     this.running = true;
@@ -299,6 +365,26 @@ export class C8RecoveryRuntime {
     } catch {
       this.logRunFailure();
     }
+  }
+
+  private startRun(now: string): void {
+    if (this.stopped || this.running) return;
+    const run = this.runSafely(now);
+    this.trackInFlight(run);
+  }
+
+  private trackInFlight(operation: Promise<unknown>): void {
+    const tracked = operation.then(
+      () => {
+        if (this.inFlight === tracked) this.inFlight = undefined;
+      },
+      () => {
+        // runSafely catches its own failure. Keep this branch as a final
+        // containment boundary if a future refactor changes that contract.
+        if (this.inFlight === tracked) this.inFlight = undefined;
+      },
+    );
+    this.inFlight = tracked;
   }
 
   private logRunFailure(): void {

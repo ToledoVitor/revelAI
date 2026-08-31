@@ -742,6 +742,13 @@ const migrations: readonly Migration[] = [
     sql: "SELECT 1;",
     afterApply: normalizeDeliveryRecoveryV19,
   },
+  {
+    // Databases which already recorded v19 must receive the same ownership
+    // repair. Recovery metadata is never cleanup authority by itself.
+    version: 20,
+    sql: "SELECT 1;",
+    afterApply: normalizeDeliveryRecoveryV19,
+  },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {
@@ -1130,6 +1137,12 @@ function normalizeDeliveryRecoveryV19(raw: Database.Database): void {
     const existing = recoveryByAttempt.get(row.id) ?? [];
     if (
       authority === null ||
+      !hasExactV19RetentionOwnership(
+        raw,
+        row.id,
+        authority?.mediaId,
+        authority?.frameBatchId,
+      ) ||
       existing.some(
         (recovery) =>
           recovery.generation !== row.processing_generation ||
@@ -1182,7 +1195,13 @@ function normalizeDeliveryRecoveryV19(raw: Database.Database): void {
     const exact = records.length === 1 ? records[0] : null;
     if (
       exact === null ||
-      !isExactV19CleanupTuple(exact, tombstone.processing_generation)
+      !isExactV19CleanupTuple(exact, tombstone.processing_generation) ||
+      !hasExactV19RetentionOwnership(
+        raw,
+        exact.attempt_id,
+        exact.media_id,
+        exact.frame_batch_id,
+      )
     ) {
       deleteRecovery.run(attemptId);
       continue;
@@ -1200,6 +1219,39 @@ function normalizeDeliveryRecoveryV19(raw: Database.Database): void {
       now,
     );
   }
+}
+
+/**
+ * IDs look opaque, but only independently durable retention facts grant C5
+ * deletion authority. The two facts must both name this exact attempt; a
+ * cross-attempt pair, a missing side, and any kind mismatch all fail closed.
+ */
+function hasExactV19RetentionOwnership(
+  raw: Database.Database,
+  attemptId: string,
+  mediaId: string | undefined,
+  frameBatchId: string | null | undefined,
+): boolean {
+  if (
+    typeof mediaId !== "string" ||
+    mediaId.length === 0 ||
+    typeof frameBatchId !== "string" ||
+    !isUuidV19(frameBatchId)
+  )
+    return false;
+  const record = raw
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM media_retention_records
+           WHERE media_id = ? AND attempt_id = ?) AS originals,
+         (SELECT COUNT(*) FROM retention_cleanup_records
+           WHERE resource_id = ? AND attempt_id = ?
+             AND resource_kind = 'frame') AS frames`,
+    )
+    .get(mediaId, attemptId, frameBatchId, attemptId) as
+    | Readonly<{ originals: number; frames: number }>
+    | undefined;
+  return record?.originals === 1 && record.frames === 1;
 }
 
 function strictV19DeliveryAuthority(
