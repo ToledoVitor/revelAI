@@ -239,7 +239,9 @@ unresolved fail-open policy or evidence path is known from this round.
 - Round-1 C5/C6/C7 correction remains
   `bb66668c88949caa8799967609fba018c917cf8b`
   (`fix(api): harden verified evidence execution`).
-- This round is pending its local correction commit; it is not pushed.
+- Round-3 correction: `c18d9eafa0cddb4b8e8cd179c0c0ee94bd8ff490`
+  (`fix(api): bind factory-owned verified batches`).
+- Status: local commits only; not pushed.
 
 ### Decision, capability and precedence
 
@@ -320,6 +322,19 @@ rtk pnpm --filter @revelai/vision test -- providers.test.ts
 rtk pnpm format
 rtk git diff --check
   passed
+
+rtk pnpm check
+  format, lint, typecheck, test and all six builds passed
+  API: 21 files / 190 tests; Vision: 6 files / 74 tests;
+  Contracts: 6 files / 33 tests; Domain: 50 tests
+
+rtk pnpm install --frozen-lockfile
+rtk pnpm build
+  passed at the main checkout
+
+fresh git archive c18d9ea (no prebuilt dist) → pnpm install --frozen-lockfile
+→ pnpm check → pnpm build
+  passed from an uncached archive
 ```
 
 ### Self-review / concern
