@@ -5,6 +5,7 @@ import type {
   FreeInsight,
   VerifiedResult,
 } from "@revelai/contracts";
+import type { DurableProcessingContext } from "../media/extraction-manifest.js";
 import type { AnalysisJob } from "../queue/analysis-queue.js";
 
 export type StoredMedia = Readonly<{
@@ -101,6 +102,61 @@ export type ProcessingClaim = Readonly<{
   leaseId: string;
   generation: number;
   mode: AttemptMode;
+}>;
+
+/**
+ * Internal, identity-scoped upload authority. This never crosses an HTTP
+ * boundary; C5 receives it before extraction and C4 validates it at attach.
+ */
+export type MediaUploadContext =
+  | Readonly<{
+      attemptId: string;
+      athleteId: string;
+      mode: "free";
+      generation: number;
+      uploadedAt: string;
+      verified: null;
+    }>
+  | Readonly<{
+      attemptId: string;
+      athleteId: string;
+      mode: "verified";
+      generation: number;
+      uploadedAt: string;
+      verified: Readonly<{
+        challenge: Readonly<{ id: "wall-pass"; version: 1 }>;
+        calibrationSessionId: string;
+        calibrationNonce: string;
+      }>;
+    }>;
+
+/** C4 persists this C5-issued, path-free evidence only after exact attach. */
+export type PersistedProcessingContext = Readonly<{
+  upload: MediaUploadContext;
+  processing: DurableProcessingContext;
+}>;
+
+/** C3-compatible, cursor-paginated public projection with no athlete fields. */
+export type LiveLeaderboardPageInput = Readonly<{
+  challenge: Readonly<{
+    id: "wall-pass";
+    version: 1;
+    ruleVersion: "wall-pass-v1-score-1";
+  }>;
+  limit: number;
+  cursor?: string;
+  calculatedAt: string;
+}>;
+
+export type LiveLeaderboardPage = Readonly<{
+  entries: readonly Readonly<{
+    entryId: string;
+    rank: number;
+    score: number;
+    completedAt: string;
+  }>[];
+  cohortSize: number;
+  nextCursor: string | null;
 }>;
 
 export type FinalizedAttempt = Readonly<{
@@ -200,6 +256,16 @@ export interface AttemptRepository {
   ): Promise<
     Readonly<{ items: readonly AttemptRecord[]; nextCursor: string | null }>
   >;
+  prepareMediaUpload(
+    input: Readonly<{ attemptId: string; athleteId: string }>,
+  ): Promise<MediaUploadContext>;
+  attachPreparedMedia(
+    input: Readonly<{
+      context: MediaUploadContext;
+      media: StoredMediaAttachment;
+      processingContext: DurableProcessingContext;
+    }>,
+  ): Promise<AnalysisJob>;
   attachValidatedMedia(
     input: Readonly<{
       attemptId: string;
@@ -214,6 +280,16 @@ export interface AttemptRepository {
     }>,
   ): Promise<void>;
   claimProcessing(job: AnalysisJob): Promise<ProcessingClaim | null>;
+  getProcessingContext(
+    input: Readonly<{
+      attemptId: string;
+      leaseId: string;
+      generation: number;
+    }>,
+  ): Promise<PersistedProcessingContext | null>;
+  listLiveLeaderboard(
+    input: LiveLeaderboardPageInput,
+  ): Promise<LiveLeaderboardPage>;
   releaseProcessingClaim(
     input: Readonly<{
       attemptId: string;

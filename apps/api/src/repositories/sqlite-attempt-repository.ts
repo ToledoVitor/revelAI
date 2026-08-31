@@ -7,7 +7,7 @@ import {
 } from "@revelai/contracts";
 import {
   calculateFrozenWallPassSnapshot as calculateSnapshot,
-  calculateLiveWallPassLeaderboard as calculateLeaderboard,
+  rankWallPassV1Cohort,
   type WallPassRankableResult as DomainWallPassRankableResult,
 } from "@revelai/domain";
 import type { AnalysisJob } from "../queue/analysis-queue.js";
@@ -15,6 +15,10 @@ import {
   originalOrFrameDeleteAt,
   temporaryDeleteAt,
 } from "../media/retention-deadlines.js";
+import {
+  parseDurableProcessingContext,
+  type DurableProcessingContext,
+} from "../media/extraction-manifest.js";
 import type { SqliteDatabase } from "../database/sqlite-database.js";
 import { isStoredMediaAttachment } from "./attempt-repository.js";
 import type {
@@ -25,8 +29,12 @@ import type {
   FinalizeTerminalResultOutcome,
   FinalizedAttempt,
   FinalizeTerminalResultInput,
+  LiveLeaderboardPage,
+  LiveLeaderboardPageInput,
   ProcessingFailureRecordOutcome,
   ProcessingClaim,
+  MediaUploadContext,
+  PersistedProcessingContext,
   StoredMedia,
   StoredMediaAttachment,
   TerminalCandidate,
@@ -48,6 +56,20 @@ type AttemptRow = Readonly<{
   processing_lease_expires_at: string | null;
   created_at: string;
   outcome_json?: string | null;
+}>;
+
+type UploadPreparationRow = Readonly<{
+  id: string;
+  athlete_id: string;
+  mode: "free" | "verified";
+  challenge_id: "wall-pass" | null;
+  challenge_version: 1 | null;
+  calibration_session_id: string | null;
+  calibration_nonce: string | null;
+  status: AttemptRecord["status"];
+  deletion_state: "active" | "tombstoned";
+  media_json: string | null;
+  processing_generation: number;
 }>;
 
 type TerminalResultRow = Readonly<{
@@ -288,6 +310,121 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     });
   }
 
+  public async prepareMediaUpload(
+    input: Readonly<{ attemptId: string; athleteId: string }>,
+  ): Promise<MediaUploadContext> {
+    return this.transaction(() => {
+      const row = this.raw
+        .prepare(
+          `SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version,
+                  a.calibration_session_id, a.status, a.deletion_state,
+                  a.media_json, a.processing_generation, c.nonce AS calibration_nonce
+             FROM attempts a
+        LEFT JOIN calibration_sessions c ON c.id = a.calibration_session_id
+            WHERE a.id = ? AND a.athlete_id = ? AND a.deletion_state = 'active'`,
+        )
+        .get(input.attemptId, input.athleteId) as
+        | UploadPreparationRow
+        | undefined;
+      if (!row) throw new RepositoryError("attempt_not_found");
+      return uploadContextFromRow(row, this.clock.now());
+    });
+  }
+
+  public async attachPreparedMedia(
+    input: Readonly<{
+      context: MediaUploadContext;
+      media: StoredMediaAttachment;
+      processingContext: DurableProcessingContext;
+    }>,
+  ): Promise<AnalysisJob> {
+    return this.transaction(() => {
+      const processingContext = parseDurableProcessingContext(
+        input.processingContext,
+      );
+      let context: MediaUploadContext;
+      try {
+        context = parsePersistedUploadContext(input.context);
+      } catch {
+        throw new RepositoryError("invalid_input");
+      }
+      const media = projectStoredMedia(input.media);
+      assertTransitionMedia(media);
+      if (media.uploadedAt !== context.uploadedAt)
+        throw new RepositoryError("invalid_input");
+      const row = this.raw
+        .prepare(
+          `SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version,
+                  a.calibration_session_id, a.status, a.deletion_state,
+                  a.media_json, a.processing_generation, c.nonce AS calibration_nonce
+             FROM attempts a
+        LEFT JOIN calibration_sessions c ON c.id = a.calibration_session_id
+            WHERE a.id = ? AND a.athlete_id = ? AND a.deletion_state = 'active'`,
+        )
+        .get(context.attemptId, context.athleteId) as
+        | UploadPreparationRow
+        | undefined;
+      if (!row) throw new RepositoryError("attempt_not_found");
+      const expected = uploadContextFromRow(row, context.uploadedAt);
+      if (!sameUploadContext(expected, context))
+        throw new RepositoryError("invalid_attempt_transition");
+      if (
+        processingContext.manifest.attemptId !== context.attemptId ||
+        processingContext.manifest.generation !== context.generation ||
+        processingContext.manifest.mode !== context.mode ||
+        processingContext.manifest.mediaId !== media.id
+      )
+        throw new RepositoryError("invalid_input");
+      if (row.media_json !== null)
+        throw new RepositoryError("duplicate_media_upload");
+      if (row.status !== "awaiting-upload")
+        throw new RepositoryError("invalid_attempt_transition");
+      const now = this.clock.now();
+      const updated = this.raw
+        .prepare(
+          "UPDATE attempts SET media_json = ?, processing_context_json = ?, status = 'uploaded', processing_generation = ?, updated_at = ? WHERE id = ? AND athlete_id = ? AND status = 'awaiting-upload' AND deletion_state = 'active' AND processing_generation = ?",
+        )
+        .run(
+          stableJson(media),
+          stableJson({ upload: expected, processing: processingContext }),
+          context.generation,
+          now,
+          context.attemptId,
+          context.athleteId,
+          row.processing_generation,
+        );
+      if (updated.changes !== 1)
+        throw new RepositoryError("invalid_attempt_transition");
+      this.raw
+        .prepare(
+          "INSERT INTO media_retention_records (media_id, attempt_id, metadata_json, delete_at, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(
+          media.id,
+          context.attemptId,
+          stableJson(media),
+          media.deleteAt,
+          now,
+        );
+      const acknowledged = this.raw
+        .prepare(
+          "DELETE FROM retention_cleanup_records WHERE resource_id = ? AND attempt_id = ? AND resource_kind = 'temporary' AND delete_at = ?",
+        )
+        .run(
+          media.transition.resourceId,
+          context.attemptId,
+          media.transition.deleteAt,
+        );
+      if (acknowledged.changes !== 1)
+        throw new RepositoryError("invalid_input");
+      this.event(context.attemptId, context.generation, "media-attached", now);
+      return Object.freeze({
+        attemptId: context.attemptId,
+        generation: context.generation,
+      });
+    });
+  }
+
   public async attachValidatedMedia(
     input: Readonly<{
       attemptId: string;
@@ -373,7 +510,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       const now = this.clock.now();
       this.raw
         .prepare(
-          "UPDATE attempts SET media_json = NULL, status = 'awaiting-upload', updated_at = ? WHERE id = ? AND status = 'uploaded' AND processing_generation = ? AND deletion_state = 'active'",
+          "UPDATE attempts SET media_json = NULL, processing_context_json = NULL, status = 'awaiting-upload', updated_at = ? WHERE id = ? AND status = 'uploaded' AND processing_generation = ? AND deletion_state = 'active'",
         )
         .run(now, input.attemptId, input.generation);
       // Queue delivery is not an authority to lose physical-byte coverage.
@@ -433,6 +570,40 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         generation: job.generation,
         mode: row.mode,
       });
+    });
+  }
+
+  public async getProcessingContext(
+    input: Readonly<{
+      attemptId: string;
+      leaseId: string;
+      generation: number;
+    }>,
+  ): Promise<PersistedProcessingContext | null> {
+    return this.transaction(() => {
+      const row = this.raw
+        .prepare(
+          "SELECT status, deletion_state, processing_generation, processing_lease_id, processing_context_json FROM attempts WHERE id = ?",
+        )
+        .get(input.attemptId) as
+        | Readonly<{
+            status: AttemptRecord["status"];
+            deletion_state: "active" | "tombstoned";
+            processing_generation: number;
+            processing_lease_id: string | null;
+            processing_context_json: string | null;
+          }>
+        | undefined;
+      if (
+        !row ||
+        row.deletion_state !== "active" ||
+        row.status !== "processing" ||
+        row.processing_generation !== input.generation ||
+        row.processing_lease_id !== input.leaseId ||
+        row.processing_context_json === null
+      )
+        return null;
+      return parsePersistedProcessingContext(row.processing_context_json);
     });
   }
 
@@ -692,7 +863,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         );
       this.raw
         .prepare(
-          "UPDATE attempts SET status = ?, processing_lease_id = NULL, processing_lease_expires_at = NULL, updated_at = ? WHERE id = ? AND deletion_state = 'active' AND status = 'processing' AND processing_generation = ? AND processing_lease_id = ?",
+          "UPDATE attempts SET status = ?, processing_context_json = NULL, processing_lease_id = NULL, processing_lease_expires_at = NULL, updated_at = ? WHERE id = ? AND deletion_state = 'active' AND status = 'processing' AND processing_generation = ? AND processing_lease_id = ?",
         )
         .run(
           outcome.state,
@@ -769,7 +940,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         .run(now, input.attemptId);
       this.raw
         .prepare(
-          "UPDATE attempts SET deletion_state = 'tombstoned', processing_generation = processing_generation + 1, processing_lease_id = NULL, processing_lease_expires_at = NULL, tombstoned_at = ?, updated_at = ? WHERE id = ? AND athlete_id = ? AND deletion_state = 'active'",
+          "UPDATE attempts SET deletion_state = 'tombstoned', processing_context_json = NULL, processing_generation = processing_generation + 1, processing_lease_id = NULL, processing_lease_expires_at = NULL, tombstoned_at = ?, updated_at = ? WHERE id = ? AND athlete_id = ? AND deletion_state = 'active'",
         )
         .run(now, now, input.attemptId, input.athleteId);
       this.event(
@@ -782,27 +953,42 @@ export class SQLiteAttemptRepository implements AttemptRepository {
   }
 
   public async listLiveLeaderboard(
-    input: Readonly<{ calculatedAt: string }>,
-  ): Promise<
-    Readonly<{
-      entries: readonly Readonly<{
-        entryId: string;
-        rank: number;
-        score: number;
-        completedAt: string;
-      }>[];
-      cohortSize: number;
-      nextCursor: null;
-    }>
-  > {
-    const leaderboard = calculateLeaderboard(
-      this.currentCohort(),
-      input.calculatedAt,
+    input: LiveLeaderboardPageInput,
+  ): Promise<LiveLeaderboardPage> {
+    assertLiveLeaderboardInput(input);
+    const ranked = rankWallPassV1Cohort(this.currentCohort());
+    const cursor = input.cursor
+      ? decodeLiveLeaderboardCursor(input.cursor)
+      : null;
+    if (
+      cursor &&
+      !ranked.some(
+        (entry) =>
+          entry.attemptId === cursor.attemptId &&
+          entry.score === cursor.score &&
+          entry.completedAt === cursor.completedAt,
+      )
+    )
+      throw new RepositoryError("invalid_input");
+    const afterCursor = cursor
+      ? ranked.filter((entry) => isAfterLiveLeaderboardCursor(entry, cursor))
+      : ranked;
+    const entries = afterCursor.slice(0, input.limit).map((entry) =>
+      Object.freeze({
+        entryId: entry.entryId,
+        rank: entry.rank,
+        score: entry.score,
+        completedAt: entry.completedAt,
+      }),
     );
+    const last = afterCursor[input.limit - 1];
     return Object.freeze({
-      entries: leaderboard.entries,
-      cohortSize: leaderboard.cohortSize,
-      nextCursor: null,
+      entries: Object.freeze(entries),
+      cohortSize: ranked.length,
+      nextCursor:
+        afterCursor.length > input.limit && last
+          ? encodeLiveLeaderboardCursor(last)
+          : null,
     });
   }
 
@@ -1119,6 +1305,189 @@ function parseStoredMedia(value: string): StoredMedia {
   return media;
 }
 
+function uploadContextFromRow(
+  row: UploadPreparationRow,
+  uploadedAt: string,
+): MediaUploadContext {
+  if (
+    !isUuid(row.id) ||
+    !isUuid(row.athlete_id) ||
+    !UtcIsoTimestampSchema.safeParse(uploadedAt).success ||
+    !Number.isSafeInteger(row.processing_generation) ||
+    row.processing_generation < 0
+  )
+    throw new RepositoryError("persisted_data_corrupt");
+  if (row.deletion_state !== "active")
+    throw new RepositoryError("attempt_not_found");
+  if (row.status !== "awaiting-upload" || row.media_json !== null)
+    throw new RepositoryError("invalid_attempt_transition");
+  const generation = row.processing_generation + 1;
+  if (!Number.isSafeInteger(generation))
+    throw new RepositoryError("persisted_data_corrupt");
+  if (row.mode === "free") {
+    if (
+      row.challenge_id !== null ||
+      row.challenge_version !== null ||
+      row.calibration_session_id !== null ||
+      row.calibration_nonce !== null
+    )
+      throw new RepositoryError("persisted_data_corrupt");
+    return Object.freeze({
+      attemptId: row.id,
+      athleteId: row.athlete_id,
+      mode: "free",
+      generation,
+      uploadedAt,
+      verified: null,
+    });
+  }
+  if (
+    row.mode !== "verified" ||
+    row.challenge_id !== "wall-pass" ||
+    row.challenge_version !== 1 ||
+    !isUuid(row.calibration_session_id) ||
+    typeof row.calibration_nonce !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(row.calibration_nonce)
+  )
+    throw new RepositoryError("persisted_data_corrupt");
+  return Object.freeze({
+    attemptId: row.id,
+    athleteId: row.athlete_id,
+    mode: "verified",
+    generation,
+    uploadedAt,
+    verified: Object.freeze({
+      challenge: Object.freeze({
+        id: "wall-pass" as const,
+        version: 1 as const,
+      }),
+      calibrationSessionId: row.calibration_session_id,
+      calibrationNonce: row.calibration_nonce,
+    }),
+  });
+}
+
+function sameUploadContext(
+  left: MediaUploadContext,
+  right: MediaUploadContext,
+): boolean {
+  if (
+    left.attemptId !== right.attemptId ||
+    left.athleteId !== right.athleteId ||
+    left.mode !== right.mode ||
+    left.generation !== right.generation ||
+    left.uploadedAt !== right.uploadedAt
+  )
+    return false;
+  if (left.mode === "free" || right.mode === "free")
+    return left.mode === "free" && right.mode === "free";
+  return (
+    left.verified.challenge.id === right.verified.challenge.id &&
+    left.verified.challenge.version === right.verified.challenge.version &&
+    left.verified.calibrationSessionId ===
+      right.verified.calibrationSessionId &&
+    left.verified.calibrationNonce === right.verified.calibrationNonce
+  );
+}
+
+function parsePersistedProcessingContext(
+  value: string,
+): PersistedProcessingContext {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new RepositoryError("persisted_data_corrupt");
+  }
+  const record = asRecord(parsed);
+  if (!hasExactKeys(record, ["processing", "upload"]))
+    throw new RepositoryError("persisted_data_corrupt");
+  const upload = parsePersistedUploadContext(record.upload);
+  let processing: DurableProcessingContext;
+  try {
+    processing = parseDurableProcessingContext(record.processing);
+  } catch {
+    throw new RepositoryError("persisted_data_corrupt");
+  }
+  if (
+    processing.manifest.attemptId !== upload.attemptId ||
+    processing.manifest.generation !== upload.generation ||
+    processing.manifest.mode !== upload.mode ||
+    (upload.mode === "free" && processing.manifest.mode !== "free") ||
+    (upload.mode === "verified" && processing.manifest.mode !== "verified")
+  )
+    throw new RepositoryError("persisted_data_corrupt");
+  return Object.freeze({ upload, processing });
+}
+
+function parsePersistedUploadContext(value: unknown): MediaUploadContext {
+  const record = asRecord(value);
+  const generation = record.generation;
+  if (
+    !hasExactKeys(record, [
+      "attemptId",
+      "athleteId",
+      "mode",
+      "generation",
+      "uploadedAt",
+      "verified",
+    ]) ||
+    !isUuid(record.attemptId) ||
+    !isUuid(record.athleteId) ||
+    typeof generation !== "number" ||
+    !Number.isSafeInteger(generation) ||
+    generation < 1 ||
+    typeof record.uploadedAt !== "string" ||
+    !UtcIsoTimestampSchema.safeParse(record.uploadedAt).success
+  )
+    throw new RepositoryError("persisted_data_corrupt");
+  if (record.mode === "free") {
+    if (record.verified !== null)
+      throw new RepositoryError("persisted_data_corrupt");
+    return Object.freeze({
+      attemptId: record.attemptId,
+      athleteId: record.athleteId,
+      mode: "free",
+      generation,
+      uploadedAt: record.uploadedAt,
+      verified: null,
+    });
+  }
+  if (record.mode !== "verified" || !isRecord(record.verified))
+    throw new RepositoryError("persisted_data_corrupt");
+  const verified = record.verified;
+  if (
+    !hasExactKeys(verified, [
+      "challenge",
+      "calibrationSessionId",
+      "calibrationNonce",
+    ]) ||
+    !isRecord(verified.challenge) ||
+    !hasExactKeys(verified.challenge, ["id", "version"]) ||
+    verified.challenge.id !== "wall-pass" ||
+    verified.challenge.version !== 1 ||
+    !isUuid(verified.calibrationSessionId) ||
+    typeof verified.calibrationNonce !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(verified.calibrationNonce)
+  )
+    throw new RepositoryError("persisted_data_corrupt");
+  return Object.freeze({
+    attemptId: record.attemptId,
+    athleteId: record.athleteId,
+    mode: "verified",
+    generation,
+    uploadedAt: record.uploadedAt,
+    verified: Object.freeze({
+      challenge: Object.freeze({
+        id: "wall-pass" as const,
+        version: 1 as const,
+      }),
+      calibrationSessionId: verified.calibrationSessionId,
+      calibrationNonce: verified.calibrationNonce,
+    }),
+  });
+}
+
 function assertTransitionMedia(media: StoredMedia): void {
   if (
     !UtcIsoTimestampSchema.safeParse(media.uploadedAt).success ||
@@ -1430,4 +1799,81 @@ function decodeCursor(
   } catch {
     throw new RepositoryError("invalid_input");
   }
+}
+
+type LiveLeaderboardCursor = Readonly<{
+  attemptId: string;
+  score: number;
+  completedAt: string;
+}>;
+
+function assertLiveLeaderboardInput(input: LiveLeaderboardPageInput): void {
+  if (
+    input.challenge.id !== "wall-pass" ||
+    input.challenge.version !== 1 ||
+    input.challenge.ruleVersion !== "wall-pass-v1-score-1" ||
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > 50 ||
+    !UtcIsoTimestampSchema.safeParse(input.calculatedAt).success
+  )
+    throw new RepositoryError("invalid_input");
+}
+
+function encodeLiveLeaderboardCursor(
+  entry: Readonly<{
+    attemptId: string;
+    score: number;
+    completedAt: string;
+  }>,
+): string {
+  return Buffer.from(
+    stableJson({
+      version: 1,
+      attemptId: entry.attemptId,
+      score: entry.score,
+      completedAt: entry.completedAt,
+    }),
+  ).toString("base64url");
+}
+
+function decodeLiveLeaderboardCursor(cursor: string): LiveLeaderboardCursor {
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    const score = isRecord(value) ? value.score : undefined;
+    if (
+      !isRecord(value) ||
+      !hasExactKeys(value, ["version", "attemptId", "score", "completedAt"]) ||
+      value.version !== 1 ||
+      !isUuid(value.attemptId) ||
+      typeof score !== "number" ||
+      !Number.isInteger(score) ||
+      score < 0 ||
+      score > 100 ||
+      typeof value.completedAt !== "string" ||
+      !UtcIsoTimestampSchema.safeParse(value.completedAt).success
+    )
+      throw new Error("invalid live leaderboard cursor");
+    return Object.freeze({
+      attemptId: value.attemptId,
+      score,
+      completedAt: value.completedAt,
+    });
+  } catch {
+    throw new RepositoryError("invalid_input");
+  }
+}
+
+function isAfterLiveLeaderboardCursor(
+  entry: Readonly<{
+    attemptId: string;
+    score: number;
+    completedAt: string;
+  }>,
+  cursor: LiveLeaderboardCursor,
+): boolean {
+  if (entry.score !== cursor.score) return entry.score < cursor.score;
+  if (entry.completedAt !== cursor.completedAt)
+    return entry.completedAt > cursor.completedAt;
+  return entry.attemptId > cursor.attemptId;
 }

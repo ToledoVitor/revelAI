@@ -23,6 +23,11 @@ import {
   ExpectedProcessingFailure,
 } from "../workers/analysis-worker.js";
 import {
+  createDurableProcessingContext,
+  createExtractionManifest,
+  reconstructDurableProcessingContext,
+} from "../media/extraction-manifest.js";
+import {
   SQLiteAttemptRepository,
   type Clock,
   type IdGenerator,
@@ -518,6 +523,67 @@ async function attachMedia(
   });
 }
 
+function preparedStoredMedia(
+  input: Readonly<{ id: string; uploadedAt: string }>,
+): StoredMedia {
+  return {
+    id: input.id,
+    contentType: "video/mp4",
+    bytes: 10,
+    uploadedAt: input.uploadedAt,
+    deleteAt: new Date(
+      Date.parse(input.uploadedAt) + 23 * 60 * 60 * 1000,
+    ).toISOString(),
+    transition: {
+      kind: "upload-transition",
+      resourceId: input.id,
+      deleteAt: new Date(
+        Date.parse(input.uploadedAt) + 60 * 60 * 1000,
+      ).toISOString(),
+    },
+  };
+}
+
+async function scheduleTemporaryRetention(
+  fixture: Awaited<ReturnType<typeof makeRepository>>,
+  attemptId: string,
+  media: StoredMedia,
+): Promise<void> {
+  fixture.database.raw
+    .prepare(
+      "INSERT INTO retention_cleanup_records (resource_id, attempt_id, resource_kind, delete_at, created_at) VALUES (?, ?, 'temporary', ?, ?)",
+    )
+    .run(media.id, attemptId, media.transition.deleteAt, media.uploadedAt);
+}
+
+function freeProcessingContext(
+  input: Readonly<{ attemptId: string; generation: number; mediaId: string }>,
+) {
+  const duration = 3;
+  const manifest = createExtractionManifest({
+    attemptId: input.attemptId,
+    generation: input.generation,
+    mediaId: input.mediaId,
+    mediaSha256: "e".repeat(64),
+    mode: "free",
+    probe: {
+      container: "mp4",
+      durationSeconds: duration,
+      displayWidth: 480,
+      displayHeight: 853,
+      nominalFps: 12,
+      codec: "h264",
+      sourceRotationDegrees: 0,
+    },
+    frames: Array.from({ length: 12 }, (_, index) => ({
+      timestampSeconds: (duration * index) / 11,
+      reference: `free-${String(index).padStart(4, "0")}`,
+      rawBytes: Uint8Array.of(index),
+    })),
+  });
+  return createDurableProcessingContext(manifest);
+}
+
 describe("SQLiteAttemptRepository", () => {
   let fixture: Awaited<ReturnType<typeof makeRepository>>;
 
@@ -635,6 +701,171 @@ describe("SQLiteAttemptRepository", () => {
         },
       }),
     ).rejects.toMatchObject({ code: "calibration_session_consumed" });
+  });
+
+  it("issues an authoritative upload context and restores its exact C5 facts only for the winning claim", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const first = await fixture.repository.prepareMediaUpload({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+    });
+    const stale = await fixture.repository.prepareMediaUpload({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+    });
+    expect(first).toMatchObject({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      mode: "free",
+      generation: 1,
+      verified: null,
+    });
+
+    const media = preparedStoredMedia({
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      uploadedAt: first.uploadedAt,
+    });
+    await scheduleTemporaryRetention(fixture, ATTEMPT_A, media);
+    const processingContext = freeProcessingContext({
+      attemptId: ATTEMPT_A,
+      generation: first.generation,
+      mediaId: media.id,
+    });
+    const poisonedContext = Object.freeze({
+      ...first,
+      providerPayload: "/private/revelai/c7-capability",
+    });
+    await expect(
+      fixture.repository.attachPreparedMedia({
+        context: poisonedContext,
+        media: createStoredMediaAttachment(media),
+        processingContext,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    const job = await fixture.repository.attachPreparedMedia({
+      context: first,
+      media: createStoredMediaAttachment(media),
+      processingContext,
+    });
+    await expect(
+      fixture.repository.attachPreparedMedia({
+        context: stale,
+        media: createStoredMediaAttachment(
+          preparedStoredMedia({
+            id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            uploadedAt: stale.uploadedAt,
+          }),
+        ),
+        processingContext: freeProcessingContext({
+          attemptId: ATTEMPT_A,
+          generation: stale.generation,
+          mediaId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        }),
+      }),
+    ).rejects.toMatchObject({ code: "invalid_attempt_transition" });
+
+    const reopened = new SQLiteAttemptRepository({
+      database: fixture.openSecondaryDatabase(),
+      clock: fixture.clock,
+      ids: fixture.ids,
+    });
+    const claim = await reopened.claimProcessing(job);
+    expect(claim).not.toBeNull();
+    const persisted = await reopened.getProcessingContext({
+      attemptId: job.attemptId,
+      generation: job.generation,
+      leaseId: claim!.leaseId,
+    });
+    expect(persisted).toEqual({
+      upload: first,
+      processing: processingContext,
+    });
+    const reconstructed = await reconstructDurableProcessingContext({
+      context: persisted!.processing,
+      frames: {
+        readFrame: async (reference) =>
+          Uint8Array.of(Number(reference.slice("free-".length))),
+      },
+    });
+    expect(reconstructed).toMatchObject({
+      attemptId: ATTEMPT_A,
+      generation: 1,
+      mediaId: media.id,
+      mode: "free",
+    });
+    await expect(
+      reopened.releaseProcessingClaim({
+        attemptId: job.attemptId,
+        generation: job.generation,
+        leaseId: claim!.leaseId,
+      }),
+    ).resolves.toBe(true);
+    const retryClaim = await reopened.claimProcessing(job);
+    expect(retryClaim).toMatchObject({ generation: 1, mode: "free" });
+    await expect(
+      reopened.getProcessingContext({
+        attemptId: job.attemptId,
+        generation: job.generation,
+        leaseId: retryClaim!.leaseId,
+      }),
+    ).resolves.toEqual(persisted);
+    await expect(
+      reopened.finalizeTerminalResult({
+        attemptId: job.attemptId,
+        generation: job.generation,
+        leaseId: retryClaim!.leaseId,
+        candidate: freeOutcome(job.attemptId, fixture.clock.now()),
+      }),
+    ).resolves.toMatchObject({ kind: "finalized" });
+    expect(
+      fixture.database.raw
+        .prepare("SELECT processing_context_json FROM attempts WHERE id = ?")
+        .get(job.attemptId),
+    ).toEqual({ processing_context_json: null });
+  });
+
+  it("binds a verified upload context to the consumed calibration nonce without serializing it publicly", async () => {
+    await fixture.repository.issueCalibrationSession({
+      id: SESSION_A,
+      athleteId: ATHLETE_A,
+      nonce: "a".repeat(43),
+      challengeId: "wall-pass",
+      challengeVersion: 1,
+    });
+    await fixture.repository.readyCalibrationSession({
+      id: SESSION_A,
+      athleteId: ATHLETE_A,
+      requiredGates: ["device", "space", "athlete", "rehearsal", "record"],
+    });
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: {
+        mode: "verified",
+        challengeId: "wall-pass",
+        challengeVersion: 1,
+        calibrationSessionId: SESSION_A,
+      },
+    });
+
+    await expect(
+      fixture.repository.prepareMediaUpload({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).resolves.toMatchObject({
+      mode: "verified",
+      generation: 1,
+      verified: {
+        challenge: { id: "wall-pass", version: 1 },
+        calibrationSessionId: SESSION_A,
+        calibrationNonce: "a".repeat(43),
+      },
+    });
   });
 
   it("allows exactly one independently-connected actor to consume a ready calibration session", async () => {
@@ -943,6 +1174,12 @@ describe("SQLiteAttemptRepository", () => {
     expect(
       (
         await fixture.repository.listLiveLeaderboard({
+          challenge: {
+            id: "wall-pass",
+            version: 1,
+            ruleVersion: "wall-pass-v1-score-1",
+          },
+          limit: 20,
           calculatedAt: fixture.clock.now(),
         })
       ).entries,
@@ -1075,14 +1312,56 @@ describe("SQLiteAttemptRepository", () => {
         expect.objectContaining({ cohortSize: 2, rank: 1 }),
       ]),
     );
-    const leaderboard = await fixture.repository.listLiveLeaderboard({
+    const firstPage = await fixture.repository.listLiveLeaderboard({
+      challenge: {
+        id: "wall-pass",
+        version: 1,
+        ruleVersion: "wall-pass-v1-score-1",
+      },
+      limit: 1,
       calculatedAt: completedAt,
     });
-    expect(leaderboard).toMatchObject({ cohortSize: 2 });
-    expect(leaderboard.entries).toEqual([
-      expect.objectContaining({ entryId: ENTRY_A, rank: 1, score: 80 }),
-      expect.objectContaining({ entryId: ENTRY_B, rank: 1, score: 80 }),
-    ]);
+    expect(firstPage).toEqual({
+      cohortSize: 2,
+      entries: [
+        {
+          entryId: ENTRY_A,
+          rank: 1,
+          score: 80,
+          completedAt,
+        },
+      ],
+      nextCursor: expect.any(String),
+    });
+    const secondPage = await fixture.repository.listLiveLeaderboard({
+      challenge: {
+        id: "wall-pass",
+        version: 1,
+        ruleVersion: "wall-pass-v1-score-1",
+      },
+      limit: 1,
+      cursor: firstPage.nextCursor!,
+      calculatedAt: completedAt,
+    });
+    expect(secondPage).toEqual({
+      cohortSize: 2,
+      entries: [
+        {
+          entryId: ENTRY_B,
+          rank: 1,
+          score: 80,
+          completedAt,
+        },
+      ],
+      nextCursor: null,
+    });
+    expect(() =>
+      fixture.database.raw
+        .prepare(
+          "UPDATE leaderboard_entries SET rule_version = 'wall-pass-v0-score-1' WHERE id = ?",
+        )
+        .run(ENTRY_B),
+    ).toThrow(/rule_version/);
   });
 
   it("never projects demo or experimental verified candidates onto the leaderboard", async () => {
@@ -1191,6 +1470,12 @@ describe("SQLiteAttemptRepository", () => {
     expect(
       (
         await fixture.repository.listLiveLeaderboard({
+          challenge: {
+            id: "wall-pass",
+            version: 1,
+            ruleVersion: "wall-pass-v1-score-1",
+          },
+          limit: 20,
           calculatedAt: fixture.clock.now(),
         })
       ).entries,
@@ -2732,7 +3017,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 15 });
+    ).toMatchObject({ count: 16 });
     reopened.close();
     upgraded.close();
   });
@@ -3147,7 +3432,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 15 });
+    ).toMatchObject({ count: 16 });
     reopened.close();
     upgraded.close();
   });
@@ -3228,7 +3513,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 15 });
+    ).toMatchObject({ count: 16 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -3380,7 +3665,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 15 });
+    ).toMatchObject({ count: 16 });
     reopened.close();
   });
 
@@ -3653,7 +3938,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 15 });
+    ).toMatchObject({ count: 16 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);

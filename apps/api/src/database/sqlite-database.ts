@@ -645,6 +645,15 @@ const migrations: readonly Migration[] = [
     `,
     afterApply: upgradeCompetitivePolicyEvidenceVersionsV15,
   },
+  {
+    // C8 persists only the C5-issued path-free processing context. The
+    // opaque C5/C6/C7 capabilities are deliberately recreated in-process.
+    version: 16,
+    sql: `
+      ALTER TABLE attempts
+      ADD COLUMN processing_context_json TEXT;
+    `,
+  },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {
