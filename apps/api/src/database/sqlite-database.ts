@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { WorkflowBenchmarkReceiptSchema } from "@revelai/contracts";
+import { parseStoredBenchmarkReceipt } from "../repositories/competitive-policy-repository.js";
 
 type Migration = Readonly<{
   version: number;
@@ -759,25 +759,38 @@ function canonicalizeStoredMediaV13(raw: Database.Database): void {
 function bindCompetitivePolicyWorkspacesV14(raw: Database.Database): void {
   const rows = raw
     .prepare(
-      `SELECT p.id, r.receipt_json
+      `SELECT p.id AS policy_id, r.id, r.receipt_sha256, r.schema_version,
+              r.model_bundle_id, r.workflow_id, r.workflow_version,
+              r.provider_version, r.receipt_json
        FROM approved_competitive_model_policies p
        INNER JOIN workflow_benchmark_receipts r ON r.id = p.receipt_id`,
     )
-    .all() as readonly Readonly<{ id: string; receipt_json: string }>[];
+    .all() as readonly Readonly<{
+    policy_id: string;
+    id: string;
+    receipt_sha256: string;
+    schema_version: string;
+    model_bundle_id: string;
+    workflow_id: string;
+    workflow_version: string;
+    provider_version: string;
+    receipt_json: string;
+  }>[];
   const update = raw.prepare(
     "UPDATE approved_competitive_model_policies SET workspace_id = ? WHERE id = ?",
   );
   for (const row of rows) {
-    let receipt: unknown;
-    try {
-      receipt = JSON.parse(row.receipt_json);
-    } catch {
-      throw new Error("invalid competitive policy receipt during v14 upgrade");
-    }
-    const parsed = WorkflowBenchmarkReceiptSchema.safeParse(receipt);
-    if (!parsed.success)
-      throw new Error("invalid competitive policy receipt during v14 upgrade");
-    update.run(parsed.data.workflow.workspaceId, row.id);
+    const receipt = parseStoredBenchmarkReceipt({
+      id: row.id,
+      receiptSha256: row.receipt_sha256,
+      schemaVersion: row.schema_version,
+      modelBundleId: row.model_bundle_id,
+      workflowId: row.workflow_id,
+      workflowVersion: row.workflow_version,
+      providerVersion: row.provider_version,
+      receiptJson: row.receipt_json,
+    });
+    update.run(receipt.workflow.workspaceId, row.policy_id);
   }
   raw.exec(
     `DROP INDEX IF EXISTS active_competitive_policy_tuple_v5;

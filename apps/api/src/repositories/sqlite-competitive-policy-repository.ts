@@ -13,23 +13,13 @@ import type {
   CompetitivePolicyRepository,
   CompetitivePolicyTuple,
 } from "./competitive-policy-repository.js";
+import {
+  CompetitivePolicyLookupUnavailableError,
+  CompetitivePolicyRepositoryError,
+  parseStoredBenchmarkReceipt,
+} from "./competitive-policy-repository.js";
 
 export type PolicyClock = Readonly<{ now(): string }>;
-
-export class CompetitivePolicyRepositoryError extends Error {
-  public constructor(
-    public readonly code:
-      | "competitive_policy_receipt_not_found"
-      | "competitive_policy_receipt_not_approved"
-      | "competitive_policy_receipt_mismatch"
-      | "competitive_policy_conflict"
-      | "competitive_policy_invalid_invalidation"
-      | "competitive_policy_persisted_data_corrupt",
-  ) {
-    super(code);
-    this.name = "CompetitivePolicyRepositoryError";
-  }
-}
 
 export class SQLiteCompetitivePolicyRepository
   implements CompetitivePolicyRepository
@@ -292,9 +282,11 @@ export class SQLiteCompetitivePolicyRepository
   public async getActiveCompetitivePolicy(
     tuple: CompetitivePolicyTuple,
   ): Promise<CompetitivePolicyActivation | null> {
-    const row = this.raw
-      .prepare(
-        `SELECT p.id, p.receipt_id, p.receipt_sha256, p.receipt_schema_version, p.workspace_id, p.model_bundle_id, p.workflow_id, p.workflow_version, p.provider_version, p.calibration_evidence_version, p.challenge_id, p.challenge_version, p.rule_version,
+    let row: Record<string, unknown> | undefined;
+    try {
+      row = this.raw
+        .prepare(
+          `SELECT p.id, p.receipt_id, p.receipt_sha256, p.receipt_schema_version, p.workspace_id, p.model_bundle_id, p.workflow_id, p.workflow_version, p.provider_version, p.calibration_evidence_version, p.challenge_id, p.challenge_version, p.rule_version,
                 r.receipt_json, r.receipt_sha256 AS source_receipt_sha256, r.schema_version AS source_schema_version, r.model_bundle_id AS source_model_bundle_id, r.workflow_id AS source_workflow_id, r.workflow_version AS source_workflow_version, r.provider_version AS source_provider_version
          FROM approved_competitive_model_policies p
          INNER JOIN workflow_benchmark_receipts r
@@ -309,19 +301,23 @@ export class SQLiteCompetitivePolicyRepository
          LEFT JOIN workflow_benchmark_receipt_invalidation_quarantine q ON q.receipt_id = r.id
          WHERE p.active = 1 AND r.status = 'passed' AND r.invalidated_at IS NULL AND i.receipt_id IS NULL AND q.receipt_id IS NULL AND r.valid_until > ?
            AND p.workspace_id = ? AND p.model_bundle_id = ? AND p.workflow_id = ? AND p.workflow_version = ? AND p.provider_version = ? AND p.calibration_evidence_version = ? AND p.challenge_id = ? AND p.challenge_version = ? AND p.rule_version = ?`,
-      )
-      .get(
-        this.clock.now(),
-        tuple.workspaceId,
-        tuple.modelBundleId,
-        tuple.workflowId,
-        tuple.workflowVersion,
-        tuple.providerVersion,
-        tuple.calibrationEvidenceVersion,
-        tuple.challengeId,
-        tuple.challengeVersion,
-        tuple.ruleVersion,
-      ) as Record<string, unknown> | undefined;
+        )
+        .get(
+          this.clock.now(),
+          tuple.workspaceId,
+          tuple.modelBundleId,
+          tuple.workflowId,
+          tuple.workflowVersion,
+          tuple.providerVersion,
+          tuple.calibrationEvidenceVersion,
+          tuple.challengeId,
+          tuple.challengeVersion,
+          tuple.ruleVersion,
+        ) as Record<string, unknown> | undefined;
+    } catch (error) {
+      if (error instanceof CompetitivePolicyRepositoryError) throw error;
+      throw new CompetitivePolicyLookupUnavailableError();
+    }
     if (!row) return null;
     return parsePolicyRow(row);
   }
@@ -409,31 +405,7 @@ function assertReceiptRowMatches(
     receiptJson: string;
   }>,
 ): WorkflowBenchmarkReceipt {
-  let receipt: WorkflowBenchmarkReceipt;
-  try {
-    const parsed = WorkflowBenchmarkReceiptSchema.safeParse(
-      JSON.parse(input.receiptJson),
-    );
-    if (!parsed.success) throw new Error("invalid receipt");
-    receipt = parsed.data;
-  } catch {
-    throw new CompetitivePolicyRepositoryError(
-      "competitive_policy_persisted_data_corrupt",
-    );
-  }
-  if (
-    receipt.id !== input.id ||
-    receipt.receiptSha256 !== input.receiptSha256 ||
-    receipt.schemaVersion !== input.schemaVersion ||
-    receipt.workflow.modelBundleId !== input.modelBundleId ||
-    receipt.workflow.workflowId !== input.workflowId ||
-    receipt.workflow.workflowVersion !== input.workflowVersion ||
-    receipt.workflow.providerVersion !== input.providerVersion
-  )
-    throw new CompetitivePolicyRepositoryError(
-      "competitive_policy_persisted_data_corrupt",
-    );
-  return receipt;
+  return parseStoredBenchmarkReceipt(input);
 }
 
 function parsePolicyRow(row: unknown): CompetitivePolicyActivation {

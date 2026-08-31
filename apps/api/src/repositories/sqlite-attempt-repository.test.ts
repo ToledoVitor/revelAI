@@ -3240,6 +3240,62 @@ describe("SQLiteAttemptRepository", () => {
     reopened.close();
   });
 
+  it("rolls back v14 when a legacy receipt payload mismatches its receipt row", async () => {
+    const filename = join(
+      fixture.directory,
+      "legacy-v13-receipt-mismatch.sqlite",
+    );
+    const legacy = openSqliteDatabaseAtVersionForTest(filename, 13);
+    const policy = new SQLiteCompetitivePolicyRepository({
+      database: legacy,
+      clock: fixture.clock,
+    });
+    const actual = passingWorkflowBenchmarkReceiptFixture;
+    const substituted = renewedReceipt();
+    await policy.storeBenchmarkReceipt(actual);
+    await policy.storeBenchmarkReceipt(substituted);
+    legacy.raw
+      .prepare(
+        "INSERT INTO approved_competitive_model_policies (id, receipt_id, receipt_sha256, receipt_schema_version, model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, challenge_id, challenge_version, rule_version, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'wall-pass', 1, 'wall-pass-v1-score-1', 1, ?)",
+      )
+      .run(
+        "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        actual.id,
+        actual.receiptSha256,
+        actual.schemaVersion,
+        actual.workflow.modelBundleId,
+        actual.workflow.workflowId,
+        actual.workflow.workflowVersion,
+        actual.workflow.providerVersion,
+        "wall-pass-calibration-evidence-v1",
+        fixture.clock.now(),
+      );
+    legacy.raw
+      .prepare(
+        "UPDATE workflow_benchmark_receipts SET receipt_json = ? WHERE id = ?",
+      )
+      .run(JSON.stringify(substituted), actual.id);
+    legacy.close();
+
+    expect(() => openSqliteDatabase(filename)).toThrow(
+      "competitive_policy_persisted_data_corrupt",
+    );
+
+    const beforeRetry = openSqliteDatabaseAtVersionForTest(filename, 13);
+    expect(
+      beforeRetry.raw
+        .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+        .get(),
+    ).toMatchObject({ count: 13 });
+    const policyColumns = beforeRetry.raw
+      .prepare("PRAGMA table_info(approved_competitive_model_policies)")
+      .all() as readonly Readonly<{ name: string }>[];
+    expect(policyColumns.some((column) => column.name === "workspace_id")).toBe(
+      false,
+    );
+    beforeRetry.close();
+  });
+
   it("upgrades an already-applied v7/v8 database with quarantine, policy, and invalidation invariants", async () => {
     const filename = join(
       fixture.directory,
