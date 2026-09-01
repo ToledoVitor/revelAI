@@ -32,14 +32,34 @@ async function runScenario(options) {
     stdio: "ignore",
   });
   const fixture = await waitForFixture(fixturesBefore);
-  const processGroups = await descendantProcessGroups(child.pid);
+  const processGroups = new Set(await descendantProcessGroups(child.pid));
+  let collectingProcessGroups = true;
+  const collection = collectProcessGroups(
+    child.pid,
+    processGroups,
+    () => collectingProcessGroups,
+  );
 
   if (options.name === "signal") child.kill("SIGTERM");
 
   const exitCode = await waitForClose(child);
+  collectingProcessGroups = false;
+  await collection;
   await delay(postCloseSettleMs);
-  if (exitCode === 0 || !(await resourcesAreGone(fixture, processGroups))) {
+  if (
+    exitCode === 0 ||
+    !(await resourcesAreGone(fixture, [...processGroups]))
+  ) {
     throw new Error("Clean API executable cancellation probe failed.");
+  }
+}
+
+async function collectProcessGroups(rootPid, processGroups, isCollecting) {
+  while (isCollecting()) {
+    for (const processGroup of await descendantProcessGroups(rootPid)) {
+      processGroups.add(processGroup);
+    }
+    await delay(100);
   }
 }
 
