@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --project tsconfig.build.json",
+    "build": "node scripts/clean-production-dist.mjs && tsc --project tsconfig.build.json && pnpm run check:production-dist",
     "check:production-dist": "node scripts/assert-production-dist.mjs",
     "lint": "eslint src",
     "typecheck": "tsc --project tsconfig.json",

@@ -7,6 +7,7 @@ import { QueueUnavailableError } from "../queue/analysis-queue.js";
 import {
   AnalysisWorker,
   ExpectedProcessingFailure,
+  RetryableProcessingFailure,
 } from "./analysis-worker.js";
 import type { TerminalCandidate } from "../repositories/attempt-repository.js";
 
@@ -14,6 +15,9 @@ class ManualScheduler implements QueueScheduler {
   readonly tasks: Array<() => Promise<void>> = [];
   public schedule(task: () => Promise<void>): void {
     this.tasks.push(task);
+  }
+  public async runNext(): Promise<void> {
+    await this.tasks.shift()?.();
   }
   public async runAll(): Promise<void> {
     while (this.tasks.length > 0) await this.tasks.shift()!();
@@ -353,7 +357,9 @@ describe("AnalysisWorker", () => {
       process: async () => {
         started?.();
         await processing;
-        throw new Error("provider failed after shutdown began");
+        throw new RetryableProcessingFailure(
+          "provider failed after shutdown began",
+        );
       },
     });
     const stop = worker.start();
@@ -397,7 +403,8 @@ describe("AnalysisWorker", () => {
       },
       process: async () => {
         processCalls += 1;
-        if (processCalls === 1) throw new Error("processor unavailable");
+        if (processCalls === 1)
+          throw new RetryableProcessingFailure("processor unavailable");
         return outcome;
       },
     });
@@ -458,6 +465,190 @@ describe("AnalysisWorker", () => {
     });
   });
 
+  it("keeps repeated terminal persistence failures unacknowledged without borrowing processor retry budget", async () => {
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    const finalized: TerminalCandidate[] = [];
+    let recoveryWrites = 0;
+    let fallbackBuilds = 0;
+    let deadLetters = 0;
+    const worker = new AnalysisWorker({
+      queue,
+      repository: {
+        claimProcessing: async () => ({
+          leaseId: "lease-a",
+          generation: 1,
+          mode: "free",
+        }),
+        releaseProcessingClaim: async () => true,
+        recordProcessingFailure: async () => {
+          recoveryWrites += 1;
+          return { kind: "recorded" as const, retryAttempt: 1 };
+        },
+        deadLetterProcessingClaim: async () => {
+          deadLetters += 1;
+          return deadLettered;
+        },
+        finalizeTerminalResult: async (input) => {
+          finalized.push(input.candidate);
+          throw new Error("terminal persistence unavailable");
+        },
+      },
+      process: async () => outcome,
+      unexpectedRetryPolicy: {
+        maxAttempts: 1,
+        delayMilliseconds: 0,
+        terminalCandidate: () => {
+          fallbackBuilds += 1;
+          return outcome;
+        },
+      },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue({ attemptId: "attempt-a", generation: 1 });
+    await scheduler.runNext();
+    await stop();
+
+    expect({ recoveryWrites, fallbackBuilds, deadLetters }).toEqual({
+      recoveryWrites: 0,
+      fallbackBuilds: 0,
+      deadLetters: 0,
+    });
+    expect(scheduler.tasks).toHaveLength(1);
+    expect(finalized).toEqual([
+      outcome,
+      {
+        state: "failed",
+        attemptId: "attempt-a",
+        mode: "free",
+        code: "analysis_internal_error",
+        message: "A análise não pôde ser concluída.",
+        retryable: false,
+      },
+    ]);
+  });
+
+  it("keeps an exhausted temporary retry finalizer outage unacknowledged after one internal replacement", async () => {
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    const finalized: TerminalCandidate[] = [];
+    let recoveryWrites = 0;
+    let deadLetters = 0;
+    const worker = new AnalysisWorker({
+      queue,
+      repository: {
+        claimProcessing: async () => ({
+          leaseId: "lease-a",
+          generation: 1,
+          mode: "free",
+        }),
+        releaseProcessingClaim: async () => true,
+        recordProcessingFailure: async () => {
+          recoveryWrites += 1;
+          return { kind: "recorded" as const, retryAttempt: 1 };
+        },
+        deadLetterProcessingClaim: async () => {
+          deadLetters += 1;
+          return deadLettered;
+        },
+        finalizeTerminalResult: async (input) => {
+          finalized.push(input.candidate);
+          throw new Error("terminal persistence unavailable");
+        },
+      },
+      process: async () => {
+        throw new RetryableProcessingFailure("provider deadline");
+      },
+      unexpectedRetryPolicy: {
+        maxAttempts: 1,
+        delayMilliseconds: 0,
+        terminalCandidate: () => outcome,
+      },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue({ attemptId: "attempt-a", generation: 1 });
+    await scheduler.runNext();
+    await stop();
+
+    expect({ recoveryWrites, deadLetters }).toEqual({
+      recoveryWrites: 1,
+      deadLetters: 0,
+    });
+    expect(scheduler.tasks).toHaveLength(1);
+    expect(finalized).toEqual([
+      outcome,
+      {
+        state: "failed",
+        attemptId: "attempt-a",
+        mode: "free",
+        code: "analysis_internal_error",
+        message: "A análise não pôde ser concluída.",
+        retryable: false,
+      },
+    ]);
+  });
+
+  it("terminalizes an untyped processor invariant without retry accounting", async () => {
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    const finalized: TerminalCandidate[] = [];
+    let recoveryWrites = 0;
+    let fallbackBuilds = 0;
+    const worker = new AnalysisWorker({
+      queue,
+      repository: {
+        claimProcessing: async () => ({
+          leaseId: "lease-a",
+          generation: 1,
+          mode: "free",
+        }),
+        releaseProcessingClaim: async () => true,
+        recordProcessingFailure: async () => {
+          recoveryWrites += 1;
+          return { kind: "recorded" as const, retryAttempt: 1 };
+        },
+        deadLetterProcessingClaim: async () => deadLettered,
+        finalizeTerminalResult: async (input) => {
+          finalized.push(input.candidate);
+          return acknowledgedFinalization;
+        },
+      },
+      process: async () => {
+        throw new Error("durable binding invariant failed");
+      },
+      unexpectedRetryPolicy: {
+        maxAttempts: 1,
+        delayMilliseconds: 0,
+        terminalCandidate: () => {
+          fallbackBuilds += 1;
+          return outcome;
+        },
+      },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue({ attemptId: "attempt-a", generation: 1 });
+    await scheduler.runAll();
+    await stop();
+
+    expect({ recoveryWrites, fallbackBuilds }).toEqual({
+      recoveryWrites: 0,
+      fallbackBuilds: 0,
+    });
+    expect(finalized).toEqual([
+      {
+        state: "failed",
+        attemptId: "attempt-a",
+        mode: "free",
+        code: "analysis_internal_error",
+        message: "A análise não pôde ser concluída.",
+        retryable: false,
+      },
+    ]);
+  });
+
   it("bounds permanent unexpected failures with yielded retries and one terminal failure", async () => {
     const scheduler = new ManualScheduler();
     const queue = new InMemoryAnalysisQueue({ scheduler });
@@ -490,7 +681,7 @@ describe("AnalysisWorker", () => {
       },
       process: async () => {
         processCalls += 1;
-        throw new Error("permanent processor error");
+        throw new RetryableProcessingFailure("permanent processor error");
       },
       unexpectedRetryPolicy: {
         maxAttempts: 3,

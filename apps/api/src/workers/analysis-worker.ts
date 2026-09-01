@@ -52,6 +52,18 @@ export class ExpectedProcessingFailure extends Error {
   }
 }
 
+/**
+ * Explicit processor-only retry signal. Adapters must use this solely for a
+ * provider or scheduler transport/deadline failure; all other processor and
+ * C4 errors terminalize as an internal failure without touching retry state.
+ */
+export class RetryableProcessingFailure extends Error {
+  public constructor(message = "Retryable processing failure") {
+    super(message);
+    this.name = "RetryableProcessingFailure";
+  }
+}
+
 export type UnexpectedRetryPolicy = Readonly<{
   maxAttempts: number;
   delayMilliseconds: number;
@@ -204,26 +216,70 @@ export class AnalysisWorker {
     }
     let candidate: TerminalCandidate;
     try {
-      try {
-        candidate = await this.process({ job, claim });
-      } catch (error) {
-        if (error instanceof ExpectedProcessingFailure)
-          candidate = error.candidate;
-        else throw error;
+      candidate = await this.process({ job, claim });
+    } catch (error) {
+      if (error instanceof ExpectedProcessingFailure)
+        candidate = error.candidate;
+      else if (error instanceof RetryableProcessingFailure) {
+        await this.recover(job, claim, error);
+        return;
+      } else {
+        await this.finalizeInternalFailure(job, claim);
+        return;
       }
-      const finalization = await this.repository.finalizeTerminalResult({
+    }
+    await this.finalizeProcessedCandidate(job, claim, candidate);
+  }
+
+  /**
+   * Only explicitly retryable processor failures enter `recover()`: its retry
+   * budget represents a provider/scheduler delivery, never a C4 write or
+   * invariant fault. A rejected terminal candidate gets one exact internal
+   * terminal replacement while the same lease is still authoritative.
+   */
+  private async finalizeProcessedCandidate(
+    job: AnalysisJob,
+    claim: ProcessingClaim,
+    candidate: TerminalCandidate,
+  ): Promise<void> {
+    let finalization: FinalizeTerminalResultOutcome;
+    try {
+      finalization = await this.repository.finalizeTerminalResult({
         attemptId: job.attemptId,
         leaseId: claim.leaseId,
         generation: claim.generation,
         candidate,
       });
-      if (!acknowledges(finalization)) {
-        await this.releaseForRetry(job, claim);
-        throw new LostProcessingClaimError();
-      }
-    } catch (error) {
-      if (error instanceof LostProcessingClaimError) throw error;
-      await this.recover(job, claim, error);
+    } catch {
+      await this.finalizeInternalFailure(job, claim);
+      return;
+    }
+    if (!acknowledges(finalization)) {
+      await this.releaseForRetry(job, claim);
+      throw new LostProcessingClaimError();
+    }
+  }
+
+  private async finalizeInternalFailure(
+    job: AnalysisJob,
+    claim: ProcessingClaim,
+  ): Promise<void> {
+    const finalization = await this.repository.finalizeTerminalResult({
+      attemptId: job.attemptId,
+      leaseId: claim.leaseId,
+      generation: claim.generation,
+      candidate: Object.freeze({
+        state: "failed" as const,
+        attemptId: job.attemptId,
+        mode: claim.mode,
+        code: "analysis_internal_error" as const,
+        message: FailureMessageByCode.analysis_internal_error,
+        retryable: false as const,
+      }),
+    });
+    if (!acknowledges(finalization)) {
+      await this.releaseForRetry(job, claim);
+      throw new LostProcessingClaimError();
     }
   }
 
@@ -240,28 +296,11 @@ export class AnalysisWorker {
         generation: claim.generation,
       });
     } catch {
-      // Recovery accounting is diagnostic state, never authority to strand an
-      // active lease. Prefer safe release; if that write is also rejected,
-      // make one bounded terminal attempt rather than acknowledge an orphan.
-      try {
-        await this.repository.releaseProcessingClaim({
-          attemptId: job.attemptId,
-          leaseId: claim.leaseId,
-          generation: claim.generation,
-        });
-        // A fulfilled queue callback is an ACK. Preserve at-least-once
-        // delivery after safely releasing the lease so the attempt is not
-        // left uploaded and unqueued.
-        throw error;
-      } catch {
-        const deadLetter = await this.repository.deadLetterProcessingClaim({
-          attemptId: job.attemptId,
-          leaseId: claim.leaseId,
-          generation: claim.generation,
-        });
-        if (deadLetter.kind === "lost-claim") throw error;
-        return;
-      }
+      // Retry accounting is not terminal authority. Replace the provider
+      // retry with the exact internal terminal fact; if that persistence is
+      // unavailable too, let it reject so the queue keeps this lease's work.
+      await this.finalizeInternalFailure(job, claim);
+      return;
     }
     if (recovery.kind === "tombstoned") return;
     if (recovery.kind === "lost-claim") {
@@ -269,40 +308,20 @@ export class AnalysisWorker {
       throw error;
     }
     if (recovery.retryAttempt >= this.unexpectedRetryPolicy.maxAttempts) {
+      let candidate: TerminalCandidate;
       try {
-        const candidate = this.unexpectedRetryPolicy.terminalCandidate({
+        candidate = this.unexpectedRetryPolicy.terminalCandidate({
           job,
           claim,
           retryAttempt: recovery.retryAttempt,
           error,
         });
-        const finalization = await this.repository.finalizeTerminalResult({
-          attemptId: job.attemptId,
-          leaseId: claim.leaseId,
-          generation: claim.generation,
-          candidate,
-        });
-        if (!acknowledges(finalization)) {
-          await this.releaseForRetry(job, claim);
-          throw new LostProcessingClaimError();
-        }
-        return;
-      } catch (terminalizationError) {
-        if (terminalizationError instanceof LostProcessingClaimError)
-          throw terminalizationError;
-        const deadLetter = await this.repository.deadLetterProcessingClaim({
-          attemptId: job.attemptId,
-          leaseId: claim.leaseId,
-          generation: claim.generation,
-        });
-        if (deadLetter.kind === "lost-claim") {
-          await this.retryWaiter.wait(
-            this.unexpectedRetryPolicy.delayMilliseconds,
-          );
-          throw terminalizationError;
-        }
+      } catch {
+        await this.finalizeInternalFailure(job, claim);
         return;
       }
+      await this.finalizeProcessedCandidate(job, claim, candidate);
+      return;
     }
     await this.releaseForRetry(job, claim);
     throw error;

@@ -493,6 +493,14 @@ function createActivePolicyLookup(raw: SqliteDatabase["raw"]): (
   // probes create this adapter before its current lookup schema exists, so
   // compile on the first lookup without ever consulting mutable raw.prepare.
   const prepare = raw.prepare.bind(raw);
+  // `get` is part of the same authority boundary as `prepare`: fetching it
+  // from the lazily prepared policy statement would let a later own or
+  // prototype mutation forge the current policy result. Probe with schema-
+  // independent SQL while issuing the capability, then invoke that exact
+  // driver method against the lazily prepared statement below.
+  const reader = Reflect.get(prepare("SELECT 1"), "get");
+  if (typeof reader !== "function")
+    throw new Error("SQLite policy lookup requires a statement reader.");
   let statement: ReturnType<typeof raw.prepare> | undefined;
   const sql = `SELECT p.id, p.receipt_id, p.receipt_sha256, p.receipt_schema_version, p.workspace_id, p.model_bundle_id, p.workflow_id, p.workflow_version, p.provider_version, p.calibration_evidence_version, p.extraction_evidence_version, p.observation_evidence_version, p.challenge_id, p.challenge_version, p.rule_version,
             r.receipt_json, r.receipt_sha256 AS source_receipt_sha256, r.schema_version AS source_schema_version, r.model_bundle_id AS source_model_bundle_id, r.workflow_id AS source_workflow_id, r.workflow_version AS source_workflow_version, r.provider_version AS source_provider_version, r.status AS source_status, r.run_at AS source_run_at, r.valid_until AS source_valid_until, r.invalidated_at AS source_invalidated_at
@@ -510,7 +518,7 @@ function createActivePolicyLookup(raw: SqliteDatabase["raw"]): (
      WHERE p.active = 1 AND r.status = 'passed' AND r.invalidated_at IS NULL AND i.receipt_id IS NULL AND q.receipt_id IS NULL AND r.valid_until > ?
        AND p.workspace_id = ? AND p.model_bundle_id = ? AND p.workflow_id = ? AND p.workflow_version = ? AND p.provider_version = ? AND p.calibration_evidence_version = ? AND p.extraction_evidence_version = ? AND p.observation_evidence_version = ? AND p.challenge_id = ? AND p.challenge_version = ? AND p.rule_version = ?`;
   return ({ now, tuple }) => {
-    const row = (statement ??= prepare(sql)).get(
+    const row = Reflect.apply(reader, (statement ??= prepare(sql)), [
       now,
       tuple.workspaceId,
       tuple.modelBundleId,
@@ -523,7 +531,7 @@ function createActivePolicyLookup(raw: SqliteDatabase["raw"]): (
       tuple.challengeId,
       tuple.challengeVersion,
       tuple.ruleVersion,
-    ) as Record<string, unknown> | undefined;
+    ]) as Record<string, unknown> | undefined;
     return row ? parsePolicyRow(row) : null;
   };
 }

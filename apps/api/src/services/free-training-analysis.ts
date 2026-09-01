@@ -7,6 +7,7 @@ import {
 import { assembleFreeObservation } from "../processing/observation-assembler.js";
 import {
   ExpectedProcessingFailure,
+  RetryableProcessingFailure,
   type AnalysisProcessor,
 } from "../workers/analysis-worker.js";
 import type {
@@ -83,10 +84,9 @@ export function createFreeTrainingAnalysisProcessor(
         generatedAt: now(),
       });
     } catch (error) {
-      if (
-        error instanceof VisionProviderError &&
-        error.code !== "provider_temporary_unavailable"
-      )
+      if (error instanceof VisionProviderError) {
+        if (error.code === "provider_temporary_unavailable")
+          throw new FreeTemporaryAnalysisError();
         throw new ExpectedProcessingFailure(
           Object.freeze({
             state: "failed" as const,
@@ -97,12 +97,21 @@ export function createFreeTrainingAnalysisProcessor(
             retryable: false as const,
           }),
         );
+      }
       throw error;
     }
     if (result.attemptId !== job.attemptId)
       throw new Error("Free insight attempt binding mismatch.");
     return Object.freeze({ state: "valid" as const, result });
   };
+}
+
+/** Free's equivalent explicit C6 transport/deadline retry signal. */
+class FreeTemporaryAnalysisError extends RetryableProcessingFailure {
+  public constructor() {
+    super("Free vision provider is temporarily unavailable.");
+    this.name = "FreeTemporaryAnalysisError";
+  }
 }
 
 function authorityFor(

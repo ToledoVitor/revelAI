@@ -35,6 +35,7 @@ import { bindRankedCandidatePolicyFinalization } from "../repositories/attempt-r
 import type { CompetitivePolicyActivation } from "../repositories/competitive-policy-repository.js";
 import {
   ExpectedProcessingFailure,
+  RetryableProcessingFailure,
   type AnalysisProcessor,
 } from "../workers/analysis-worker.js";
 
@@ -46,7 +47,7 @@ export type VerifiedTrainingAnalysisClock = Readonly<{ now(): string }>;
  * durable bindings, policy reads, and implementation defects terminalize
  * safely as nonretryable internal failures instead.
  */
-export class VerifiedTemporaryAnalysisError extends Error {
+export class VerifiedTemporaryAnalysisError extends RetryableProcessingFailure {
   public constructor() {
     super("Verified vision provider is temporarily unavailable.");
     this.name = "VerifiedTemporaryAnalysisError";

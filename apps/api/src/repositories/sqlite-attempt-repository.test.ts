@@ -24,6 +24,7 @@ import {
 import {
   AnalysisWorker,
   ExpectedProcessingFailure,
+  RetryableProcessingFailure,
 } from "../workers/analysis-worker.js";
 import {
   C5_TEST_SOURCE_SHA256,
@@ -679,10 +680,25 @@ function rankedOutcome(
   };
 }
 
-function competitivePolicyActivation(
-  receipt: typeof passingWorkflowBenchmarkReceiptFixture,
-  id: string,
-) {
+type PolicyReceiptFacts = Readonly<{
+  id: string;
+  receiptSha256: string;
+  schemaVersion: "workflow-benchmark-receipt-v1";
+  workflow: Readonly<{
+    workspaceId: string;
+    workflowId: "revelai-wall-pass-geometry-v1";
+    workflowVersion: "1.0.0";
+    modelBundleId: string;
+    providerVersion: string;
+  }>;
+  evidence: Readonly<{
+    calibrationEvidenceVersion: string;
+    extractionEvidenceVersion: "c5-frame-manifest-v1";
+    observationEvidenceVersion: "wall-pass-geometry-evidence-v1";
+  }>;
+}>;
+
+function competitivePolicyActivation(receipt: PolicyReceiptFacts, id: string) {
   return {
     id,
     receiptId: receipt.id,
@@ -2976,7 +2992,8 @@ describe("SQLiteAttemptRepository", () => {
       repository: fixture.repository,
       process: async () => {
         calls += 1;
-        if (calls === 1) throw new Error("temporary processor rejection");
+        if (calls === 1)
+          throw new RetryableProcessingFailure("temporary processor rejection");
         return freeOutcome(ATTEMPT_A, fixture.clock.now());
       },
     });
@@ -3020,7 +3037,7 @@ describe("SQLiteAttemptRepository", () => {
       repository: fixture.repository,
       process: async () => {
         calls += 1;
-        throw new Error("permanent processor failure");
+        throw new RetryableProcessingFailure("permanent processor failure");
       },
       unexpectedRetryPolicy: {
         maxAttempts: 2,
@@ -3069,7 +3086,7 @@ describe("SQLiteAttemptRepository", () => {
     ).toMatchObject({ count: 1 });
   });
 
-  it("settles an invalid classified candidate through fallback terminalization instead of acknowledging a live claim", async () => {
+  it("settles an invalid classified candidate as one internal terminal result without spending a retry", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
       athleteId: ATHLETE_A,
@@ -3088,6 +3105,7 @@ describe("SQLiteAttemptRepository", () => {
     const scheduler = new ManualScheduler();
     const queue = new InMemoryAnalysisQueue({ scheduler });
     let calls = 0;
+    let fallbackBuilds = 0;
     const worker = new AnalysisWorker({
       queue,
       repository: fixture.repository,
@@ -3100,14 +3118,17 @@ describe("SQLiteAttemptRepository", () => {
       unexpectedRetryPolicy: {
         maxAttempts: 2,
         delayMilliseconds: 0,
-        terminalCandidate: ({ job: failedJob, claim }) => ({
-          state: "failed",
-          attemptId: failedJob.attemptId,
-          mode: claim.mode,
-          code: "analysis_internal_error",
-          message: FailureMessageByCode.analysis_internal_error,
-          retryable: false,
-        }),
+        terminalCandidate: ({ job: failedJob, claim }) => {
+          fallbackBuilds += 1;
+          return {
+            state: "failed",
+            attemptId: failedJob.attemptId,
+            mode: claim.mode,
+            code: "analysis_internal_error",
+            message: FailureMessageByCode.analysis_internal_error,
+            retryable: false,
+          };
+        },
       },
       retryWaiter: { wait: async () => undefined },
     });
@@ -3117,8 +3138,13 @@ describe("SQLiteAttemptRepository", () => {
     await scheduler.runAll();
     stop();
 
-    expect({ calls, scheduled: scheduler.tasks.length }).toEqual({
-      calls: 2,
+    expect({
+      calls,
+      fallbackBuilds,
+      scheduled: scheduler.tasks.length,
+    }).toEqual({
+      calls: 1,
+      fallbackBuilds: 0,
       scheduled: 0,
     });
     expect(
@@ -3139,7 +3165,7 @@ describe("SQLiteAttemptRepository", () => {
     ).toMatchObject({ count: 1 });
   });
 
-  it("recovers a transient finalizer rejection through a new claim and terminalizes once", async () => {
+  it("replaces a transient finalizer rejection with one internal terminal result without a new claim", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
       athleteId: ATHLETE_A,
@@ -3159,6 +3185,7 @@ describe("SQLiteAttemptRepository", () => {
     const queue = new InMemoryAnalysisQueue({ scheduler });
     let processCalls = 0;
     let finalizerCalls = 0;
+    let recoveryWrites = 0;
     const worker = new AnalysisWorker({
       queue,
       repository: {
@@ -3166,8 +3193,10 @@ describe("SQLiteAttemptRepository", () => {
           fixture.repository.claimProcessing(queuedJob),
         releaseProcessingClaim: (input) =>
           fixture.repository.releaseProcessingClaim(input),
-        recordProcessingFailure: (input) =>
-          fixture.repository.recordProcessingFailure(input),
+        recordProcessingFailure: async (input) => {
+          recoveryWrites += 1;
+          return fixture.repository.recordProcessingFailure(input);
+        },
         deadLetterProcessingClaim: (input) =>
           fixture.repository.deadLetterProcessingClaim(input),
         finalizeTerminalResult: async (input) => {
@@ -3191,10 +3220,12 @@ describe("SQLiteAttemptRepository", () => {
     expect({
       processCalls,
       finalizerCalls,
+      recoveryWrites,
       scheduled: scheduler.tasks.length,
     }).toEqual({
-      processCalls: 2,
+      processCalls: 1,
       finalizerCalls: 2,
+      recoveryWrites: 0,
       scheduled: 0,
     });
     expect(
@@ -3206,7 +3237,7 @@ describe("SQLiteAttemptRepository", () => {
     ).toMatchObject({ count: 1 });
   });
 
-  it("settles permanent candidate finalizer rejections through its bounded fallback", async () => {
+  it("settles permanent candidate finalizer rejections through one internal terminal fallback", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
       athleteId: ATHLETE_A,
@@ -3225,6 +3256,8 @@ describe("SQLiteAttemptRepository", () => {
     const scheduler = new ManualScheduler();
     const queue = new InMemoryAnalysisQueue({ scheduler });
     let finalizerCalls = 0;
+    let recoveryWrites = 0;
+    let fallbackBuilds = 0;
     const worker = new AnalysisWorker({
       queue,
       repository: {
@@ -3232,8 +3265,10 @@ describe("SQLiteAttemptRepository", () => {
           fixture.repository.claimProcessing(queuedJob),
         releaseProcessingClaim: (input) =>
           fixture.repository.releaseProcessingClaim(input),
-        recordProcessingFailure: (input) =>
-          fixture.repository.recordProcessingFailure(input),
+        recordProcessingFailure: async (input) => {
+          recoveryWrites += 1;
+          return fixture.repository.recordProcessingFailure(input);
+        },
         deadLetterProcessingClaim: (input) =>
           fixture.repository.deadLetterProcessingClaim(input),
         finalizeTerminalResult: async (input) => {
@@ -3247,14 +3282,17 @@ describe("SQLiteAttemptRepository", () => {
       unexpectedRetryPolicy: {
         maxAttempts: 2,
         delayMilliseconds: 0,
-        terminalCandidate: ({ job: failedJob, claim }) => ({
-          state: "failed",
-          attemptId: failedJob.attemptId,
-          mode: claim.mode,
-          code: "analysis_internal_error",
-          message: FailureMessageByCode.analysis_internal_error,
-          retryable: false,
-        }),
+        terminalCandidate: ({ job: failedJob, claim }) => {
+          fallbackBuilds += 1;
+          return {
+            state: "failed",
+            attemptId: failedJob.attemptId,
+            mode: claim.mode,
+            code: "analysis_internal_error",
+            message: FailureMessageByCode.analysis_internal_error,
+            retryable: false,
+          };
+        },
       },
       retryWaiter: { wait: async () => undefined },
     });
@@ -3264,8 +3302,15 @@ describe("SQLiteAttemptRepository", () => {
     await scheduler.runAll();
     stop();
 
-    expect({ finalizerCalls, scheduled: scheduler.tasks.length }).toEqual({
-      finalizerCalls: 3,
+    expect({
+      finalizerCalls,
+      recoveryWrites,
+      fallbackBuilds,
+      scheduled: scheduler.tasks.length,
+    }).toEqual({
+      finalizerCalls: 2,
+      recoveryWrites: 0,
+      fallbackBuilds: 0,
       scheduled: 0,
     });
     expect(
@@ -3286,7 +3331,7 @@ describe("SQLiteAttemptRepository", () => {
     ).toMatchObject({ count: 1 });
   });
 
-  it("dead-letters a permanently broken fallback builder without leaving a live claim", async () => {
+  it("replaces a broken exhausted retry fallback builder with one internal terminal result", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
       athleteId: ATHLETE_A,
@@ -3309,7 +3354,7 @@ describe("SQLiteAttemptRepository", () => {
       queue,
       repository: fixture.repository,
       process: async () => {
-        throw new Error("permanent processor failure");
+        throw new RetryableProcessingFailure("permanent processor failure");
       },
       unexpectedRetryPolicy: {
         maxAttempts: 1,
@@ -3336,14 +3381,17 @@ describe("SQLiteAttemptRepository", () => {
         attemptId: ATTEMPT_A,
         athleteId: ATHLETE_A,
       }),
-    ).toMatchObject({ status: "uploaded", outcome: { state: "pending" } });
+    ).toMatchObject({
+      status: "failed",
+      outcome: { code: "analysis_internal_error", retryable: false },
+    });
     expect(
       fixture.database.raw
         .prepare(
           "SELECT state FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
         )
         .get(ATTEMPT_A, job.generation),
-    ).toEqual({ state: "dead-lettered" });
+    ).toBeUndefined();
     expect(await fixture.repository.claimProcessing(job)).toBeNull();
     expect(
       fixture.database.raw
@@ -3351,10 +3399,10 @@ describe("SQLiteAttemptRepository", () => {
           "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
         )
         .get(ATTEMPT_A),
-    ).toMatchObject({ count: 0 });
+    ).toMatchObject({ count: 1 });
   });
 
-  it("dead-letters an invalid fallback candidate without leaving a live claim", async () => {
+  it("replaces an invalid exhausted retry fallback candidate with one internal terminal result", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
       athleteId: ATHLETE_A,
@@ -3376,7 +3424,7 @@ describe("SQLiteAttemptRepository", () => {
       queue,
       repository: fixture.repository,
       process: async () => {
-        throw new Error("permanent processor failure");
+        throw new RetryableProcessingFailure("permanent processor failure");
       },
       unexpectedRetryPolicy: {
         maxAttempts: 1,
@@ -3397,17 +3445,20 @@ describe("SQLiteAttemptRepository", () => {
         attemptId: ATTEMPT_A,
         athleteId: ATHLETE_A,
       }),
-    ).toMatchObject({ status: "uploaded", outcome: { state: "pending" } });
+    ).toMatchObject({
+      status: "failed",
+      outcome: { code: "analysis_internal_error", retryable: false },
+    });
     expect(
       fixture.database.raw
         .prepare(
           "SELECT state FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
         )
         .get(ATTEMPT_A, job.generation),
-    ).toEqual({ state: "dead-lettered" });
+    ).toBeUndefined();
   });
 
-  it("dead-letters a permanently rejecting fallback finalizer without automatic redelivery", async () => {
+  it("leaves a permanently rejecting finalizer claim unacknowledged without retry accounting", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
       athleteId: ATHLETE_A,
@@ -3472,14 +3523,14 @@ describe("SQLiteAttemptRepository", () => {
         attemptId: ATTEMPT_A,
         athleteId: ATHLETE_A,
       }),
-    ).toMatchObject({ status: "uploaded", outcome: { state: "pending" } });
+    ).toMatchObject({ status: "processing", outcome: { state: "pending" } });
     expect(
       fixture.database.raw
         .prepare(
-          "SELECT state FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
+          "SELECT COUNT(*) AS count FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
         )
         .get(ATTEMPT_A, job.generation),
-    ).toEqual({ state: "dead-lettered" });
+    ).toEqual({ count: 0 });
   });
 
   it("reclaims an exact-boundary lease instead of acknowledging its unfinished result", async () => {
@@ -3737,7 +3788,9 @@ describe("SQLiteAttemptRepository", () => {
       queue,
       repository: fixture.repository,
       process: async () => {
-        throw new Error("processor fault after exhausted recovery budget");
+        throw new RetryableProcessingFailure(
+          "processor fault after exhausted recovery budget",
+        );
       },
       unexpectedRetryPolicy: {
         maxAttempts: 1,
@@ -3799,7 +3852,7 @@ describe("SQLiteAttemptRepository", () => {
     expect(await resumed.claimProcessing(job)).toBeNull();
   });
 
-  it("releases a claim and preserves redelivery when SQLite rejects recovery accounting", async () => {
+  it("replaces rejected recovery accounting with one internal terminal result", async () => {
     await fixture.repository.createAttempt({
       id: ATTEMPT_A,
       athleteId: ATHLETE_A,
@@ -3828,30 +3881,33 @@ describe("SQLiteAttemptRepository", () => {
       queue,
       repository: fixture.repository,
       process: async () => {
-        throw new Error("processor failure");
+        throw new RetryableProcessingFailure("processor failure");
       },
       retryWaiter: { wait: async () => undefined },
     });
     const stop = worker.start();
 
     await queue.enqueue(job);
-    await scheduler.tasks.shift()!();
+    await scheduler.runAll();
     stop();
 
-    expect(scheduler.tasks).toHaveLength(1);
+    expect(scheduler.tasks).toHaveLength(0);
     expect(
       await fixture.repository.getAttempt({
         attemptId: ATTEMPT_A,
         athleteId: ATHLETE_A,
       }),
-    ).toMatchObject({ status: "uploaded", outcome: { state: "pending" } });
+    ).toMatchObject({
+      status: "failed",
+      outcome: { code: "analysis_internal_error", retryable: false },
+    });
     expect(
       fixture.database.raw
         .prepare(
           "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
         )
         .get(ATTEMPT_A),
-    ).toMatchObject({ count: 0 });
+    ).toMatchObject({ count: 1 });
     expect(
       fixture.database.raw
         .prepare(
@@ -6295,16 +6351,39 @@ describe("SQLiteAttemptRepository", () => {
     ).resolves.toBeNull();
   });
 
-  it("snapshots the exact database once and seals policy lookup from later raw prepare mutation", async () => {
+  it("snapshots the exact database and statement reader before later policy lookup mutations", async () => {
     let databaseReads = 0;
-    const policy = new SQLiteCompetitivePolicyRepository({
-      get database() {
-        databaseReads += 1;
-        if (databaseReads > 1) throw new Error("policy database re-read");
-        return fixture.database;
+    const raw = fixture.database.raw;
+    const prepare = raw.prepare.bind(raw);
+    const rawPrepareDescriptor = Object.getOwnPropertyDescriptor(
+      raw,
+      "prepare",
+    );
+    let policyStatement: object | undefined;
+    Object.defineProperty(raw, "prepare", {
+      configurable: true,
+      value(source: string) {
+        const statement = prepare(source);
+        if (source.includes("FROM approved_competitive_model_policies"))
+          policyStatement = statement;
+        return statement;
       },
-      clock: fixture.clock,
     });
+    let policy: SQLiteCompetitivePolicyRepository;
+    try {
+      policy = new SQLiteCompetitivePolicyRepository({
+        get database() {
+          databaseReads += 1;
+          if (databaseReads > 1) throw new Error("policy database re-read");
+          return fixture.database;
+        },
+        clock: fixture.clock,
+      });
+    } finally {
+      if (rawPrepareDescriptor)
+        Object.defineProperty(raw, "prepare", rawPrepareDescriptor);
+      else Reflect.deleteProperty(raw, "prepare");
+    }
     expect(databaseReads).toBe(1);
     const tuple = competitivePolicyActivation(
       passingWorkflowBenchmarkReceiptFixture,
@@ -6315,7 +6394,29 @@ describe("SQLiteAttemptRepository", () => {
     const port = resolveProductionSQLiteCompetitivePolicyLookupPort(policy);
     if (!port) throw new Error("expected a factory-issued policy lookup port");
 
-    const raw = fixture.database.raw;
+    const statementPrototype = Object.getPrototypeOf(
+      raw.prepare("SELECT 1"),
+    ) as { get: (...parameters: unknown[]) => unknown };
+    const getDescriptor = Object.getOwnPropertyDescriptor(
+      statementPrototype,
+      "get",
+    );
+    if (!getDescriptor || typeof getDescriptor.value !== "function")
+      throw new Error("expected a SQLite statement get method");
+    try {
+      Object.defineProperty(statementPrototype, "get", {
+        configurable: true,
+        value: () => undefined,
+      });
+      // This is the first lazy policy lookup. Its statement reader must have
+      // been captured at adapter issuance, before this prototype mutation.
+      await expect(port.lookup.getActivePolicy(tuple)).resolves.toMatchObject({
+        id: tuple.id,
+      });
+    } finally {
+      Object.defineProperty(statementPrototype, "get", getDescriptor);
+    }
+
     const ownPrepare = raw.prepare;
     Object.defineProperty(raw, "prepare", {
       configurable: true,
@@ -6348,6 +6449,38 @@ describe("SQLiteAttemptRepository", () => {
       Object.defineProperty(prototype, "prepare", prototypeDescriptor);
     else Reflect.deleteProperty(prototype, "prepare");
     expect(ownPrepare).toBeTypeOf("function");
+
+    const originalGet = getDescriptor.value as (
+      this: object,
+      ...parameters: unknown[]
+    ) => unknown;
+    try {
+      if (!policyStatement)
+        throw new Error("expected a policy lookup statement");
+      const staleRow = Reflect.apply(originalGet, policyStatement, [
+        fixture.clock.current,
+        tuple.workspaceId,
+        tuple.modelBundleId,
+        tuple.workflowId,
+        tuple.workflowVersion,
+        tuple.providerVersion,
+        tuple.calibrationEvidenceVersion,
+        tuple.extractionEvidenceVersion,
+        tuple.observationEvidenceVersion,
+        tuple.challengeId,
+        tuple.challengeVersion,
+        tuple.ruleVersion,
+      ]);
+      Object.defineProperty(policyStatement, "get", {
+        configurable: true,
+        value: () => staleRow,
+      });
+      await policy.deactivateCompetitivePolicy({ id: tuple.id });
+      await expect(port.lookup.getActivePolicy(tuple)).resolves.toBeNull();
+    } finally {
+      if (policyStatement) Reflect.deleteProperty(policyStatement, "get");
+      Object.defineProperty(statementPrototype, "get", getDescriptor);
+    }
   });
 
   it("downgrades an already-eligible ranked candidate when its policy deactivates before C4 finalization", async () => {
