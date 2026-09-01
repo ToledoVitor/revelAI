@@ -5,17 +5,18 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/clean-production-dist.mjs && tsc --project tsconfig.build.json && pnpm run check:production-dist",
+    "build:workspace": "pnpm --filter @revelai/api... run build",
     "check:production-dist": "node scripts/assert-production-dist.mjs",
     "lint": "eslint src",
     "typecheck": "tsc --project tsconfig.json",
     "test": "vitest run --maxWorkers=4 --minWorkers=1",
-    "openapi:generate": "pnpm run build && node scripts/generate-openapi.mjs",
-    "openapi:check": "pnpm run build && node scripts/generate-openapi.mjs --check",
-    "benchmark:roboflow": "pnpm run build && node scripts/benchmark-roboflow-wall-pass.mjs",
-    "demo:start": "pnpm --filter @revelai/config run build && pnpm run build && node scripts/start-local-demo.mjs",
-    "demo:smoke": "pnpm --filter @revelai/config run build && pnpm run build && node scripts/start-local-demo.mjs --check && node scripts/local-demo-check-regression.mjs",
-    "operator:receipt-import": "pnpm --filter @revelai/config run build && pnpm --filter @revelai/contracts run build && pnpm run build && node scripts/import-benchmark-receipt.mjs",
-    "operator:receipt-smoke": "pnpm --filter @revelai/config run build && pnpm --filter @revelai/contracts run build && pnpm run build && node scripts/operator-receipt-smoke.mjs"
+    "openapi:generate": "pnpm run build:workspace && node scripts/generate-openapi.mjs",
+    "openapi:check": "pnpm run build:workspace && node scripts/generate-openapi.mjs --check",
+    "benchmark:roboflow": "pnpm run build:workspace && node scripts/benchmark-roboflow-wall-pass.mjs",
+    "demo:start": "pnpm run build:workspace && node scripts/start-local-demo.mjs",
+    "demo:smoke": "pnpm run build:workspace && node scripts/start-local-demo.mjs --check && node scripts/local-demo-check-regression.mjs",
+    "operator:receipt-import": "pnpm run build:workspace && node scripts/import-benchmark-receipt.mjs",
+    "operator:receipt-smoke": "pnpm run build:workspace && node scripts/operator-receipt-smoke.mjs"
   },
   "dependencies": {
     "@fastify/busboy": "3.2.2",

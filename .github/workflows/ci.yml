@@ -39,6 +39,7 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm run ci:clean-api-executables
       - run: pnpm --filter @revelai/api run demo:smoke
       - run: pnpm --filter @revelai/api run operator:receipt-smoke
       - run: pnpm --filter @revelai/api run build
