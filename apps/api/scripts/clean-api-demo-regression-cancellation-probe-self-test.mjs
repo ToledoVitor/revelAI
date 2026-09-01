@@ -1,9 +1,23 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  assertArgumentsWithinConservativeLinuxLimit,
+  conservativeLinuxArgumentMaxBytes,
+  createStreamingTokenSearch,
+  processTableContains,
+} from "./clean-api-demo-regression-process-audit.mjs";
 
 if (process.platform === "win32") {
   throw new Error(
@@ -23,23 +37,28 @@ const probeTimeoutMs = 90_000;
 const terminationGraceMs = 500;
 const closeAfterKillMs = 5_000;
 const processAuditNoiseBytes = 128 * 1024;
+const processAuditNoiseChunkBytes = 16 * 1024;
+const processAuditNoiseChunkCount = 9;
+const processAuditMarkerEnvironment =
+  "REVELAI_CLEAN_API_AUDIT_PROCESS_MARKER";
 const foreignSession = sessionToken();
 const foreignFixture = await mkdtemp(
   join(tmpdir(), `${fixtureRoot}${foreignSession}-`),
 );
 const terminationMarker = join(foreignFixture, "terminated");
-const foreign = spawn(
-  process.execPath,
-  [
-    "-e",
-    `process.on("SIGTERM", () => { require("node:fs").writeFileSync(${JSON.stringify(
-      terminationMarker,
-    )}, "terminated"); }); setInterval(() => {}, 1_000);`,
-    "--",
-    `--revelai-clean-api-session=${foreignSession}`,
-  ],
-  { detached: true, stdio: "ignore" },
-);
+const foreignArguments = [
+  "-e",
+  `process.on("SIGTERM", () => { require("node:fs").writeFileSync(${JSON.stringify(
+    terminationMarker,
+  )}, "terminated"); }); setInterval(() => {}, 1_000);`,
+  "--",
+  `--revelai-clean-api-session=${foreignSession}`,
+];
+assertArgumentsWithinConservativeLinuxLimit(foreignArguments);
+const foreign = spawn(process.execPath, foreignArguments, {
+  detached: true,
+  stdio: "ignore",
+});
 const foreignClose = observeClose(foreign);
 
 try {
@@ -83,7 +102,8 @@ try {
   await assertExists(foreignFixture);
   await assertMissing(terminationMarker);
 
-  await assertProcessAuditFindsLateSession();
+  await assertRealSessionProcessAudit();
+  await assertSyntheticProcessAuditFindsLateSession();
 } finally {
   try {
     await terminateAndWait(foreign, foreignClose, { requireKill: true });
@@ -126,23 +146,62 @@ async function assertProcessTableKillReceipt(session) {
   }
 }
 
-async function assertProcessAuditFindsLateSession() {
+async function assertRealSessionProcessAudit() {
   const session = sessionToken();
-  const child = spawn(
-    process.execPath,
-    [
-      "-e",
-      "process.on('SIGTERM', () => {}); setInterval(() => {}, 1_000)",
-      "--",
-      "x".repeat(processAuditNoiseBytes + 4 * 1024),
-      `--revelai-clean-api-session=${session}`,
-    ],
-    { detached: true, stdio: "ignore" },
-  );
+  const childArguments = [
+    "-e",
+    "process.on('SIGTERM', () => {}); setInterval(() => {}, 1_000)",
+    "--",
+    `--revelai-clean-api-session=${session}`,
+  ];
+  assertArgumentsWithinConservativeLinuxLimit(childArguments);
+  const child = spawn(process.execPath, childArguments, {
+    detached: true,
+    stdio: "ignore",
+  });
   const close = observeClose(child);
 
   try {
-    assertChunkBoundarySearch(`--revelai-clean-api-session=${session}`);
+    await assertSessionAuditDetectsLiveSession(session);
+  } finally {
+    await terminateAndWait(child, close, { requireKill: true });
+  }
+  await assertNoSessionProcesses(session);
+}
+
+async function assertSyntheticProcessAuditFindsLateSession() {
+  const session = sessionToken();
+  const marker = `--revelai-clean-api-session=${session}`;
+  const executableDirectory = await mkdtemp(
+    join(tmpdir(), "revelai-clean-api-process-audit-"),
+  );
+  const executable = join(executableDirectory, "ps");
+  const previousPath = process.env.PATH;
+  const previousMarker = process.env[processAuditMarkerEnvironment];
+
+  try {
+    await writeFile(executable, syntheticProcessTableScript(), {
+      mode: 0o700,
+    });
+    await chmod(executable, 0o700);
+    assertArgumentsWithinConservativeLinuxLimit([
+      "-ww",
+      "-axo",
+      "command=",
+    ]);
+    assertOversizedLinuxArgumentIsRejected();
+    if (
+      processAuditNoiseChunkBytes * processAuditNoiseChunkCount <=
+      processAuditNoiseBytes
+    ) {
+      throw new Error(failure);
+    }
+    process.env.PATH = [executableDirectory, previousPath]
+      .filter((entry) => entry !== undefined && entry.length > 0)
+      .join(delimiter);
+    process.env[processAuditMarkerEnvironment] = marker;
+    assertChunkBoundarySearch(marker);
+
     let rejected = false;
     try {
       await assertNoSessionProcesses(session);
@@ -151,8 +210,50 @@ async function assertProcessAuditFindsLateSession() {
     }
     if (!rejected) throw new Error(failure);
   } finally {
-    await terminateAndWait(child, close, { requireKill: true });
+    restoreEnvironment(processAuditMarkerEnvironment, previousMarker);
+    restoreEnvironment("PATH", previousPath);
+    await rm(executableDirectory, { recursive: true, force: true });
   }
+}
+
+async function assertSessionAuditDetectsLiveSession(session) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      await assertNoSessionProcesses(session);
+    } catch (error) {
+      if (error instanceof Error && error.message === failure) return;
+      throw error;
+    }
+    await wait(25);
+  }
+  throw new Error(failure);
+}
+
+function syntheticProcessTableScript() {
+  return `#!/usr/bin/env node
+const marker = process.env.${processAuditMarkerEnvironment};
+if (typeof marker !== "string") process.exit(2);
+const noise = "x".repeat(${processAuditNoiseChunkBytes});
+for (let chunk = 0; chunk < ${processAuditNoiseChunkCount}; chunk += 1) {
+  process.stdout.write(noise);
+}
+const split = Math.max(1, Math.floor(marker.length / 2));
+process.stdout.write(marker.slice(0, split));
+process.stdout.write(marker.slice(split));
+`;
+}
+
+function assertOversizedLinuxArgumentIsRejected() {
+  let rejected = false;
+  try {
+    assertArgumentsWithinConservativeLinuxLimit([
+      "x".repeat(conservativeLinuxArgumentMaxBytes + 1),
+    ]);
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) throw new Error(failure);
 }
 
 function runProbe(environment) {
@@ -160,7 +261,9 @@ function runProbe(environment) {
     let output = "";
     let settled = false;
     let killTimer;
-    const child = spawn(process.execPath, [probe], {
+    const childArguments = [probe];
+    assertArgumentsWithinConservativeLinuxLimit(childArguments);
+    const child = spawn(process.execPath, childArguments, {
       detached: true,
       env: { ...process.env, ...environment },
       stdio: ["ignore", "pipe", "pipe"],
@@ -230,62 +333,14 @@ async function assertNoSessionFixtures(session) {
 }
 
 async function assertNoSessionProcesses(session) {
-  if (await processTableContains(`--revelai-clean-api-session=${session}`)) {
+  try {
+    if (await processTableContains(`--revelai-clean-api-session=${session}`)) {
+      throw new Error(failure);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === failure) throw error;
     throw new Error(failure);
   }
-}
-
-function processTableContains(needle) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let killTimer;
-    const search = createStreamingTokenSearch(needle);
-    const child = spawn("ps", ["-ww", "-axo", "command="], {
-      detached: true,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const close = observeClose(child);
-    const timeout = setTimeout(() => {
-      terminate(child.pid);
-      killTimer = setTimeout(() => kill(child.pid), terminationGraceMs);
-    }, 5_000);
-    const settle = (callback) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      clearTimeout(killTimer);
-      callback();
-    };
-    child.stdout.on("data", (chunk) => {
-      search.push(chunk);
-    });
-    child.once("error", () => settle(() => reject(new Error(failure))));
-    child.once("close", (exitCode) => {
-      if (exitCode !== 0) {
-        settle(() => reject(new Error(failure)));
-        return;
-      }
-      settle(() => resolve(search.found));
-    });
-
-    void close.closed.catch(() => undefined);
-  });
-}
-
-function createStreamingTokenSearch(needle) {
-  let found = false;
-  let overlap = "";
-  return Object.freeze({
-    get found() {
-      return found;
-    },
-    push(chunk) {
-      if (found) return;
-      const text = overlap + Buffer.from(chunk).toString("utf8");
-      found = text.includes(needle);
-      overlap = text.slice(-(needle.length - 1));
-    },
-  });
 }
 
 function assertChunkBoundarySearch(needle) {
@@ -293,6 +348,15 @@ function assertChunkBoundarySearch(needle) {
   search.push(Buffer.from(needle.slice(0, -1)));
   search.push(Buffer.from(needle.slice(-1)));
   if (!search.found) throw new Error(failure);
+}
+
+function restoreEnvironment(name, value) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function terminateAndWait(child, close, { requireKill }) {
