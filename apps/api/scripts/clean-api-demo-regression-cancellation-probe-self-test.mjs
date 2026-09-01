@@ -31,7 +31,7 @@ const foreign = spawn(
     "-e",
     `process.on("SIGTERM", () => { require("node:fs").writeFileSync(${JSON.stringify(
       terminationMarker,
-    )}, "terminated"); }); setInterval(() => {}, 1_000);`,
+    )}, "terminated"); process.exit(0); }); setInterval(() => {}, 1_000);`,
     "--",
     `--revelai-clean-api-session=${foreignSession}`,
   ],
@@ -49,6 +49,7 @@ try {
 
     assertGenericFailure(result);
     await assertNoSessionFixtures(session);
+    await assertNoSessionProcesses(session);
     assertActive(foreign.pid);
     await assertExists(foreignFixture);
   }
@@ -63,6 +64,7 @@ try {
 
   assertGenericFailure(staleResult);
   await assertNoSessionFixtures(staleSession);
+  await assertNoSessionProcesses(staleSession);
   assertActive(foreign.pid);
   await assertExists(foreignFixture);
   await assertMissing(terminationMarker);
@@ -127,6 +129,49 @@ async function assertNoSessionFixtures(session) {
     entry.startsWith(prefix),
   );
   if (remaining.length !== 0) throw new Error(failure);
+}
+
+async function assertNoSessionProcesses(session) {
+  const output = await readProcessTable();
+  if (output.includes(`--revelai-clean-api-session=${session}`)) {
+    throw new Error(failure);
+  }
+}
+
+function readProcessTable() {
+  return new Promise((resolve, reject) => {
+    let output = "";
+    let settled = false;
+    const child = spawn("ps", ["-axo", "command="], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      settle(() => reject(new Error(failure)));
+    }, 5_000);
+    const settle = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
+
+    child.stdout.on("data", (chunk) => {
+      if (output.length < 128 * 1024) {
+        output += Buffer.from(chunk)
+          .toString("utf8")
+          .slice(0, 128 * 1024 - output.length);
+      }
+    });
+    child.once("error", () => settle(() => reject(new Error(failure))));
+    child.once("close", (exitCode) => {
+      if (exitCode !== 0) {
+        settle(() => reject(new Error(failure)));
+        return;
+      }
+      settle(() => resolve(output));
+    });
+  });
 }
 
 function assertActive(pid) {
