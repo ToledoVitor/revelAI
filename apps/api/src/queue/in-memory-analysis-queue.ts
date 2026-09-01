@@ -12,11 +12,14 @@ export type QueueScheduler = Readonly<{
 
 type QueueOptions = Readonly<{
   available?: () => boolean | Promise<boolean>;
+  /** Lets a local host reject one delivery before it becomes visible. */
+  beforeEnqueue?: (job: AnalysisJob) => void | Promise<void>;
   scheduler?: QueueScheduler;
 }>;
 
 type QueueState = {
   readonly available: () => boolean | Promise<boolean>;
+  readonly beforeEnqueue: (job: AnalysisJob) => void | Promise<void>;
   readonly pending: AnalysisJob[];
   readonly subscribers: Set<
     Readonly<{
@@ -81,6 +84,7 @@ export class InMemoryAnalysisQueue implements AnalysisQueue {
     const schedule = scheduler.schedule;
     const state: QueueState = {
       available: options.available ?? (() => true),
+      beforeEnqueue: options.beforeEnqueue ?? (() => undefined),
       pending: [],
       subscribers: new Set(),
       drainScheduled: false,
@@ -125,7 +129,9 @@ export class InMemoryAnalysisQueue implements AnalysisQueue {
     };
     const enqueue = async (job: AnalysisJob): Promise<void> => {
       if (!(await isAvailable())) throw new QueueUnavailableError();
-      state.pending.push(Object.freeze({ ...job }));
+      const accepted = Object.freeze({ ...job });
+      await state.beforeEnqueue(accepted);
+      state.pending.push(accepted);
       scheduleDrain();
     };
     const subscribe = (
