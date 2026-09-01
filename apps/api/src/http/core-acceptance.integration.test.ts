@@ -40,10 +40,17 @@ import { createC5PipelineTestSupport } from "../media/c5-pipeline-test-support.j
 import { SQLiteRetentionRepository } from "../media/sqlite-retention-repository.js";
 import { createVerifiedFixtureVisionProvider } from "../processing/c7-fixture.test-support.js";
 import {
+  registerTestDiagnostic,
+  type TestDiagnostic,
+} from "../internal/test-diagnostics.js";
+import {
   InMemoryAnalysisQueue,
   type QueueScheduler,
 } from "../queue/in-memory-analysis-queue.js";
-import { SQLiteAttemptRepository } from "../repositories/sqlite-attempt-repository.js";
+import {
+  resolveProductionSQLiteAttemptProcessingPort,
+  SQLiteAttemptRepository,
+} from "../repositories/sqlite-attempt-repository.js";
 import { SQLiteCompetitivePolicyRepository } from "../repositories/sqlite-competitive-policy-repository.js";
 import { createLocalC8AcceptedMediaCleaner } from "../services/local-c8-accepted-media-cleaner.js";
 import type { BoundedFrameProcessRunner } from "../storage/local-frame-extraction.js";
@@ -126,18 +133,25 @@ async function waitForC4Boundary(
   gate: Promise<void>,
   operation: string,
 ): Promise<void> {
-  await Promise.race([
-    gate,
-    new Promise<never>((_resolve, reject) => {
-      setTimeout(
-        () =>
-          reject(
-            new Error(`C4 ${operation} did not reach its transaction boundary`),
-          ),
-        5_000,
-      );
-    }),
-  ]);
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      gate,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `C4 ${operation} did not reach its transaction boundary`,
+              ),
+            ),
+          5_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 afterEach(async () => {
@@ -243,23 +257,12 @@ describe("Core acceptance through the production Fastify seam", () => {
 
   it("keeps a portrait Free multipart flow personal, noncompetitive, and retryable after an incomplete upload", async () => {
     const free = trackedFreeProvider();
-    const forbiddenPorts = trackedFreeForbiddenPorts();
+    const diagnostics = trackedC10Diagnostics();
     const probeInputs: Array<Readonly<{ magicContainer: string }>> = [];
     const fixture = await makeRoot({
       verifiedProvider: createDemoVisionProvider(),
       freeProvider: free.provider,
-      freeForbiddenPorts: forbiddenPorts.ports,
-      c4OperationObserver: Object.freeze({
-        onCalibration: forbiddenPorts.ports.forbidCalibration,
-        onRankedFinalization: forbiddenPorts.ports.forbidRankedFinalization,
-        onLeaderboardWrite: forbiddenPorts.ports.forbidLeaderboard,
-      }),
-      policyLookupObserver: Object.freeze({
-        beforeLookup: forbiddenPorts.ports.forbidPolicyLookup,
-      }),
-      verifiedIntegrityScoringObserver: Object.freeze({
-        beforeIntegrityScoring: forbiddenPorts.ports.forbidIntegrityScoring,
-      }),
+      diagnostics: diagnostics.observer,
       approvedPolicy: true,
       c5Mode: "free",
       c5Prober: {
@@ -380,8 +383,8 @@ describe("Core acceptance through the production Fastify seam", () => {
       ]);
       expect(free.freeCalls).toBe(128);
       expect(free.verifiedCalls).toBe(0);
-      expect(forbiddenPorts.freeTerminalPersistenceCalls).toBe(1);
-      expect(forbiddenPorts.calls).toEqual({
+      expect(diagnostics.freeTerminalPersistenceCalls).toBe(1);
+      expect(diagnostics.calls).toEqual({
         calibration: 0,
         integrityScoring: 0,
         policyLookup: 0,
@@ -395,6 +398,13 @@ describe("Core acceptance through the production Fastify seam", () => {
           )
           .get(),
       ).toEqual({ count: 1 });
+      expect(
+        fixture.database.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'c10_free_forbid_%'",
+          )
+          .get(),
+      ).toEqual({ count: 0 });
 
       expect(receipt).toMatchObject({
         kind: "c5-storage-extraction-receipt-v1",
@@ -742,8 +752,10 @@ describe("Core acceptance through the production Fastify seam", () => {
     const finalizationEntered = deferred<void>();
     const tombstoneEntered = deferred<void>();
     const release = deferred<void>();
-    const boundary = Object.freeze({
-      beforeEnter: async (input: Readonly<{ operation: string }>) => {
+    const diagnostics = Object.freeze({
+      beforeC4TransactionEntry: async (
+        input: Readonly<{ operation: string }>,
+      ) => {
         if (input.operation === "finalize") finalizationEntered.resolve();
         if (input.operation === "tombstone") tombstoneEntered.resolve();
         await release.promise;
@@ -753,7 +765,7 @@ describe("Core acceptance through the production Fastify seam", () => {
       verifiedProvider: createVerifiedFixtureVisionProvider("roboflow"),
       approvedPolicy: true,
       c5Mode: "verified",
-      transactionBoundary: boundary,
+      diagnostics,
     });
     let secondary: Awaited<ReturnType<typeof makeRoot>> | undefined;
     try {
@@ -765,7 +777,7 @@ describe("Core acceptance through the production Fastify seam", () => {
         root: primary.root,
         repositoryIdPrefix: "cccccccc",
         appIdPrefix: "eeeeeeee",
-        transactionBoundary: boundary,
+        diagnostics,
       });
       const attempt = await createVerifiedAttempt(primary.app);
       const finalizer = runNext(primary.scheduler);
@@ -1105,6 +1117,125 @@ describe("Core acceptance through the production Fastify seam", () => {
       await cameraContinuity.close();
     }
   }, 30_000);
+
+  it("enters unobserved C4 finalization and tombstone transactions before its caller continues", async () => {
+    const fixture = await makeRoot({
+      verifiedProvider: createDemoVisionProvider(),
+      c5Mode: "free",
+    });
+    try {
+      const attemptId = await createFreeAttempt(fixture.app);
+      const uploaded = await fixture.app.inject({
+        method: "POST",
+        url: `/v1/attempts/${attemptId}/media`,
+        headers: multipartHeaders("unobserved-c4-order"),
+        payload: multipart("unobserved-c4-order"),
+      });
+      expect(uploaded.statusCode).toBe(202);
+      const claim = await fixture.repository.claimProcessing({
+        attemptId,
+        generation: 1,
+        mode: "free",
+      });
+      if (!claim) throw new Error("C10 ordering fixture requires a claim");
+
+      const calls: string[] = [];
+      const exec = fixture.database.raw.exec.bind(fixture.database.raw);
+      const execSpy = vi
+        .spyOn(fixture.database.raw, "exec")
+        .mockImplementation((sql) => {
+          if (sql === "BEGIN IMMEDIATE" || sql === "COMMIT") calls.push(sql);
+          return exec(sql);
+        });
+      try {
+        const finalizing = fixture.repository.finalizeTerminalResult({
+          attemptId,
+          generation: claim.generation,
+          leaseId: claim.leaseId,
+          candidate: {
+            state: "failed",
+            attemptId,
+            mode: "free",
+            code: "analysis_temporary_unavailable",
+            message: "A análise está indisponível temporariamente.",
+            retryable: true,
+          },
+        });
+        calls.push("finalize-caller-next");
+        expect(calls).toEqual([
+          "BEGIN IMMEDIATE",
+          "COMMIT",
+          "finalize-caller-next",
+        ]);
+        await finalizing;
+
+        calls.splice(0);
+        const tombstoning = fixture.repository.tombstoneAttempt({
+          attemptId,
+          athleteId: ATHLETE_ID,
+        });
+        calls.push("tombstone-caller-next");
+        expect(calls).toEqual([
+          "BEGIN IMMEDIATE",
+          "COMMIT",
+          "tombstone-caller-next",
+        ]);
+        await tombstoning;
+      } finally {
+        execSpy.mockRestore();
+      }
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("clears the C4 transaction-boundary deadline after its barrier opens", async () => {
+    vi.useFakeTimers();
+    try {
+      const boundary = deferred<void>();
+      const waiting = waitForC4Boundary(boundary.promise, "timer cleanup");
+      expect(vi.getTimerCount()).toBe(1);
+
+      boundary.resolve();
+      await waiting;
+
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("contains private diagnostic failures without changing Free terminal behavior", async () => {
+    const fixture = await makeRoot({
+      verifiedProvider: createDemoVisionProvider(),
+      c5Mode: "free",
+      diagnostics: Object.freeze({
+        onEvent: () => {
+          throw new Error("test diagnostic must not affect production flow");
+        },
+        beforeC4TransactionEntry: () => {
+          throw new Error("test barrier must not affect production flow");
+        },
+      }),
+    });
+    try {
+      const attemptId = await createFreeAttempt(fixture.app);
+      const uploaded = await fixture.app.inject({
+        method: "POST",
+        url: `/v1/attempts/${attemptId}/media`,
+        headers: multipartHeaders("diagnostic-containment"),
+        payload: multipart("diagnostic-containment"),
+      });
+      expect(uploaded.statusCode).toBe(202);
+      await fixture.scheduler.runAll();
+      await expect(resultFor(fixture.app, attemptId)).resolves.toMatchObject({
+        state: "valid",
+        result: { kind: "free-insight" },
+      });
+    } finally {
+      await fixture.close();
+    }
+  });
 
   it("contains real local-storage create, chmod, publication, traversal, and symlink failures", async () => {
     const createFailure = await makeRoot({
@@ -2022,26 +2153,7 @@ async function makeRoot(
     c5Runner?: BoundedFrameProcessRunner;
     c5Renamer?: AtomicMediaRenamer;
     verifiedScheduler?: VisionBatchScheduler;
-    freeForbiddenPorts?: Readonly<{
-      forbidCalibration(): never;
-      forbidIntegrityScoring(): never;
-      forbidPolicyLookup(): never;
-      forbidRankedFinalization(): never;
-      forbidLeaderboard(): never;
-      allowFreeTerminalPersistence(): void;
-    }>;
-    c4OperationObserver?: Readonly<{
-      onCalibration(): never;
-      onRankedFinalization(): never;
-      onLeaderboardWrite(): never;
-    }>;
-    policyLookupObserver?: Readonly<{ beforeLookup(): never }>;
-    verifiedIntegrityScoringObserver?: Readonly<{
-      beforeIntegrityScoring(): never;
-    }>;
-    transactionBoundary?: Readonly<{
-      beforeEnter(input: Readonly<{ operation: string }>): Promise<void>;
-    }>;
+    diagnostics?: TestDiagnostic;
     logs?: unknown[];
     root?: string;
     activatePolicy?: boolean;
@@ -2067,6 +2179,7 @@ async function makeRoot(
   let policy: SQLiteCompetitivePolicyRepository | undefined;
   let closed = false;
   let now = NOW;
+  const freeProvider = input.freeProvider ?? createDemoVisionProvider();
 
   const start = async (activatePolicy: boolean): Promise<void> => {
     const c5 = createC5PipelineTestSupport({
@@ -2081,16 +2194,21 @@ async function makeRoot(
       clock: { now: () => now },
       ids: { next: ids(input.repositoryIdPrefix ?? "aaaaaaaa") },
       handoffVerifier: c5.handoffVerifier,
-      transactionBoundary: input.transactionBoundary,
-      operationObserver: input.c4OperationObserver,
     });
+    if (input.diagnostics) {
+      registerTestDiagnostic(repository, input.diagnostics);
+      const processing =
+        resolveProductionSQLiteAttemptProcessingPort(repository);
+      if (processing)
+        registerTestDiagnostic(processing.processing, input.diagnostics);
+    }
     const retention = new SQLiteRetentionRepository({ database });
     if (input.approvedPolicy) {
       policy = new SQLiteCompetitivePolicyRepository({
         database,
         clock: { now: () => NOW },
-        lookupObserver: input.policyLookupObserver,
       });
+      if (input.diagnostics) registerTestDiagnostic(policy, input.diagnostics);
       if (activatePolicy && input.approvedPolicy) {
         const receipt = WorkflowBenchmarkReceiptSchema.parse(
           passingWorkflowBenchmarkReceiptFixture,
@@ -2138,13 +2256,11 @@ async function makeRoot(
           }
         : {}),
       freeTraining: {
-        provider: input.freeProvider ?? createDemoVisionProvider(),
+        provider: freeProvider,
         clock: { now: () => now },
-        forbiddenPorts: input.freeForbiddenPorts,
       },
       verifiedTraining: {
         provider: input.verifiedProvider,
-        integrityScoringObserver: input.verifiedIntegrityScoringObserver,
         ...(input.verifiedScheduler
           ? { scheduler: input.verifiedScheduler }
           : {}),
@@ -2152,6 +2268,10 @@ async function makeRoot(
         clock: { now: () => now },
       },
     });
+    if (input.diagnostics) {
+      registerTestDiagnostic(freeProvider, input.diagnostics);
+      registerTestDiagnostic(input.verifiedProvider, input.diagnostics);
+    }
   };
   await start(input.activatePolicy ?? true);
   return {
@@ -2247,7 +2367,7 @@ function trackedFreeProvider() {
   });
 }
 
-function trackedFreeForbiddenPorts() {
+function trackedC10Diagnostics() {
   const calls = {
     calibration: 0,
     integrityScoring: 0,
@@ -2256,21 +2376,39 @@ function trackedFreeForbiddenPorts() {
     leaderboard: 0,
   };
   let freeTerminalPersistenceCalls = 0;
-  const forbid = (port: keyof typeof calls): never => {
-    calls[port] += 1;
-    throw new Error(`Free training invoked forbidden ${port} port`);
-  };
+  const observer: TestDiagnostic = Object.freeze({
+    onEvent: (event) => {
+      switch (event.kind) {
+        case "c4-calibration":
+          calls.calibration += 1;
+          return;
+        case "verified-integrity-scoring":
+        case "free-forbidden-integrity-scoring":
+          calls.integrityScoring += 1;
+          return;
+        case "policy-lookup":
+        case "free-forbidden-policy-lookup":
+          calls.policyLookup += 1;
+          return;
+        case "c4-ranked-finalization":
+        case "free-forbidden-ranked-finalization":
+          calls.rankedFinalization += 1;
+          return;
+        case "c4-leaderboard-write":
+        case "free-forbidden-leaderboard":
+        case "free-forbidden-finalization":
+          calls.leaderboard += 1;
+          return;
+        case "free-terminal-persistence":
+          freeTerminalPersistenceCalls += 1;
+          return;
+        case "free-forbidden-calibration":
+          calls.calibration += 1;
+      }
+    },
+  });
   return Object.freeze({
-    ports: Object.freeze({
-      forbidCalibration: () => forbid("calibration"),
-      forbidIntegrityScoring: () => forbid("integrityScoring"),
-      forbidPolicyLookup: () => forbid("policyLookup"),
-      forbidRankedFinalization: () => forbid("rankedFinalization"),
-      forbidLeaderboard: () => forbid("leaderboard"),
-      allowFreeTerminalPersistence: () => {
-        freeTerminalPersistenceCalls += 1;
-      },
-    }),
+    observer,
     get calls() {
       return Object.freeze({ ...calls });
     },

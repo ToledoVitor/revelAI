@@ -10,6 +10,7 @@ import { createDemoVisionProvider, VisionProviderError } from "@revelai/vision";
 import { openSqliteDatabase } from "../database/sqlite-database.js";
 import { createFactoryIssuedFreeTrainingRuntime } from "../composition/free-training-analysis-composition.js";
 import { createProductionFreeTrainingAttemptApi } from "../composition/free-training-analysis-composition.js";
+import { registerTestDiagnostic } from "../internal/test-diagnostics.js";
 import { createAttemptApi } from "../http/attempt-api.js";
 import { createC5PipelineTestSupport } from "../media/c5-pipeline-test-support.js";
 import {
@@ -20,6 +21,7 @@ import { createStoredMediaAttachment } from "../repositories/attempt-repository.
 import { SQLiteAttemptRepository } from "../repositories/sqlite-attempt-repository.js";
 import { SQLiteRetentionRepository } from "../media/sqlite-retention-repository.js";
 import { createAttemptReadService } from "./attempt-read-service.js";
+import { createFreeTrainingAnalysisProcessor } from "./free-training-analysis.js";
 
 const ATHLETE_ID = "11111111-1111-4111-8111-111111111111";
 const ATTEMPT_ID = "22222222-2222-4222-8222-222222222222";
@@ -48,6 +50,46 @@ class ManualScheduler implements QueueScheduler {
 }
 
 describe("Free Training analysis", () => {
+  it("fails closed when malformed Free durable context carries calibration", async () => {
+    const provider = {} as never;
+    const events: string[] = [];
+    registerTestDiagnostic(
+      provider,
+      Object.freeze({
+        onEvent: (event) => events.push(event.kind),
+      }),
+    );
+    const process = createFreeTrainingAnalysisProcessor({
+      getProcessingContext: async () =>
+        ({
+          upload: {
+            mode: "free",
+            verified: { calibrationSessionId: "must-not-reach-c6" },
+          },
+        }) as never,
+      reconstruct: async () => {
+        throw new Error("calibration guard must run before reconstruction");
+      },
+      frames: Object.freeze({
+        readFrame: async () => Buffer.alloc(0),
+      }),
+      provider,
+      clock: Object.freeze({ now: () => NOW }),
+    });
+
+    await expect(
+      process({
+        job: { attemptId: ATTEMPT_ID, generation: 1, mode: "free" },
+        claim: {
+          leaseId: "55555555-5555-4555-8555-555555555555",
+          generation: 1,
+          mode: "free",
+        },
+      }),
+    ).rejects.toThrow("Free processing cannot access calibration.");
+    expect(events).toEqual(["free-forbidden-calibration"]);
+  });
+
   it("claims a C5-backed Free job and durably finalizes only a parsed FreeInsight", async () => {
     const root = await mkdtemp(join(tmpdir(), "revelai-free-analysis-"));
     directories.push(root);
