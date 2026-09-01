@@ -4271,7 +4271,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toEqual({ count: 21 });
+    ).toEqual({ count: 22 });
     reopened.close();
   });
 
@@ -4292,10 +4292,10 @@ describe("SQLiteAttemptRepository", () => {
         .prepare("SELECT status FROM attempts WHERE id = ?")
         .get(ATTEMPT_A),
     ).toEqual({ status: "valid" });
-    expect(normalized.raw.pragma("user_version", { simple: true })).toBe(21);
+    expect(normalized.raw.pragma("user_version", { simple: true })).toBe(22);
     normalized.close();
 
-    const staleCurrent = openSqliteDatabaseAtVersionForTest(validFilename, 21);
+    const staleCurrent = openSqliteDatabaseAtVersionForTest(validFilename, 22);
     staleCurrent.raw.pragma("user_version = 0");
     staleCurrent.close();
 
@@ -4304,8 +4304,8 @@ describe("SQLiteAttemptRepository", () => {
       idempotent.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toEqual({ count: 21 });
-    expect(idempotent.raw.pragma("user_version", { simple: true })).toBe(21);
+    ).toEqual({ count: 22 });
+    expect(idempotent.raw.pragma("user_version", { simple: true })).toBe(22);
     expect(
       idempotent.raw
         .prepare("SELECT status FROM attempts WHERE id = ?")
@@ -4389,7 +4389,7 @@ describe("SQLiteAttemptRepository", () => {
         .prepare("SELECT status FROM attempts WHERE id = ?")
         .get(ATTEMPT_A),
     ).toEqual({ status: "valid" });
-    expect(repaired.raw.pragma("user_version", { simple: true })).toBe(21);
+    expect(repaired.raw.pragma("user_version", { simple: true })).toBe(22);
     repaired.close();
   });
 
@@ -4513,7 +4513,7 @@ describe("SQLiteAttemptRepository", () => {
       "migration-mirror-ahead.sqlite",
     );
     const current = openSqliteDatabase(aheadFilename);
-    current.raw.pragma("user_version = 22");
+    current.raw.pragma("user_version = 23");
     const before = migrationHistoryStateForTest(current);
     expect(() => openSqliteDatabase(aheadFilename)).toThrow(
       "sqlite migration history is invalid",
@@ -4530,7 +4530,7 @@ describe("SQLiteAttemptRepository", () => {
       20,
     );
     missingLedger.raw.exec("DROP TABLE schema_migrations");
-    missingLedger.raw.pragma("user_version = 22");
+    missingLedger.raw.pragma("user_version = 23");
     const missingLedgerBefore = missingLedgerStateForTest(missingLedger);
     expect(() => openSqliteDatabase(missingLedgerFilename)).toThrow(
       "sqlite migration history is invalid",
@@ -4595,7 +4595,7 @@ describe("SQLiteAttemptRepository", () => {
     );
     const predecessor = openSqliteDatabase(filename);
     predecessor.raw.pragma("journal_mode = DELETE");
-    predecessor.raw.pragma("user_version = 22");
+    predecessor.raw.pragma("user_version = 23");
     predecessor.close();
 
     const before = await durableStartupStateForTest(filename);
@@ -4633,17 +4633,17 @@ describe("SQLiteAttemptRepository", () => {
           ),
         ).resolves.toEqual(
           Array.from({ length: 4 }, () => ({
-            userVersion: 21,
-            migrationCount: 21,
+            userVersion: 22,
+            migrationCount: 22,
           })),
         );
         const reopened = openSqliteDatabase(filename);
-        expect(reopened.raw.pragma("user_version", { simple: true })).toBe(21);
+        expect(reopened.raw.pragma("user_version", { simple: true })).toBe(22);
         expect(
           reopened.raw
             .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
             .get(),
-        ).toEqual({ count: 21 });
+        ).toEqual({ count: 22 });
         reopened.close();
       }
     }
@@ -5185,7 +5185,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 21 });
+    ).toMatchObject({ count: 22 });
     reopened.close();
     upgraded.close();
 
@@ -5634,7 +5634,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 21 });
+    ).toMatchObject({ count: 22 });
     reopened.close();
     upgraded.close();
   });
@@ -5715,7 +5715,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 21 });
+    ).toMatchObject({ count: 22 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -5867,7 +5867,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 21 });
+    ).toMatchObject({ count: 22 });
     reopened.close();
   });
 
@@ -6140,7 +6140,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 21 });
+    ).toMatchObject({ count: 22 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
