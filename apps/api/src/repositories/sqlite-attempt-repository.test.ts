@@ -42,6 +42,7 @@ import {
   type TerminalCandidate,
 } from "./attempt-repository.js";
 import {
+  issueRankedPolicyFinalization,
   resolveProductionSQLiteCompetitivePolicyLookupPort,
   SQLiteCompetitivePolicyRepository,
 } from "./sqlite-competitive-policy-repository.js";
@@ -104,7 +105,12 @@ type RepositoryActorInput = Readonly<{
   ids: readonly string[];
   delayMilliseconds: number;
   holdAtBegin?: SharedArrayBuffer;
-  action: "finalize" | "tombstone" | "create-verified";
+  action:
+    | "finalize"
+    | "finalize-with-current-policy"
+    | "deactivate-policy"
+    | "tombstone"
+    | "create-verified";
   input: unknown;
 }>;
 
@@ -177,6 +183,11 @@ function startRepositoryActor(input: RepositoryActorInput): Readonly<{
       };
       const { openSqliteDatabase } = require(workerData.databaseModule);
       const { SQLiteAttemptRepository } = require(workerData.repositoryModule);
+      const {
+        issueRankedPolicyFinalization,
+        SQLiteCompetitivePolicyRepository,
+        resolveProductionSQLiteCompetitivePolicyLookupPort,
+      } = require(workerData.policyModule);
       class ActorClock { now() { return workerData.now; } }
       class ActorIds {
         constructor(ids) { this.ids = [...ids]; }
@@ -215,6 +226,27 @@ function startRepositoryActor(input: RepositoryActorInput): Readonly<{
           let value;
           if (workerData.action === "finalize")
             value = await repository.finalizeTerminalResult(workerData.input);
+          else if (workerData.action === "finalize-with-current-policy") {
+            const policy = new SQLiteCompetitivePolicyRepository({
+              database,
+              clock: new ActorClock(),
+            });
+            const port = resolveProductionSQLiteCompetitivePolicyLookupPort(policy);
+            if (!port) throw new Error("Repository actor has no policy port");
+            const { activation, ...finalizationInput } = workerData.input;
+            value = await repository.finalizeTerminalResult({
+              ...finalizationInput,
+              rankedPolicy: activation
+                ? issueRankedPolicyFinalization(port.finalization, activation)
+                : undefined,
+            });
+          } else if (workerData.action === "deactivate-policy") {
+            const policy = new SQLiteCompetitivePolicyRepository({
+              database,
+              clock: new ActorClock(),
+            });
+            value = await policy.deactivateCompetitivePolicy(workerData.input);
+          }
           else if (workerData.action === "tombstone")
             value = await repository.tombstoneAttempt(workerData.input);
           else
@@ -241,6 +273,10 @@ function startRepositoryActor(input: RepositoryActorInput): Readonly<{
         repositoryModule: join(
           process.cwd(),
           "src/repositories/sqlite-attempt-repository.ts",
+        ),
+        policyModule: join(
+          process.cwd(),
+          "src/repositories/sqlite-competitive-policy-repository.ts",
         ),
         contractsModule: join(
           process.cwd(),
@@ -793,6 +829,78 @@ async function attachMedia(
       createStoredMediaAttachment(media),
     ),
   });
+}
+
+async function claimVerifiedAttempt(
+  fixture: Awaited<ReturnType<typeof makeRepository>>,
+  input: Readonly<{
+    attemptId: string;
+    athleteId: string;
+    sessionId: string;
+    mediaId: string;
+  }>,
+) {
+  await fixture.repository.issueCalibrationSession({
+    id: input.sessionId,
+    athleteId: input.athleteId,
+    nonce: input.athleteId === ATHLETE_A ? "a".repeat(43) : "b".repeat(43),
+    challengeId: "wall-pass",
+    challengeVersion: 1,
+  });
+  await fixture.repository.readyCalibrationSession({
+    id: input.sessionId,
+    athleteId: input.athleteId,
+    requiredGates: ["device", "space", "athlete", "rehearsal", "record"],
+  });
+  await fixture.repository.createAttempt({
+    id: input.attemptId,
+    athleteId: input.athleteId,
+    input: {
+      mode: "verified",
+      challengeId: "wall-pass",
+      challengeVersion: 1,
+      calibrationSessionId: input.sessionId,
+    },
+  });
+  const job = await attachMedia(fixture, {
+    attemptId: input.attemptId,
+    athleteId: input.athleteId,
+    media: {
+      id: input.mediaId,
+      contentType: "video/mp4",
+      bytes: 10,
+      deleteAt: "2030-01-16T12:00:00.000Z",
+    },
+  });
+  const claim = await fixture.repository.claimProcessing(job);
+  if (!claim) throw new Error("Expected verified attempt claim");
+  return claim;
+}
+
+async function activatePassingCompetitivePolicy(
+  fixture: Awaited<ReturnType<typeof makeRepository>>,
+  id = "abababab-abab-4bab-8bab-abababababab",
+) {
+  const policy = competitivePolicyActivation(
+    passingWorkflowBenchmarkReceiptFixture,
+    id,
+  );
+  await fixture.policy.storeBenchmarkReceipt(
+    passingWorkflowBenchmarkReceiptFixture,
+  );
+  await fixture.policy.activateCompetitivePolicy(policy);
+  const port = resolveProductionSQLiteCompetitivePolicyLookupPort(
+    fixture.policy,
+  );
+  if (!port) throw new Error("Expected a factory-issued policy lookup port");
+  const activation = await fixture.policy.getActiveCompetitivePolicy(policy);
+  if (!activation) throw new Error("Expected an active competitive policy");
+  const rankedPolicy = issueRankedPolicyFinalization(
+    port.finalization,
+    activation,
+  );
+  if (!rankedPolicy) throw new Error("Expected ranked policy finalization");
+  return Object.freeze({ policy, port, activation, rankedPolicy });
 }
 
 function preparedStoredMedia(
@@ -1925,18 +2033,20 @@ describe("SQLiteAttemptRepository", () => {
     } as const;
     const firstClaim = (await fixture.repository.claimProcessing(firstJob))!;
     const secondClaim = (await second.claimProcessing(secondJob))!;
+    const { activation } = await activatePassingCompetitivePolicy(fixture);
     const completedAt = fixture.clock.now();
     const first = startRepositoryActor({
       filename: join(fixture.directory, "api.sqlite"),
       now: completedAt,
       ids: [ENTRY_A, "dddddddd-dddd-4ddd-8ddd-dddddddddddd"],
       delayMilliseconds: 0,
-      action: "finalize",
+      action: "finalize-with-current-policy",
       input: {
         attemptId: ATTEMPT_A,
         leaseId: firstClaim.leaseId,
         generation: firstClaim.generation,
         candidate: rankedOutcome(ATTEMPT_A, completedAt, 80),
+        activation,
       },
     });
     const secondActor = startRepositoryActor({
@@ -1944,12 +2054,13 @@ describe("SQLiteAttemptRepository", () => {
       now: completedAt,
       ids: [ENTRY_B, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"],
       delayMilliseconds: 50,
-      action: "finalize",
+      action: "finalize-with-current-policy",
       input: {
         attemptId: ATTEMPT_B,
         leaseId: secondClaim.leaseId,
         generation: secondClaim.generation,
         candidate: rankedOutcome(ATTEMPT_B, completedAt, 80),
+        activation,
       },
     });
     await Promise.all([first.ready, secondActor.ready]);
@@ -2157,6 +2268,7 @@ describe("SQLiteAttemptRepository", () => {
         });
       }
       const cutoff = local.clock.now();
+      const { rankedPolicy } = await activatePassingCompetitivePolicy(local);
       const firstClaim = (await local.repository.claimProcessing({
         attemptId: ATTEMPT_A,
         generation: 1,
@@ -2166,6 +2278,7 @@ describe("SQLiteAttemptRepository", () => {
         generation: 1,
         leaseId: firstClaim.leaseId,
         candidate: rankedOutcome(ATTEMPT_A, cutoff, 80),
+        rankedPolicy,
       });
       local.clock.advance(1);
       const secondClaim = (await local.repository.claimProcessing({
@@ -2177,6 +2290,7 @@ describe("SQLiteAttemptRepository", () => {
         generation: 1,
         leaseId: secondClaim.leaseId,
         candidate: rankedOutcome(ATTEMPT_B, cutoff, 80),
+        rankedPolicy,
       });
 
       const oldSnapshot = await local.repository.listLiveLeaderboard({
@@ -3835,11 +3949,13 @@ describe("SQLiteAttemptRepository", () => {
       },
     });
     const claim = (await fixture.repository.claimProcessing(job))!;
+    const { rankedPolicy } = await activatePassingCompetitivePolicy(fixture);
     await fixture.repository.finalizeTerminalResult({
       attemptId: ATTEMPT_A,
       leaseId: claim.leaseId,
       generation: claim.generation,
       candidate: rankedOutcome(ATTEMPT_A, fixture.clock.now(), 80),
+      rankedPolicy,
     });
     fixture.database.raw
       .prepare(
@@ -6232,6 +6348,554 @@ describe("SQLiteAttemptRepository", () => {
       Object.defineProperty(prototype, "prepare", prototypeDescriptor);
     else Reflect.deleteProperty(prototype, "prepare");
     expect(ownPrepare).toBeTypeOf("function");
+  });
+
+  it("downgrades an already-eligible ranked candidate when its policy deactivates before C4 finalization", async () => {
+    await fixture.repository.issueCalibrationSession({
+      id: SESSION_A,
+      athleteId: ATHLETE_A,
+      nonce: "a".repeat(43),
+      challengeId: "wall-pass",
+      challengeVersion: 1,
+    });
+    await fixture.repository.readyCalibrationSession({
+      id: SESSION_A,
+      athleteId: ATHLETE_A,
+      requiredGates: ["device", "space", "athlete", "rehearsal", "record"],
+    });
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: {
+        mode: "verified",
+        challengeId: "wall-pass",
+        challengeVersion: 1,
+        calibrationSessionId: SESSION_A,
+      },
+    });
+    const job = await attachMedia(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const claim = (await fixture.repository.claimProcessing(job))!;
+    const policy = competitivePolicyActivation(
+      passingWorkflowBenchmarkReceiptFixture,
+      "abababab-abab-4bab-8bab-abababababab",
+    );
+    await fixture.policy.storeBenchmarkReceipt(
+      passingWorkflowBenchmarkReceiptFixture,
+    );
+    await fixture.policy.activateCompetitivePolicy(policy);
+    const port = resolveProductionSQLiteCompetitivePolicyLookupPort(
+      fixture.policy,
+    );
+    if (!port) throw new Error("expected a factory-issued policy lookup port");
+    const activation = await fixture.policy.getActiveCompetitivePolicy(policy);
+    if (!activation) throw new Error("expected active policy activation");
+    const rankedPolicy = issueRankedPolicyFinalization(
+      port.finalization,
+      activation,
+    );
+    if (!rankedPolicy) throw new Error("expected ranked policy finalization");
+    await fixture.policy.deactivateCompetitivePolicy({ id: policy.id });
+
+    await expect(
+      fixture.repository.finalizeTerminalResult({
+        attemptId: ATTEMPT_A,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+        candidate: rankedOutcome(ATTEMPT_A, fixture.clock.now(), 80),
+        rankedPolicy,
+      }),
+    ).resolves.toMatchObject({
+      kind: "finalized",
+      finalized: {
+        outcome: {
+          state: "valid",
+          result: {
+            competitiveStatus: "experimental",
+            competitiveEligible: false,
+          },
+        },
+      },
+    });
+    expect(
+      fixture.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM leaderboard_entries")
+        .get(),
+    ).toEqual({ count: 0 });
+  });
+
+  it("fails safe when a ranked C4 candidate has no bound policy authority", async () => {
+    const claim = await claimVerifiedAttempt(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      sessionId: SESSION_A,
+      mediaId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+    await activatePassingCompetitivePolicy(fixture);
+
+    await expect(
+      fixture.repository.finalizeTerminalResult({
+        attemptId: ATTEMPT_A,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+        candidate: rankedOutcome(ATTEMPT_A, fixture.clock.now(), 80),
+      }),
+    ).resolves.toMatchObject({
+      kind: "finalized",
+      finalized: {
+        outcome: {
+          state: "valid",
+          result: {
+            competitiveStatus: "experimental",
+            competitiveEligible: false,
+          },
+        },
+      },
+    });
+    expect(
+      fixture.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM leaderboard_entries")
+        .get(),
+    ).toEqual({ count: 0 });
+  });
+
+  it("rejects a same-tuple replacement policy when C7 approved a different receipt", async () => {
+    const claim = await claimVerifiedAttempt(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      sessionId: SESSION_A,
+      mediaId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+    const { rankedPolicy } = await activatePassingCompetitivePolicy(fixture);
+    const renewal = renewedReceipt();
+    await fixture.policy.storeBenchmarkReceipt(renewal);
+    await fixture.policy.activateCompetitivePolicy(
+      competitivePolicyActivation(
+        renewal,
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      ),
+    );
+
+    await expect(
+      fixture.repository.finalizeTerminalResult({
+        attemptId: ATTEMPT_A,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+        candidate: rankedOutcome(ATTEMPT_A, fixture.clock.now(), 80),
+        rankedPolicy,
+      }),
+    ).resolves.toMatchObject({
+      kind: "finalized",
+      finalized: {
+        outcome: {
+          state: "valid",
+          result: {
+            competitiveStatus: "experimental",
+            competitiveEligible: false,
+          },
+        },
+      },
+    });
+    expect(
+      fixture.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM leaderboard_entries")
+        .get(),
+    ).toEqual({ count: 0 });
+  });
+
+  it("revalidates invalidated receipts and the exact expiry boundary before ranking", async () => {
+    const firstClaim = await claimVerifiedAttempt(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      sessionId: SESSION_A,
+      mediaId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+    const { policy, rankedPolicy } =
+      await activatePassingCompetitivePolicy(fixture);
+    await fixture.policy.invalidateBenchmarkReceipt({
+      receiptId: policy.receiptId,
+      invalidatedAt: fixture.clock.now(),
+      reason: "operator_revoked",
+    });
+    await expect(
+      fixture.repository.finalizeTerminalResult({
+        attemptId: ATTEMPT_A,
+        leaseId: firstClaim.leaseId,
+        generation: firstClaim.generation,
+        candidate: rankedOutcome(ATTEMPT_A, fixture.clock.now(), 80),
+        rankedPolicy,
+      }),
+    ).resolves.toMatchObject({
+      kind: "finalized",
+      finalized: {
+        outcome: {
+          state: "valid",
+          result: { competitiveStatus: "experimental" },
+        },
+      },
+    });
+
+    const renewal = renewedReceipt();
+    fixture.clock.current = new Date(
+      Date.parse(renewal.validUntil) - 60_000,
+    ).toISOString();
+    const secondClaim = await claimVerifiedAttempt(fixture, {
+      attemptId: ATTEMPT_B,
+      athleteId: ATHLETE_B,
+      sessionId: SESSION_B,
+      mediaId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    });
+    const renewalPolicy = competitivePolicyActivation(
+      renewal,
+      "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    );
+    await fixture.policy.storeBenchmarkReceipt(renewal);
+    await fixture.policy.activateCompetitivePolicy(renewalPolicy);
+    const renewedPort = resolveProductionSQLiteCompetitivePolicyLookupPort(
+      fixture.policy,
+    );
+    if (!renewedPort) throw new Error("Expected a factory-issued policy port");
+    const renewedActivation =
+      await fixture.policy.getActiveCompetitivePolicy(renewalPolicy);
+    if (!renewedActivation) throw new Error("Expected active renewed policy");
+    const renewedRankedPolicy = issueRankedPolicyFinalization(
+      renewedPort.finalization,
+      renewedActivation,
+    );
+    if (!renewedRankedPolicy)
+      throw new Error("Expected renewed ranked policy finalization");
+    fixture.clock.advance(
+      Date.parse(renewal.validUntil) - Date.parse(fixture.clock.now()),
+    );
+    await expect(
+      fixture.repository.finalizeTerminalResult({
+        attemptId: ATTEMPT_B,
+        leaseId: secondClaim.leaseId,
+        generation: secondClaim.generation,
+        candidate: rankedOutcome(ATTEMPT_B, fixture.clock.now(), 80),
+        rankedPolicy: renewedRankedPolicy,
+      }),
+    ).resolves.toMatchObject({
+      kind: "finalized",
+      finalized: {
+        outcome: {
+          state: "valid",
+          result: { competitiveStatus: "experimental" },
+        },
+      },
+    });
+    expect(
+      fixture.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM leaderboard_entries")
+        .get(),
+    ).toEqual({ count: 0 });
+  });
+
+  it("keeps a committed ranked result frozen through duplicate finalization after revocation", async () => {
+    const claim = await claimVerifiedAttempt(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      sessionId: SESSION_A,
+      mediaId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+    const { policy, rankedPolicy } =
+      await activatePassingCompetitivePolicy(fixture);
+    const input = {
+      attemptId: ATTEMPT_A,
+      leaseId: claim.leaseId,
+      generation: claim.generation,
+      candidate: rankedOutcome(ATTEMPT_A, fixture.clock.now(), 80),
+      rankedPolicy,
+    };
+    await expect(
+      fixture.repository.finalizeTerminalResult(input),
+    ).resolves.toMatchObject({
+      kind: "finalized",
+      finalized: {
+        outcome: {
+          result: { competitiveStatus: "ranked", rankingSnapshot: { rank: 1 } },
+        },
+      },
+    });
+    await fixture.policy.deactivateCompetitivePolicy({ id: policy.id });
+    await expect(
+      fixture.repository.finalizeTerminalResult(input),
+    ).resolves.toMatchObject({
+      kind: "idempotent",
+      finalized: {
+        outcome: {
+          result: { competitiveStatus: "ranked", rankingSnapshot: { rank: 1 } },
+        },
+      },
+    });
+    expect(
+      fixture.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM leaderboard_entries")
+        .get(),
+    ).toEqual({ count: 1 });
+  });
+
+  it("revalidates the same authority for tied ranked finalizations", async () => {
+    const tieFixture = await makeRepository(
+      new TestIds(
+        LEASE_A,
+        LEASE_B,
+        ENTRY_A,
+        ENTRY_B,
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      ),
+    );
+    try {
+      const first = await claimVerifiedAttempt(tieFixture, {
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+        sessionId: SESSION_A,
+        mediaId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      });
+      const second = await claimVerifiedAttempt(tieFixture, {
+        attemptId: ATTEMPT_B,
+        athleteId: ATHLETE_B,
+        sessionId: SESSION_B,
+        mediaId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      });
+      const { rankedPolicy } =
+        await activatePassingCompetitivePolicy(tieFixture);
+      const completedAt = tieFixture.clock.now();
+      const [firstResult, secondResult] = await Promise.all([
+        tieFixture.repository.finalizeTerminalResult({
+          attemptId: ATTEMPT_A,
+          leaseId: first.leaseId,
+          generation: first.generation,
+          candidate: rankedOutcome(ATTEMPT_A, completedAt, 80),
+          rankedPolicy,
+        }),
+        tieFixture.repository.finalizeTerminalResult({
+          attemptId: ATTEMPT_B,
+          leaseId: second.leaseId,
+          generation: second.generation,
+          candidate: rankedOutcome(ATTEMPT_B, completedAt, 80),
+          rankedPolicy,
+        }),
+      ]);
+      expect([firstResult, secondResult]).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: "finalized" }),
+          expect.objectContaining({ kind: "finalized" }),
+        ]),
+      );
+      const outcomes = tieFixture.database.raw
+        .prepare(
+          "SELECT outcome_json FROM terminal_results WHERE attempt_id IN (?, ?) ORDER BY attempt_id",
+        )
+        .all(ATTEMPT_A, ATTEMPT_B) as readonly Readonly<{
+        outcome_json: string;
+      }>[];
+      expect(
+        outcomes.map(({ outcome_json }) => JSON.parse(outcome_json)),
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            result: expect.objectContaining({
+              competitiveStatus: "ranked",
+              rankingSnapshot: expect.objectContaining({ rank: 1 }),
+            }),
+          }),
+          expect.objectContaining({
+            result: expect.objectContaining({ competitiveStatus: "ranked" }),
+          }),
+        ]),
+      );
+      expect(
+        tieFixture.database.raw
+          .prepare("SELECT COUNT(*) AS count FROM leaderboard_entries")
+          .get(),
+      ).toEqual({ count: 2 });
+    } finally {
+      tieFixture.database.close();
+      await rm(tieFixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls back ranked finalization atomically when the leaderboard insert rejects", async () => {
+    const claim = await claimVerifiedAttempt(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      sessionId: SESSION_A,
+      mediaId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+    const { rankedPolicy } = await activatePassingCompetitivePolicy(fixture);
+    fixture.database.raw.exec(`
+      CREATE TRIGGER reject_ranked_leaderboard_insert
+      BEFORE INSERT ON leaderboard_entries
+      BEGIN
+        SELECT RAISE(ABORT, 'forced leaderboard rejection');
+      END;
+    `);
+    await expect(
+      fixture.repository.finalizeTerminalResult({
+        attemptId: ATTEMPT_A,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+        candidate: rankedOutcome(ATTEMPT_A, fixture.clock.now(), 80),
+        rankedPolicy,
+      }),
+    ).rejects.toThrow("forced leaderboard rejection");
+    expect(
+      fixture.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM terminal_results")
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      fixture.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM leaderboard_entries")
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      fixture.database.raw
+        .prepare("SELECT status FROM attempts WHERE id = ?")
+        .get(ATTEMPT_A),
+    ).toEqual({ status: "processing" });
+  });
+
+  it("downgrades when a concurrent policy deactivation wins the SQLite write lock", async () => {
+    const claim = await claimVerifiedAttempt(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      sessionId: SESSION_A,
+      mediaId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+    const { policy, activation } =
+      await activatePassingCompetitivePolicy(fixture);
+    const deactivationHold = new SharedArrayBuffer(
+      Int32Array.BYTES_PER_ELEMENT,
+    );
+    const deactivator = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: fixture.clock.now(),
+      ids: [],
+      delayMilliseconds: 0,
+      holdAtBegin: deactivationHold,
+      action: "deactivate-policy",
+      input: { id: policy.id },
+    });
+    const finalizer = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: fixture.clock.now(),
+      ids: [ENTRY_A, "dddddddd-dddd-4ddd-8ddd-dddddddddddd"],
+      delayMilliseconds: 0,
+      action: "finalize-with-current-policy",
+      input: {
+        attemptId: ATTEMPT_A,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+        candidate: rankedOutcome(ATTEMPT_A, fixture.clock.now(), 80),
+        activation,
+      },
+    });
+    await Promise.all([deactivator.ready, finalizer.ready]);
+    deactivator.start();
+    await deactivator.acquired;
+    finalizer.start();
+    await finalizer.attempting;
+    Atomics.store(new Int32Array(deactivationHold), 0, 1);
+    Atomics.notify(new Int32Array(deactivationHold), 0);
+    const [deactivated, finalized] = await Promise.all([
+      deactivator.done,
+      finalizer.done,
+    ]);
+    expect(deactivated.error).toBeUndefined();
+    expect(finalized.error).toBeUndefined();
+    expect(finalized.value).toMatchObject({
+      kind: "finalized",
+      finalized: {
+        outcome: {
+          result: {
+            competitiveStatus: "experimental",
+            competitiveEligible: false,
+          },
+        },
+      },
+    });
+    expect(
+      fixture.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM leaderboard_entries")
+        .get(),
+    ).toEqual({ count: 0 });
+  });
+
+  it("freezes ranked results when C4 finalization wins the concurrent deactivation lock", async () => {
+    const claim = await claimVerifiedAttempt(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      sessionId: SESSION_A,
+      mediaId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+    const { policy, activation } =
+      await activatePassingCompetitivePolicy(fixture);
+    const finalizationHold = new SharedArrayBuffer(
+      Int32Array.BYTES_PER_ELEMENT,
+    );
+    const finalizer = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: fixture.clock.now(),
+      ids: [ENTRY_A, "dddddddd-dddd-4ddd-8ddd-dddddddddddd"],
+      delayMilliseconds: 0,
+      holdAtBegin: finalizationHold,
+      action: "finalize-with-current-policy",
+      input: {
+        attemptId: ATTEMPT_A,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+        candidate: rankedOutcome(ATTEMPT_A, fixture.clock.now(), 80),
+        activation,
+      },
+    });
+    const deactivator = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: fixture.clock.now(),
+      ids: [],
+      delayMilliseconds: 0,
+      action: "deactivate-policy",
+      input: { id: policy.id },
+    });
+    await Promise.all([finalizer.ready, deactivator.ready]);
+    finalizer.start();
+    await finalizer.acquired;
+    deactivator.start();
+    await deactivator.attempting;
+    Atomics.store(new Int32Array(finalizationHold), 0, 1);
+    Atomics.notify(new Int32Array(finalizationHold), 0);
+    const [finalized, deactivated] = await Promise.all([
+      finalizer.done,
+      deactivator.done,
+    ]);
+    expect(finalized.error).toBeUndefined();
+    expect(deactivated.error).toBeUndefined();
+    expect(finalized.value).toMatchObject({
+      kind: "finalized",
+      finalized: {
+        outcome: {
+          result: {
+            competitiveStatus: "ranked",
+            rankingSnapshot: { rank: 1 },
+          },
+        },
+      },
+    });
+    expect(
+      fixture.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM leaderboard_entries")
+        .get(),
+    ).toEqual({ count: 1 });
   });
 
   it("enforces compound ownership, one-use, result linkage, policy provenance, and leaderboard checks in SQLite", async () => {

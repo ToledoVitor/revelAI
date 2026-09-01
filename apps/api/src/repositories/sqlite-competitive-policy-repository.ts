@@ -18,6 +18,10 @@ import type {
   CompetitivePolicyRepository,
   CompetitivePolicyTuple,
 } from "./competitive-policy-repository.js";
+import type {
+  RankedPolicyFinalizationIssuer,
+  TransactionalRankedPolicyFinalizationAuthority,
+} from "./attempt-repository.js";
 import {
   CompetitivePolicyLookupUnavailableError,
   CompetitivePolicyRepositoryError,
@@ -34,12 +38,46 @@ export type ProductionSQLiteCompetitivePolicyLookupPort = Readonly<{
       tuple: CompetitivePolicyTuple,
     ): Promise<CompetitivePolicyActivation | null>;
   }>;
+  finalization: RankedPolicyFinalizationIssuer;
 }>;
 
 const productionSQLiteCompetitivePolicyLookupPorts = new WeakMap<
   object,
   ProductionSQLiteCompetitivePolicyLookupPort
 >();
+const transactionalRankedPolicyFinalizations = new WeakMap<
+  object,
+  Readonly<{
+    token: SqliteDatabaseCompositionToken;
+    activation: CompetitivePolicyActivation;
+    lookupActivePolicy(
+      input: Readonly<{
+        now: string;
+        tuple: CompetitivePolicyTuple;
+      }>,
+    ): CompetitivePolicyActivation | null;
+  }>
+>();
+const rankedPolicyFinalizationIssuers = new WeakMap<
+  object,
+  Readonly<{
+    token: SqliteDatabaseCompositionToken;
+    lookupActivePolicy(
+      input: Readonly<{
+        now: string;
+        tuple: CompetitivePolicyTuple;
+      }>,
+    ): CompetitivePolicyActivation | null;
+  }>
+>();
+
+type RankedVerifiedResultCandidate = Omit<
+  Extract<
+    import("@revelai/contracts").VerifiedResult,
+    { competitiveStatus: "ranked" }
+  >,
+  "rankingSnapshot"
+>;
 
 /** Resolves the immutable policy lookup for one exact production adapter. */
 export function resolveProductionSQLiteCompetitivePolicyLookupPort(
@@ -47,6 +85,53 @@ export function resolveProductionSQLiteCompetitivePolicyLookupPort(
 ): ProductionSQLiteCompetitivePolicyLookupPort | undefined {
   if (typeof repository !== "object" || repository === null) return undefined;
   return productionSQLiteCompetitivePolicyLookupPorts.get(repository);
+}
+
+/**
+ * Issues one opaque C7-to-C4 authority for the precise policy and receipt
+ * observed during eligibility. Its facts stay in a WeakMap, not result JSON.
+ */
+export function issueRankedPolicyFinalization(
+  issuer: unknown,
+  activation: CompetitivePolicyActivation,
+): TransactionalRankedPolicyFinalizationAuthority | undefined {
+  if (typeof issuer !== "object" || issuer === null) return undefined;
+  const registered = rankedPolicyFinalizationIssuers.get(issuer);
+  if (!registered) return undefined;
+  const authority = Object.freeze(
+    {},
+  ) as TransactionalRankedPolicyFinalizationAuthority;
+  transactionalRankedPolicyFinalizations.set(
+    authority,
+    Object.freeze({ ...registered, activation }),
+  );
+  return authority;
+}
+
+/**
+ * Revalidates a ranked C7 result during C4's already-open transaction. The
+ * registration and exact database token are private WeakMap facts, so a
+ * structural authority, stale policy host, or cross-database port fails safe.
+ */
+export function isCurrentRankedPolicyFinalization(
+  authority: unknown,
+  input: Readonly<{
+    token: SqliteDatabaseCompositionToken;
+    now: string;
+    result: RankedVerifiedResultCandidate;
+  }>,
+): boolean {
+  if (typeof authority !== "object" || authority === null) return false;
+  const finalization = transactionalRankedPolicyFinalizations.get(authority);
+  if (!finalization || finalization.token !== input.token) return false;
+  const tuple = rankedCandidateTuple(input.result);
+  if (!tuple) return false;
+  try {
+    const current = finalization.lookupActivePolicy({ now: input.now, tuple });
+    return current !== null && sameActivation(current, finalization.activation);
+  } catch {
+    return false;
+  }
 }
 
 export class SQLiteCompetitivePolicyRepository
@@ -78,7 +163,11 @@ export class SQLiteCompetitivePolicyRepository
     this.#raw = raw;
     this.#clock = input.clock;
     this.#lookupActivePolicy = createActivePolicyLookup(raw);
-    registerProductionSQLiteCompetitivePolicyLookupPort(this, token);
+    registerProductionSQLiteCompetitivePolicyLookupPort(
+      this,
+      token,
+      this.#lookupActivePolicy,
+    );
   }
 
   public async storeBenchmarkReceipt(
@@ -400,8 +489,12 @@ function createActivePolicyLookup(raw: SqliteDatabase["raw"]): (
     tuple: CompetitivePolicyTuple;
   }>,
 ) => CompetitivePolicyActivation | null {
-  const statement = raw.prepare(
-    `SELECT p.id, p.receipt_id, p.receipt_sha256, p.receipt_schema_version, p.workspace_id, p.model_bundle_id, p.workflow_id, p.workflow_version, p.provider_version, p.calibration_evidence_version, p.extraction_evidence_version, p.observation_evidence_version, p.challenge_id, p.challenge_version, p.rule_version,
+  // Capture the driver method while issuing the adapter. A few migration
+  // probes create this adapter before its current lookup schema exists, so
+  // compile on the first lookup without ever consulting mutable raw.prepare.
+  const prepare = raw.prepare.bind(raw);
+  let statement: ReturnType<typeof raw.prepare> | undefined;
+  const sql = `SELECT p.id, p.receipt_id, p.receipt_sha256, p.receipt_schema_version, p.workspace_id, p.model_bundle_id, p.workflow_id, p.workflow_version, p.provider_version, p.calibration_evidence_version, p.extraction_evidence_version, p.observation_evidence_version, p.challenge_id, p.challenge_version, p.rule_version,
             r.receipt_json, r.receipt_sha256 AS source_receipt_sha256, r.schema_version AS source_schema_version, r.model_bundle_id AS source_model_bundle_id, r.workflow_id AS source_workflow_id, r.workflow_version AS source_workflow_version, r.provider_version AS source_provider_version, r.status AS source_status, r.run_at AS source_run_at, r.valid_until AS source_valid_until, r.invalidated_at AS source_invalidated_at
      FROM approved_competitive_model_policies p
      INNER JOIN workflow_benchmark_receipts r
@@ -415,11 +508,9 @@ function createActivePolicyLookup(raw: SqliteDatabase["raw"]): (
      LEFT JOIN workflow_benchmark_receipt_invalidations i ON i.receipt_id = r.id
      LEFT JOIN workflow_benchmark_receipt_invalidation_quarantine q ON q.receipt_id = r.id
      WHERE p.active = 1 AND r.status = 'passed' AND r.invalidated_at IS NULL AND i.receipt_id IS NULL AND q.receipt_id IS NULL AND r.valid_until > ?
-       AND p.workspace_id = ? AND p.model_bundle_id = ? AND p.workflow_id = ? AND p.workflow_version = ? AND p.provider_version = ? AND p.calibration_evidence_version = ? AND p.extraction_evidence_version = ? AND p.observation_evidence_version = ? AND p.challenge_id = ? AND p.challenge_version = ? AND p.rule_version = ?`,
-  );
-  const get = statement.get.bind(statement);
+       AND p.workspace_id = ? AND p.model_bundle_id = ? AND p.workflow_id = ? AND p.workflow_version = ? AND p.provider_version = ? AND p.calibration_evidence_version = ? AND p.extraction_evidence_version = ? AND p.observation_evidence_version = ? AND p.challenge_id = ? AND p.challenge_version = ? AND p.rule_version = ?`;
   return ({ now, tuple }) => {
-    const row = get(
+    const row = (statement ??= prepare(sql)).get(
       now,
       tuple.workspaceId,
       tuple.modelBundleId,
@@ -443,8 +534,22 @@ const exactGetActiveCompetitivePolicy =
 function registerProductionSQLiteCompetitivePolicyLookupPort(
   repository: SQLiteCompetitivePolicyRepository,
   token: SqliteDatabaseCompositionToken,
+  lookupActivePolicy: (
+    input: Readonly<{
+      now: string;
+      tuple: CompetitivePolicyTuple;
+    }>,
+  ) => CompetitivePolicyActivation | null,
 ): void {
   if (!isCurrentProductionSQLiteCompetitivePolicyRepository(repository)) return;
+  const finalization = Object.freeze({}) as RankedPolicyFinalizationIssuer;
+  rankedPolicyFinalizationIssuers.set(
+    finalization,
+    Object.freeze({
+      token,
+      lookupActivePolicy,
+    }),
+  );
   productionSQLiteCompetitivePolicyLookupPorts.set(
     repository,
     Object.freeze({
@@ -455,8 +560,52 @@ function registerProductionSQLiteCompetitivePolicyLookupPort(
         getActivePolicy: (tuple: CompetitivePolicyTuple) =>
           exactGetActiveCompetitivePolicy.call(repository, tuple),
       }),
+      finalization,
     }),
   );
+}
+
+function sameActivation(
+  left: CompetitivePolicyActivation,
+  right: CompetitivePolicyActivation,
+): boolean {
+  return (
+    left.id === right.id &&
+    left.receiptId === right.receiptId &&
+    left.receiptSha256 === right.receiptSha256 &&
+    left.receiptSchemaVersion === right.receiptSchemaVersion &&
+    left.workspaceId === right.workspaceId &&
+    left.modelBundleId === right.modelBundleId &&
+    left.workflowId === right.workflowId &&
+    left.workflowVersion === right.workflowVersion &&
+    left.providerVersion === right.providerVersion &&
+    left.calibrationEvidenceVersion === right.calibrationEvidenceVersion &&
+    left.extractionEvidenceVersion === right.extractionEvidenceVersion &&
+    left.observationEvidenceVersion === right.observationEvidenceVersion &&
+    left.challengeId === right.challengeId &&
+    left.challengeVersion === right.challengeVersion &&
+    left.ruleVersion === right.ruleVersion
+  );
+}
+
+function rankedCandidateTuple(
+  result: RankedVerifiedResultCandidate,
+): CompetitivePolicyTuple | null {
+  const provenance = result.provenance;
+  if (provenance.kind !== "roboflow") return null;
+  return Object.freeze({
+    workspaceId: provenance.workspaceId,
+    modelBundleId: provenance.modelBundleId,
+    workflowId: provenance.workflowId,
+    workflowVersion: provenance.workflowVersion,
+    providerVersion: provenance.providerVersion,
+    calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+    extractionEvidenceVersion: "c5-frame-manifest-v1",
+    observationEvidenceVersion: "wall-pass-geometry-evidence-v1",
+    challengeId: result.challengeId,
+    challengeVersion: result.challengeVersion,
+    ruleVersion: result.ruleVersion,
+  });
 }
 
 function isCurrentProductionSQLiteCompetitivePolicyRepository(

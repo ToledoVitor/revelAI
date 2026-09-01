@@ -247,6 +247,27 @@ type VerifiedTerminalCandidate =
   | RankedVerifiedTerminalCandidate
   | Exclude<VerifiedResult, { competitiveStatus: "ranked" }>;
 
+declare const transactionalRankedPolicyFinalizationAuthority: unique symbol;
+declare const rankedPolicyFinalizationIssuer: unique symbol;
+
+/**
+ * Opaque C7-to-C4 capability. Only the production policy adapter can issue
+ * one, and C4 validates its private registration before using it in a write.
+ */
+export type TransactionalRankedPolicyFinalizationAuthority = Readonly<{
+  readonly [transactionalRankedPolicyFinalizationAuthority]: "transactional-ranked-policy-finalization";
+}>;
+
+/** Opaque issuer that can bind one C7-approved policy/receipt to C4. */
+export type RankedPolicyFinalizationIssuer = Readonly<{
+  readonly [rankedPolicyFinalizationIssuer]: "ranked-policy-finalization-issuer";
+}>;
+
+const rankedCandidatePolicyFinalizations = new WeakMap<
+  object,
+  TransactionalRankedPolicyFinalizationAuthority
+>();
+
 /**
  * Processor-owned terminal facts. The repository is the only component that
  * turns a ranked candidate into a public result by calculating its frozen
@@ -259,11 +280,32 @@ export type TerminalCandidate =
     }>
   | Exclude<AttemptOutcome, { state: "pending" | "valid" }>;
 
+/**
+ * Associates a C7-created ranked candidate with its opaque, exact policy
+ * approval. The association is in-memory only and never enters C4 JSON.
+ */
+export function bindRankedCandidatePolicyFinalization(
+  candidate: TerminalCandidate,
+  authority: TransactionalRankedPolicyFinalizationAuthority,
+): TerminalCandidate {
+  rankedCandidatePolicyFinalizations.set(candidate, authority);
+  return candidate;
+}
+
+/** Resolves only an authority bound to this exact candidate object. */
+export function resolveRankedCandidatePolicyFinalization(
+  candidate: unknown,
+): TransactionalRankedPolicyFinalizationAuthority | undefined {
+  if (typeof candidate !== "object" || candidate === null) return undefined;
+  return rankedCandidatePolicyFinalizations.get(candidate);
+}
+
 export type FinalizeTerminalResultInput = Readonly<{
   attemptId: string;
   leaseId: string;
   generation: number;
   candidate: TerminalCandidate;
+  rankedPolicy?: TransactionalRankedPolicyFinalizationAuthority;
 }>;
 
 export interface AttemptRepository {

@@ -11,7 +11,9 @@ import {
   resolveProductionSQLiteAttemptProcessingPort,
   type SQLiteAttemptRepository,
 } from "../repositories/sqlite-attempt-repository.js";
+import { resolveRankedCandidatePolicyFinalization } from "../repositories/attempt-repository.js";
 import {
+  issueRankedPolicyFinalization,
   resolveProductionSQLiteCompetitivePolicyLookupPort,
   type SQLiteCompetitivePolicyRepository,
 } from "../repositories/sqlite-competitive-policy-repository.js";
@@ -30,7 +32,6 @@ export type VerifiedTrainingProductionOptions = Readonly<{
 const noApprovedCompetitivePolicy: CompetitivePolicyLookup = Object.freeze({
   getActivePolicy: async () => null,
 });
-
 /**
  * Sole production join for C4 claims, C5 durable bytes, C6 evidence, and C7
  * policy. C8 HTTP receives no repository, policy, or provider internals.
@@ -103,9 +104,26 @@ export function createFactoryIssuedVerifiedTrainingRuntimeFromResolvedQueue(
   const getProcessingContext = processing.processing.getProcessingContext;
   const reconstruct = c5.reconstructDurableProcessingContext;
   const readFrame = c5.readFrame;
+  const finalizeTerminalResult = processing.processing.finalizeTerminalResult;
   return createVerifiedTrainingRuntime({
     queue: snapshot.queue,
-    repository: processing.processing,
+    repository: Object.freeze({
+      ...processing.processing,
+      finalizeTerminalResult: (
+        input: Parameters<typeof finalizeTerminalResult>[0],
+      ) => {
+        if (!processing.isCurrent())
+          throw new Error(
+            "Verified Training composition is no longer current.",
+          );
+        return finalizeTerminalResult({
+          ...input,
+          rankedPolicy: resolveRankedCandidatePolicyFinalization(
+            input.candidate,
+          ),
+        });
+      },
+    }),
     analysis: {
       getProcessingContext: async (claim) => {
         if (!processing.isCurrent())
@@ -125,6 +143,10 @@ export function createFactoryIssuedVerifiedTrainingRuntimeFromResolvedQueue(
       provider: snapshot.options.provider,
       scheduler: snapshot.options.scheduler,
       policy: policyPort?.lookup ?? noApprovedCompetitivePolicy,
+      issueRankedPolicyFinalization: policyPort
+        ? (activation) =>
+            issueRankedPolicyFinalization(policyPort.finalization, activation)
+        : undefined,
       clock: snapshot.options.clock ?? { now: () => new Date().toISOString() },
     },
   });

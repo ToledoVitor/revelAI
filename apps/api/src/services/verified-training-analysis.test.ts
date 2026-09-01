@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AttemptResultResponseSchema,
@@ -11,6 +12,7 @@ import {
   createDemoVisionProvider,
   VisionBatchScheduler,
   type VisionRequestDeadline,
+  type VisionProvider,
 } from "@revelai/vision";
 import { createFactoryIssuedVerifiedTrainingRuntime } from "../composition/verified-training-analysis-composition.js";
 import { createProductionTrainingAttemptApi } from "../composition/training-analysis-composition.js";
@@ -28,6 +30,7 @@ import {
   InMemoryAnalysisQueue,
   type QueueScheduler,
 } from "../queue/in-memory-analysis-queue.js";
+import { createVerifiedTrainingRuntime } from "./verified-training-runtime.js";
 
 const ATHLETE_ID = "11111111-1111-4111-8111-111111111111";
 const ATTEMPT_ID = "22222222-2222-4222-8222-222222222222";
@@ -277,6 +280,10 @@ describe("Verified Training analysis", () => {
 
     const clone = Object.create(policy);
     expect(() => createRuntime(clone)).toThrow(
+      "factory-issued C4/C5 composition",
+    );
+    const proxy = new Proxy(policy, {});
+    expect(() => createRuntime(proxy)).toThrow(
       "factory-issued C4/C5 composition",
     );
     const otherPolicy = new SQLiteCompetitivePolicyRepository({
@@ -629,6 +636,130 @@ describe("Verified Training analysis", () => {
         .get(),
     ).toEqual({ count: 0 });
     database.close();
+  });
+
+  it("projects a ranked Verified result from the combined Fastify root without policy internals", async () => {
+    const fixture = await makeCombinedVerifiedHttpRoot({
+      provider: createVerifiedFixtureVisionProvider("roboflow"),
+      approvedPolicy: true,
+    });
+    try {
+      const attemptId = await createVerifiedHttpAttempt(fixture.app);
+      await fixture.queueScheduler.runAll();
+      const result = await fixture.app.inject({
+        method: "GET",
+        url: `/v1/attempts/${attemptId}/result`,
+        headers: { "x-revelai-athlete-id": ATHLETE_ID },
+      });
+
+      expect(result.statusCode).toBe(200);
+      expect(AttemptResultResponseSchema.parse(result.json())).toMatchObject({
+        state: "valid",
+        result: {
+          kind: "verified-result",
+          attemptId,
+          competitiveStatus: "ranked",
+          competitiveEligible: true,
+          rankingSnapshot: { kind: "frozen", rank: 1, cohortSize: 1 },
+        },
+      });
+      expectPublicResultDoesNotLeakInternals(result.json());
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("projects an experimental Roboflow result from the combined Fastify root when no policy is active", async () => {
+    const fixture = await makeCombinedVerifiedHttpRoot({
+      provider: createVerifiedFixtureVisionProvider("roboflow"),
+    });
+    try {
+      const attemptId = await createVerifiedHttpAttempt(fixture.app);
+      await fixture.queueScheduler.runAll();
+      const result = await fixture.app.inject({
+        method: "GET",
+        url: `/v1/attempts/${attemptId}/result`,
+        headers: { "x-revelai-athlete-id": ATHLETE_ID },
+      });
+
+      expect(result.statusCode).toBe(200);
+      const body = AttemptResultResponseSchema.parse(result.json());
+      expect(body).toMatchObject({
+        state: "valid",
+        result: {
+          kind: "verified-result",
+          attemptId,
+          competitiveStatus: "experimental",
+          competitiveEligible: false,
+        },
+      });
+      expect(JSON.stringify(body)).not.toContain("rankingSnapshot");
+      expectPublicResultDoesNotLeakInternals(body);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("projects a Verified invalid outcome from the combined Fastify root without C5/C7 details", async () => {
+    const fixture = await makeCombinedVerifiedHttpRoot({
+      provider: createDemoVisionProvider({
+        free: "free-well-framed-active-v1",
+        verified: "wall-pass-insufficient-v1",
+      }),
+    });
+    try {
+      const attemptId = await createVerifiedHttpAttempt(fixture.app);
+      await fixture.queueScheduler.runAll();
+      const result = await fixture.app.inject({
+        method: "GET",
+        url: `/v1/attempts/${attemptId}/result`,
+        headers: { "x-revelai-athlete-id": ATHLETE_ID },
+      });
+
+      expect(result.statusCode).toBe(200);
+      expect(AttemptResultResponseSchema.parse(result.json())).toEqual(
+        expect.objectContaining({
+          state: "invalid",
+          attemptId,
+          mode: "verified",
+          code: "calibration_not_verified",
+          retryable: true,
+        }),
+      );
+      expectPublicResultDoesNotLeakInternals(result.json());
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("projects exhausted Verified provider retries from the combined Fastify root as the public safe failure", async () => {
+    const fixture = await makeCombinedVerifiedHttpRoot({
+      provider: createDemoVisionProvider(),
+      scheduler: immediatelyExpiredVisionScheduler(),
+    });
+    try {
+      const attemptId = await createVerifiedHttpAttempt(fixture.app);
+      await fixture.queueScheduler.runAll();
+      const result = await fixture.app.inject({
+        method: "GET",
+        url: `/v1/attempts/${attemptId}/result`,
+        headers: { "x-revelai-athlete-id": ATHLETE_ID },
+      });
+
+      expect(result.statusCode).toBe(200);
+      expect(AttemptResultResponseSchema.parse(result.json())).toEqual(
+        expect.objectContaining({
+          state: "failed",
+          attemptId,
+          mode: "verified",
+          code: "analysis_temporary_unavailable",
+          retryable: true,
+        }),
+      );
+      expectPublicResultDoesNotLeakInternals(result.json());
+    } finally {
+      await fixture.close();
+    }
   });
 
   it("drains an in-flight Verified analysis before the combined root closes", async () => {
@@ -1024,7 +1155,74 @@ describe("Verified Training analysis", () => {
         retryable: true,
       },
     });
+    expect(
+      database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM processing_events WHERE event_type = 'processing-claimed'",
+        )
+        .get(),
+    ).toEqual({ count: 3 });
     database.close();
+  });
+
+  it("terminalizes unexpected C8 binding failures as internal without spending retry budget", async () => {
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    const claim = {
+      leaseId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      generation: 1,
+      mode: "verified" as const,
+    };
+    const finalized: unknown[] = [];
+    let recoveries = 0;
+    const runtime = createVerifiedTrainingRuntime({
+      queue,
+      repository: {
+        claimProcessing: async () => claim,
+        releaseProcessingClaim: async () => true,
+        recordProcessingFailure: async () => {
+          recoveries += 1;
+          return { kind: "recorded" as const, retryAttempt: 1 };
+        },
+        deadLetterProcessingClaim: async () => ({
+          kind: "dead-lettered" as const,
+        }),
+        finalizeTerminalResult: async (input) => {
+          finalized.push(input.candidate);
+          return { kind: "tombstoned" as const };
+        },
+      },
+      analysis: {
+        getProcessingContext: async () => {
+          throw new Error("durable binding unexpectedly failed");
+        },
+        reconstruct: async () => {
+          throw new Error("unreachable");
+        },
+        frames: { readFrame: async () => new Uint8Array() },
+        provider: createDemoVisionProvider(),
+        policy: { getActivePolicy: async () => null },
+        clock: { now: () => NOW },
+      },
+    });
+    await queue.enqueue({
+      attemptId: ATTEMPT_ID,
+      generation: 1,
+      mode: "verified",
+    });
+    await scheduler.runAll();
+    await runtime.stop();
+
+    expect(recoveries).toBe(0);
+    expect(finalized).toEqual([
+      expect.objectContaining({
+        state: "failed",
+        attemptId: ATTEMPT_ID,
+        mode: "verified",
+        code: "analysis_internal_error",
+        retryable: false,
+      }),
+    ]);
   });
 });
 
@@ -1079,6 +1277,148 @@ async function createAttachedVerifiedAttempt(
     { retentionRepository: input.retention },
   );
   return input.repository.attachPreparedMedia({ accepted });
+}
+
+async function makeCombinedVerifiedHttpRoot(
+  input: Readonly<{
+    provider: VisionProvider;
+    scheduler?: VisionBatchScheduler;
+    approvedPolicy?: boolean;
+  }>,
+) {
+  const root = await mkdtemp(join(tmpdir(), "revelai-verified-http-root-"));
+  directories.push(root);
+  const database = openSqliteDatabase(join(root, "api.sqlite"));
+  const c5 = createC5PipelineTestSupport({
+    root: join(root, "c5"),
+    mode: "verified",
+    prober: verifiedHttpProber,
+  });
+  const repository = new SQLiteAttemptRepository({
+    database,
+    clock: { now: () => NOW },
+    ids: { next: ids("aaaaaaaa") },
+    handoffVerifier: c5.handoffVerifier,
+  });
+  const queueScheduler = new ManualScheduler();
+  const queue = new InMemoryAnalysisQueue({ scheduler: queueScheduler });
+  let policy: SQLiteCompetitivePolicyRepository | undefined;
+  if (input.approvedPolicy) {
+    policy = new SQLiteCompetitivePolicyRepository({
+      database,
+      clock: { now: () => NOW },
+    });
+    const receipt = WorkflowBenchmarkReceiptSchema.parse(
+      passingWorkflowBenchmarkReceiptFixture,
+    );
+    await policy.storeBenchmarkReceipt(receipt);
+    await policy.activateCompetitivePolicy({
+      id: "99999999-9999-4999-8999-999999999999",
+      receiptId: receipt.id,
+      receiptSha256: receipt.receiptSha256,
+      receiptSchemaVersion: receipt.schemaVersion,
+      workspaceId: receipt.workflow.workspaceId,
+      modelBundleId: receipt.workflow.modelBundleId,
+      workflowId: receipt.workflow.workflowId,
+      workflowVersion: receipt.workflow.workflowVersion,
+      providerVersion: receipt.workflow.providerVersion,
+      calibrationEvidenceVersion: receipt.evidence.calibrationEvidenceVersion,
+      extractionEvidenceVersion: receipt.evidence.extractionEvidenceVersion,
+      observationEvidenceVersion: receipt.evidence.observationEvidenceVersion,
+      challengeId: "wall-pass",
+      challengeVersion: 1,
+      ruleVersion: "wall-pass-v1-score-1",
+    });
+  }
+  const app = createProductionTrainingAttemptApi({
+    repository,
+    retention: new SQLiteRetentionRepository({ database }),
+    mediaPipeline: c5.pipeline,
+    queue,
+    cleaner: { cleanup: async () => undefined },
+    scheduler: { everyHour: () => undefined, cancel: () => undefined },
+    clock: { now: () => NOW },
+    ids: { next: ids("bbbbbbbb") },
+    freeTraining: {
+      provider: createDemoVisionProvider(),
+      clock: { now: () => NOW },
+    },
+    verifiedTraining: {
+      provider: input.provider,
+      scheduler: input.scheduler,
+      policy,
+      clock: { now: () => NOW },
+    },
+  });
+  return Object.freeze({
+    app,
+    database,
+    queueScheduler,
+    close: async () => {
+      await app.close();
+      database.close();
+    },
+  });
+}
+
+async function createVerifiedHttpAttempt(
+  app: FastifyInstance,
+): Promise<string> {
+  const calibration = await app.inject({
+    method: "POST",
+    url: "/v1/calibration-sessions",
+    headers: { "x-revelai-athlete-id": ATHLETE_ID },
+    payload: { challengeId: "wall-pass", challengeVersion: 1 },
+  });
+  expect(calibration.statusCode).toBe(201);
+  const calibrationId = (calibration.json() as Readonly<{ id: string }>).id;
+  const ready = await app.inject({
+    method: "POST",
+    url: `/v1/calibration-sessions/${calibrationId}/ready`,
+    headers: { "x-revelai-athlete-id": ATHLETE_ID },
+    payload: {
+      requiredGates: ["device", "space", "athlete", "rehearsal", "record"],
+    },
+  });
+  expect(ready.statusCode).toBe(204);
+  const created = await app.inject({
+    method: "POST",
+    url: "/v1/attempts",
+    headers: { "x-revelai-athlete-id": ATHLETE_ID },
+    payload: {
+      mode: "verified",
+      challengeId: "wall-pass",
+      challengeVersion: 1,
+      calibrationSessionId: calibrationId,
+    },
+  });
+  expect(created.statusCode).toBe(201);
+  const attemptId = (created.json() as Readonly<{ id: string }>).id;
+  const upload = await app.inject({
+    method: "POST",
+    url: `/v1/attempts/${attemptId}/media`,
+    headers: {
+      "x-revelai-athlete-id": ATHLETE_ID,
+      "content-type": "multipart/form-data; boundary=revelai-verified-test",
+    },
+    payload: multipartBody("revelai-verified-test"),
+  });
+  expect(upload.statusCode).toBe(202);
+  return attemptId;
+}
+
+function expectPublicResultDoesNotLeakInternals(value: unknown): void {
+  const body = JSON.stringify(value);
+  for (const internal of [
+    "lease",
+    "generation",
+    "receipt",
+    "policy",
+    "frameBatch",
+    "mediaSha",
+    "calibrationNonce",
+  ])
+    expect(body).not.toContain(internal);
 }
 
 function ids(prefix = "aaaaaaaa"): () => string {

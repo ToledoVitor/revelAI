@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc --project tsconfig.build.json",
+    "check:production-dist": "node scripts/assert-production-dist.mjs",
     "lint": "eslint src",
     "typecheck": "tsc --project tsconfig.json",
     "test": "vitest run",

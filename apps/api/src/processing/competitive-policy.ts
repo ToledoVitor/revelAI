@@ -17,6 +17,8 @@ export type CompetitiveEligibilityDecision =
       kind: "competitive-eligible";
       competitiveStatus: "ranked";
       competitiveEligible: true;
+      /** C8 binds this internal fact to C4; it is never a public result. */
+      activation: CompetitivePolicyActivation;
     }>
   | Readonly<{
       kind: "competitive-ineligible";
@@ -76,14 +78,12 @@ export async function evaluateCompetitiveEligibility(
       ? temporaryCompetitivePolicyDecision()
       : experimental();
   }
-  return isCurrentExactPolicy(
-    activation,
-    query,
-    facts.execution,
-    input.clock.now(),
+  if (
+    activation &&
+    isCurrentExactPolicy(activation, query, facts.execution, input.clock.now())
   )
-    ? eligible()
-    : experimental();
+    return eligible(activation);
+  return experimental();
 }
 
 export function temporaryCompetitivePolicyDecision(): CompetitiveEligibilityDecision {
@@ -159,11 +159,14 @@ function isUtcTimestamp(value: string): boolean {
     Number.isFinite(Date.parse(value))
   );
 }
-function eligible(): CompetitiveEligibilityDecision {
+function eligible(
+  activation: CompetitivePolicyActivation,
+): CompetitiveEligibilityDecision {
   return Object.freeze({
     kind: "competitive-eligible",
     competitiveStatus: "ranked",
     competitiveEligible: true,
+    activation,
   });
 }
 function demo(): CompetitiveEligibilityDecision {

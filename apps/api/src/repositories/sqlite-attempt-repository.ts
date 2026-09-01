@@ -37,6 +37,7 @@ import {
   isStoredMediaAttachment,
   RepositoryError,
 } from "./attempt-repository.js";
+import { isCurrentRankedPolicyFinalization } from "./sqlite-competitive-policy-repository.js";
 import { createAes256GcmNonceAllocator } from "./cursor-nonce-allocator.js";
 export {
   RepositoryError,
@@ -310,6 +311,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
   private readonly attemptCursor: AttemptCursorCodec;
   private readonly liveLeaderboardCursor: LiveLeaderboardCursorCodec;
   readonly #handoffVerifier: AcceptedMediaHandoffVerifier;
+  readonly #compositionToken: SqliteDatabaseCompositionToken | undefined;
 
   /**
    * Test/migration reads never attach C5 media. Keep that explicitly
@@ -325,11 +327,12 @@ export class SQLiteAttemptRepository implements AttemptRepository {
   }
 
   public constructor(input: SQLiteAttemptRepositoryInput) {
-    if (!isFactoryIssuedSqliteDatabase(input.database))
+    const database = input.database;
+    if (!isFactoryIssuedSqliteDatabase(database))
       throw new Error(
         "C4 requires a factory-issued SQLite database capability.",
       );
-    this.#raw = input.database.raw;
+    this.#raw = database.raw;
     this.#clock = input.clock;
     this.ids = input.ids;
     this.attemptCursor =
@@ -342,6 +345,12 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       createLiveLeaderboardCursorCodec(
         input.liveLeaderboardCursorCrypto ?? processLiveLeaderboardCursorCrypto,
       );
+    // C4 can be constructed in a read-only test harness, but finalization
+    // authority is still bound to the exact factory-issued database wrapper.
+    // Keep that co-location fact independent of the C5 upload verifier.
+    const token = resolveFactoryIssuedSqliteDatabaseCompositionToken(database);
+    if (!token)
+      throw new Error("C4 factory database composition token is required.");
     const productionVerifier =
       input.handoffVerifier !== SQLiteAttemptRepository.readOnlyTestVerifier;
     if (
@@ -352,15 +361,10 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     this.#handoffVerifier = input.handoffVerifier;
     if (productionVerifier) {
       const cleanupAuthority =
-        resolveFactoryIssuedC4AcceptedMediaCleanupAuthority(input.database);
+        resolveFactoryIssuedC4AcceptedMediaCleanupAuthority(database);
       if (!cleanupAuthority)
         throw new Error("C4 factory cleanup authority is required.");
       c4AcceptedMediaCleanupAuthorities.set(this, cleanupAuthority);
-      const token = resolveFactoryIssuedSqliteDatabaseCompositionToken(
-        input.database,
-      );
-      if (!token)
-        throw new Error("C4 factory database composition token is required.");
       registerProductionSQLiteAttemptUploadPort(
         this,
         token,
@@ -372,6 +376,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         input.handoffVerifier,
       );
     }
+    this.#compositionToken = token;
   }
 
   public async issueCalibrationSession(
@@ -1445,7 +1450,18 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         completedAt: string;
         snapshot: object;
       }> | null = null;
-      if (isRankedCandidate(candidate)) {
+      if (
+        isRankedCandidate(candidate) &&
+        (!input.rankedPolicy ||
+          !this.#compositionToken ||
+          !isCurrentRankedPolicyFinalization(input.rankedPolicy, {
+            token: this.#compositionToken,
+            now: committedAt,
+            result: candidate.result,
+          }))
+      ) {
+        outcome = experimentalOutcome(candidate, row);
+      } else if (isRankedCandidate(candidate)) {
         const entryId = this.ids.next();
         const cohort = this.currentCohort();
         const rankable: DomainWallPassRankableResult = {
@@ -2725,6 +2741,24 @@ function parseTerminalCandidate(
   }
   parseTerminalOutcome(candidate, attempt);
   return candidate;
+}
+
+/** A stale ranking authority never blocks a valid analysis result. */
+function experimentalOutcome(
+  candidate: RankedCandidate,
+  attempt: AttemptRow,
+): Exclude<AttemptOutcome, { state: "pending" }> {
+  return parseTerminalOutcome(
+    Object.freeze({
+      state: "valid" as const,
+      result: Object.freeze({
+        ...candidate.result,
+        competitiveStatus: "experimental" as const,
+        competitiveEligible: false as const,
+      }),
+    }),
+    attempt,
+  );
 }
 
 function parseTerminalOutcome(

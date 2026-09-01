@@ -26,16 +26,32 @@ import {
   type CompetitivePolicyLookup,
 } from "../processing/competitive-policy.js";
 import type {
+  TransactionalRankedPolicyFinalizationAuthority,
   PersistedProcessingContext,
   ProcessingClaim,
   TerminalCandidate,
 } from "../repositories/attempt-repository.js";
+import { bindRankedCandidatePolicyFinalization } from "../repositories/attempt-repository.js";
+import type { CompetitivePolicyActivation } from "../repositories/competitive-policy-repository.js";
 import {
   ExpectedProcessingFailure,
   type AnalysisProcessor,
 } from "../workers/analysis-worker.js";
 
 export type VerifiedTrainingAnalysisClock = Readonly<{ now(): string }>;
+
+/**
+ * The only C8 error allowed to consume the worker's retry budget. C6 turns
+ * provider transport and scheduler/deadline failures into this precise fact;
+ * durable bindings, policy reads, and implementation defects terminalize
+ * safely as nonretryable internal failures instead.
+ */
+export class VerifiedTemporaryAnalysisError extends Error {
+  public constructor() {
+    super("Verified vision provider is temporarily unavailable.");
+    this.name = "VerifiedTemporaryAnalysisError";
+  }
+}
 
 /** C8-only C4–C7 closures; no HTTP, SQLite, or raw media implementation. */
 export type VerifiedTrainingAnalysisDependencies = Readonly<{
@@ -56,6 +72,9 @@ export type VerifiedTrainingAnalysisDependencies = Readonly<{
   provider: VisionProvider;
   scheduler?: VisionBatchScheduler;
   policy: CompetitivePolicyLookup;
+  issueRankedPolicyFinalization?(
+    activation: CompetitivePolicyActivation,
+  ): TransactionalRankedPolicyFinalizationAuthority | undefined;
   clock: VerifiedTrainingAnalysisClock;
 }>;
 
@@ -72,78 +91,97 @@ export function createVerifiedTrainingAnalysisProcessor(
   const provider = input.provider;
   const scheduler = input.scheduler;
   const policy = input.policy;
+  const issueRankedPolicy = input.issueRankedPolicyFinalization;
   const now = input.clock.now;
 
   return async ({ job, claim }) => {
-    assertVerifiedClaim(claim);
-    const persisted = await load({
-      attemptId: job.attemptId,
-      leaseId: claim.leaseId,
-      generation: claim.generation,
-    });
-    if (!persisted)
-      throw new Error("Verified processing claim is no longer active.");
-    const upload = verifiedUpload(persisted);
-    const manifest = await reconstruct({
-      context: persisted.processing,
-      authority: authorityFor(persisted, upload),
-    });
-    assertVerifiedManifest(manifest, job.attemptId, claim);
-
-    let evidence;
     try {
-      evidence = await assembleVerifiedObservation({
-        manifest,
-        frames,
-        provider,
-        scheduler,
-        calibrationSessionId: upload.verified.calibrationSessionId,
-        calibrationNonce: upload.verified.calibrationNonce,
+      assertVerifiedClaim(claim);
+      const persisted = await load({
+        attemptId: job.attemptId,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
       });
+      if (!persisted)
+        throw new Error("Verified processing claim is no longer active.");
+      const upload = verifiedUpload(persisted);
+      const manifest = await reconstruct({
+        context: persisted.processing,
+        authority: authorityFor(persisted, upload),
+      });
+      assertVerifiedManifest(manifest, job.attemptId, claim);
+
+      let evidence;
+      try {
+        evidence = await assembleVerifiedObservation({
+          manifest,
+          frames,
+          provider,
+          scheduler,
+          calibrationSessionId: upload.verified.calibrationSessionId,
+          calibrationNonce: upload.verified.calibrationNonce,
+        });
+      } catch (error) {
+        if (!(error instanceof VisionProviderError)) throw error;
+        if (error.code === "provider_temporary_unavailable")
+          throw new VerifiedTemporaryAnalysisError();
+        throw configurationFailure(job.attemptId);
+      }
+
+      const integrity = evaluateVerifiedIntegrity({
+        expected: {
+          attemptId: job.attemptId,
+          generation: claim.generation,
+          challenge: upload.verified.challenge,
+          calibrationSessionId: upload.verified.calibrationSessionId,
+          calibrationNonce: upload.verified.calibrationNonce,
+          mediaId: persisted.processing.receipt.mediaId,
+          mediaSha256: persisted.sourceSha256,
+          rawPreRollSha256: manifest.rawPreRollSha256,
+        },
+        manifest,
+        evidence,
+      });
+      if (integrity.kind === "integrity-invalid")
+        throw invalidFailure(job.attemptId, integrity.code);
+      if (integrity.kind === "analysis-temporary-unavailable")
+        throw internalFailure(job.attemptId);
+
+      const eligibility = await evaluateCompetitiveEligibility({
+        candidate: integrity.candidate,
+        repository: policy,
+        clock: Object.freeze({ now }),
+      });
+      if (eligibility.kind === "analysis-temporary-unavailable")
+        throw internalFailure(job.attemptId);
+      const rankedPolicy =
+        eligibility.kind === "competitive-eligible"
+          ? issueRankedPolicy?.(eligibility.activation)
+          : undefined;
+      const candidate = terminalCandidate({
+        attemptId: job.attemptId,
+        candidate: integrity.candidate,
+        competitiveStatus: rankedPolicy
+          ? eligibility.competitiveStatus
+          : eligibility.kind === "competitive-eligible"
+            ? "experimental"
+            : eligibility.competitiveStatus,
+        competitiveEligible: rankedPolicy
+          ? eligibility.competitiveEligible
+          : false,
+        completedAt: now(),
+      });
+      return rankedPolicy
+        ? bindRankedCandidatePolicyFinalization(candidate, rankedPolicy)
+        : candidate;
     } catch (error) {
       if (
-        error instanceof VisionProviderError &&
-        error.code !== "provider_temporary_unavailable"
+        error instanceof ExpectedProcessingFailure ||
+        error instanceof VerifiedTemporaryAnalysisError
       )
-        throw configurationFailure(job.attemptId);
-      throw error;
+        throw error;
+      throw internalFailure(job.attemptId);
     }
-
-    const integrity = evaluateVerifiedIntegrity({
-      expected: {
-        attemptId: job.attemptId,
-        generation: claim.generation,
-        challenge: upload.verified.challenge,
-        calibrationSessionId: upload.verified.calibrationSessionId,
-        calibrationNonce: upload.verified.calibrationNonce,
-        mediaId: persisted.processing.receipt.mediaId,
-        mediaSha256: persisted.sourceSha256,
-        rawPreRollSha256: manifest.rawPreRollSha256,
-      },
-      manifest,
-      evidence,
-    });
-    if (integrity.kind === "integrity-invalid")
-      throw invalidFailure(job.attemptId, integrity.code);
-    if (integrity.kind === "analysis-temporary-unavailable")
-      throw new Error(
-        "Verified integrity analysis is temporarily unavailable.",
-      );
-
-    const eligibility = await evaluateCompetitiveEligibility({
-      candidate: integrity.candidate,
-      repository: policy,
-      clock: Object.freeze({ now }),
-    });
-    if (eligibility.kind === "analysis-temporary-unavailable")
-      throw new Error("Competitive policy is temporarily unavailable.");
-    return terminalCandidate({
-      attemptId: job.attemptId,
-      candidate: integrity.candidate,
-      competitiveStatus: eligibility.competitiveStatus,
-      competitiveEligible: eligibility.competitiveEligible,
-      completedAt: now(),
-    });
   };
 }
 
@@ -268,6 +306,19 @@ function configurationFailure(attemptId: string): ExpectedProcessingFailure {
       mode: "verified" as const,
       code: "analysis_configuration_invalid" as const,
       message: FailureMessageByCode.analysis_configuration_invalid,
+      retryable: false as const,
+    }),
+  );
+}
+
+function internalFailure(attemptId: string): ExpectedProcessingFailure {
+  return new ExpectedProcessingFailure(
+    Object.freeze({
+      state: "failed" as const,
+      attemptId,
+      mode: "verified" as const,
+      code: "analysis_internal_error" as const,
+      message: FailureMessageByCode.analysis_internal_error,
       retryable: false as const,
     }),
   );

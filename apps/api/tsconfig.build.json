@@ -5,5 +5,9 @@
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
-  "exclude": ["src/**/*.test.ts", "src/media/c5-pipeline-test-support.ts"]
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.test-support.ts",
+    "src/media/c5-pipeline-test-support.ts"
+  ]
 }
