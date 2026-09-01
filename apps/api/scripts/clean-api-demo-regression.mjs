@@ -16,6 +16,8 @@ const fixturePrefix =
   invocation.session === undefined
     ? "revelai-clean-api-demo-"
     : `revelai-clean-api-demo-${invocation.session}-`;
+const startUncooperativeChild =
+  process.env.CLEAN_API_EXECUTABLE_TEST_UNCOOPERATIVE_CHILD === "1";
 const executableCases = [
   { name: "demo", script: "demo:smoke" },
   { name: "operator", script: "operator:receipt-smoke" },
@@ -119,6 +121,10 @@ async function runCleanCase(executableCase, options = {}) {
 
   try {
     assertCanStart();
+    if (startUncooperativeChild && executableCase.name === "demo") {
+      spawnUncooperativeChild();
+    }
+    await pauseAtBoundary(`inner:after-fixture:${executableCase.name}`);
     await run("git", ["archive", "--format=tar", "--output", archive, "HEAD"], {
       cwd: repository,
     });
@@ -153,6 +159,22 @@ async function runCleanCase(executableCase, options = {}) {
       activeFixtures.delete(fixture);
     }
   }
+}
+
+function spawnUncooperativeChild() {
+  if (invocation.session === undefined) throw new Error(COMMAND_FAILURE);
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      "process.on('SIGTERM', () => {}); setInterval(() => {}, 1_000)",
+      "--",
+      sessionArgument(invocation.session),
+    ],
+    { detached: true, stdio: "ignore" },
+  );
+  child.once("error", () => undefined);
+  child.unref();
 }
 
 async function removeWorkspaceBuild(fixture, scriptName) {
@@ -300,4 +322,8 @@ function parseInvocation(arguments_) {
   }
 
   return Object.freeze({ mode, session });
+}
+
+function sessionArgument(value) {
+  return `${sessionArgumentPrefix}${value}`;
 }

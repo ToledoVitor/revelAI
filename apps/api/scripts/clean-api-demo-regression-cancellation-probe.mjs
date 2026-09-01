@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readdir, rm } from "node:fs/promises";
+import { appendFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,6 +38,12 @@ const staleProcessGroup = configuredProcessGroup(
 );
 const failAfterReady =
   process.env.CLEAN_API_EXECUTABLE_TEST_FAIL_AFTER_READY === "1";
+const forceCloseFalseAfterKill =
+  process.env.CLEAN_API_EXECUTABLE_TEST_FORCE_CLOSE_FALSE_AFTER_KILL === "1";
+const processTableHangReceipt = join(
+  tmpdir(),
+  `revelai-clean-api-probe-process-table-${session}`,
+);
 
 for (const scenario of scenariosFor(probeScenario)) {
   await runScenario(scenario);
@@ -52,6 +58,33 @@ function scenariosFor(value) {
         name: "outer-before-main",
         boundary: "outer:before-main",
         readiness: "outer:before-main",
+      },
+    ];
+  }
+
+  if (value === "collector-after-inner-ready") {
+    return [
+      {
+        name: value,
+        boundary: "inner:after-fixture:demo",
+        readiness: "inner:after-fixture:demo",
+        failCollectorAfterReady: true,
+      },
+    ];
+  }
+
+  if (value === "uncooperative-close-false") {
+    return [
+      {
+        name: value,
+        boundary: "inner:after-fixture:demo",
+        readiness: "inner:after-fixture:demo",
+        failAfterReady: true,
+        forceCloseFalseAfterKill: true,
+        environment: {
+          CLEAN_API_EXECUTABLE_TEST_UNCOOPERATIVE_CHILD: "1",
+          CLEAN_API_EXECUTABLE_TEST_FORCE_CLOSE_FALSE_AFTER_KILL: "1",
+        },
       },
     ];
   }
@@ -98,6 +131,7 @@ async function runScenario(options) {
   );
   const ownedFixtures = new Set();
   let observing = true;
+  const collectorFailure = deferred();
   const collection = captureOutcome(
     typeof child.pid === "number"
       ? collectResources(
@@ -105,6 +139,9 @@ async function runScenario(options) {
           processGroups,
           ownedFixtures,
           () => observing,
+          options.failCollectorAfterReady
+            ? collectorFailure.promise
+            : undefined,
         )
       : Promise.reject(new Error(failure)),
   );
@@ -114,7 +151,17 @@ async function runScenario(options) {
     if (typeof child.pid !== "number") throw new Error(failure);
     const ready = await readiness.waitFor(options.readiness);
     await observeDetachedDescendant(child.pid, ready, processGroups);
-    if (failAfterReady) throw new Error(failure);
+    await recordDescendantProcessGroups(child.pid, processGroups);
+    await captureFixtures(ownedFixtures);
+    if (ownedFixtures.size === 0) throw new Error(failure);
+    announceProbeReadiness(options.name);
+    if (options.failCollectorAfterReady) {
+      collectorFailure.resolve();
+      const collectionOutcome = await collection;
+      if (collectionOutcome.status !== "rejected") throw new Error(failure);
+      throw new Error(failure);
+    }
+    if (failAfterReady || options.failAfterReady) throw new Error(failure);
 
     if (options.signal !== undefined) child.kill(options.signal);
 
@@ -139,6 +186,7 @@ async function runScenario(options) {
         collection,
         processGroups,
         ownedFixtures,
+        forceCloseFalseAfterKill: options.forceCloseFalseAfterKill,
       });
       throw new Error(failure);
     }
@@ -151,30 +199,53 @@ async function cleanupScenario({
   collection,
   processGroups,
   ownedFixtures,
+  forceCloseFalseAfterKill: scenarioForcesCloseFalse,
 }) {
-  await allSettled([
-    () => collection,
-    () => terminateProcessGroups(processGroups, "SIGTERM"),
-    () => signalChild(child, "SIGTERM"),
-  ]);
+  const cleanupFailures = [];
+  await settleCleanupPhase(
+    [
+      () => collection,
+      () => terminateProcessGroups(processGroups, "SIGTERM"),
+      () => signalChild(child, "SIGTERM"),
+    ],
+    cleanupFailures,
+  );
 
   let closed = await settlesWithin(close, terminationGraceMs);
-  if (!closed) {
-    await allSettled([
-      () => terminateProcessGroups(processGroups, "SIGKILL"),
-      () => signalChild(child, "SIGKILL"),
-    ]);
-    closed = await settlesWithin(close, closeAfterCleanupMs);
+  if (!closed || forceCloseFalseAfterKill || scenarioForcesCloseFalse) {
+    await settleCleanupPhase(
+      [
+        () => terminateProcessGroups(processGroups, "SIGKILL"),
+        () => signalChild(child, "SIGKILL"),
+      ],
+      cleanupFailures,
+    );
+    const closedAfterKill = await settlesWithin(close, closeAfterCleanupMs);
+    closed =
+      forceCloseFalseAfterKill || scenarioForcesCloseFalse
+        ? false
+        : closedAfterKill;
   }
 
-  await allSettled([
-    () => {
-      if (!closed) throw new Error(failure);
-    },
-    () => waitForProcessGroupsToClose(processGroups, closeAfterCleanupMs),
-    () => captureFixtures(ownedFixtures),
-    () => removeOwnedFixtures(ownedFixtures),
-  ]);
+  if (!closed) {
+    if (forceCloseFalseAfterKill || scenarioForcesCloseFalse) {
+      console.log("REVELAI_EXECUTABLE_PROBE_CLEANUP_CLOSE_FALSE");
+    }
+    cleanupFailures.push(new Error(failure));
+  }
+  await settleCleanupPhase(
+    [() => waitForProcessGroupsToClose(processGroups, closeAfterCleanupMs)],
+    cleanupFailures,
+  );
+  await settleCleanupPhase(
+    [() => captureFixtures(ownedFixtures)],
+    cleanupFailures,
+  );
+  await settleCleanupPhase(
+    [() => removeOwnedFixtures(ownedFixtures)],
+    cleanupFailures,
+  );
+  return Object.freeze({ failures: Object.freeze(cleanupFailures) });
 }
 
 function captureOutcome(operation) {
@@ -184,8 +255,13 @@ function captureOutcome(operation) {
   );
 }
 
-async function allSettled(steps) {
-  await Promise.allSettled(steps.map((step) => step()));
+async function settleCleanupPhase(steps, failures) {
+  const outcomes = await Promise.allSettled(
+    steps.map((step) => Promise.resolve().then(step)),
+  );
+  for (const outcome of outcomes) {
+    if (outcome.status === "rejected") failures.push(outcome.reason);
+  }
 }
 
 async function collectResources(
@@ -193,12 +269,17 @@ async function collectResources(
   processGroups,
   ownedFixtures,
   isObserving,
+  failAfterReady,
 ) {
   while (isObserving()) {
     for (const processGroup of await descendantProcessGroups(rootPid)) {
       processGroups.add(processGroup);
     }
     await captureFixtures(ownedFixtures);
+    if (failAfterReady !== undefined) {
+      await failAfterReady;
+      throw new Error(failure);
+    }
     await delay(50);
   }
 }
@@ -237,6 +318,16 @@ async function observeDetachedDescendant(rootPid, ready, processGroups) {
   }
   processGroups.add(process.pgid);
   if (staleProcessGroup !== undefined) processGroups.add(staleProcessGroup);
+}
+
+async function recordDescendantProcessGroups(rootPid, processGroups) {
+  for (const processGroup of await descendantProcessGroups(rootPid)) {
+    processGroups.add(processGroup);
+  }
+}
+
+function announceProbeReadiness(name) {
+  console.log(`REVELAI_EXECUTABLE_PROBE_READY ${name}`);
 }
 
 function observeReadiness(stdout) {
@@ -496,7 +587,15 @@ function runBoundedProcessTable() {
     child.stdout.on("data", (chunk) => append(chunk, true));
     child.stderr.on("data", (chunk) => append(chunk, false));
     child.once("error", () => settle(() => reject(new Error(failure))));
-    child.once("close", (exitCode) => {
+    child.once("close", async (exitCode, signal) => {
+      if (psMode === "hang") {
+        try {
+          await recordProcessTableHangReceipt(exitCode, signal, timedOut);
+        } catch {
+          settle(() => reject(new Error(failure)));
+          return;
+        }
+      }
       if (exitCode === 0 && !timedOut && !outputExceeded) {
         settle(() => resolve(output.toString("utf8")));
       } else {
@@ -508,6 +607,13 @@ function runBoundedProcessTable() {
       terminate();
     }, processTableTimeoutMs);
   });
+}
+
+async function recordProcessTableHangReceipt(exitCode, signal, timedOut) {
+  if (exitCode !== null || signal !== "SIGKILL" || !timedOut) {
+    throw new Error(failure);
+  }
+  await appendFile(processTableHangReceipt, "killed-close\n");
 }
 
 function processTableCommand() {
@@ -525,7 +631,12 @@ function processTableCommand() {
     case "hang":
       return Object.freeze({
         executable: process.execPath,
-        arguments: ["-e", "setInterval(() => {}, 1_000)"],
+        arguments: [
+          "-e",
+          `process.on("SIGTERM", () => require("node:fs").appendFileSync(${JSON.stringify(
+            processTableHangReceipt,
+          )}, "term\\n")); setInterval(() => {}, 1_000)`,
+        ],
       });
     default:
       return Object.freeze({
@@ -551,7 +662,15 @@ function configuredPsMode(value) {
 
 function configuredProbeScenario(value) {
   if (value === undefined) return undefined;
-  if (value !== "outer-before-main") throw new Error(failure);
+  if (
+    ![
+      "outer-before-main",
+      "collector-after-inner-ready",
+      "uncooperative-close-false",
+    ].includes(value)
+  ) {
+    throw new Error(failure);
+  }
   return value;
 }
 
@@ -564,4 +683,12 @@ function configuredProcessGroup(value) {
 
 function sessionArgument(value) {
   return `${sessionArgumentPrefix}${value}`;
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((resolveDeferred) => {
+    resolve = resolveDeferred;
+  });
+  return Object.freeze({ promise, resolve });
 }

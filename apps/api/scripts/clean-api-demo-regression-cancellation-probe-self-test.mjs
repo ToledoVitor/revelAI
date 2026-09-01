@@ -22,7 +22,7 @@ const fixtureRoot = "revelai-clean-api-demo-";
 const probeTimeoutMs = 90_000;
 const terminationGraceMs = 500;
 const closeAfterKillMs = 5_000;
-const processAuditMaxOutputBytes = 128 * 1024;
+const processAuditNoiseBytes = 128 * 1024;
 const foreignSession = sessionToken();
 const foreignFixture = await mkdtemp(
   join(tmpdir(), `${fixtureRoot}${foreignSession}-`),
@@ -83,7 +83,7 @@ try {
   await assertExists(foreignFixture);
   await assertMissing(terminationMarker);
 
-  await assertProcessAuditRejectsTruncation();
+  await assertProcessAuditFindsLateSession();
 } finally {
   try {
     await terminateAndWait(foreign, foreignClose, { requireKill: true });
@@ -118,7 +118,7 @@ async function assertProcessTableKillReceipt(session) {
     `revelai-clean-api-probe-process-table-${session}`,
   );
   try {
-    if ((await readFile(receipt, "utf8")) !== "term\nkilled-close\n") {
+    if (!(await readFile(receipt, "utf8")).includes("term\nkilled-close\n")) {
       throw new Error(failure);
     }
   } finally {
@@ -126,23 +126,26 @@ async function assertProcessTableKillReceipt(session) {
   }
 }
 
-async function assertProcessAuditRejectsTruncation() {
+async function assertProcessAuditFindsLateSession() {
+  const session = sessionToken();
   const child = spawn(
     process.execPath,
     [
       "-e",
       "process.on('SIGTERM', () => {}); setInterval(() => {}, 1_000)",
       "--",
-      "x".repeat(processAuditMaxOutputBytes + 4 * 1024),
+      "x".repeat(processAuditNoiseBytes + 4 * 1024),
+      `--revelai-clean-api-session=${session}`,
     ],
     { detached: true, stdio: "ignore" },
   );
   const close = observeClose(child);
 
   try {
+    assertChunkBoundarySearch(`--revelai-clean-api-session=${session}`);
     let rejected = false;
     try {
-      await assertNoSessionProcesses(sessionToken());
+      await assertNoSessionProcesses(session);
     } catch (error) {
       rejected = error instanceof Error && error.message === failure;
     }
@@ -227,24 +230,25 @@ async function assertNoSessionFixtures(session) {
 }
 
 async function assertNoSessionProcesses(session) {
-  const output = await readProcessTable();
-  if (output.includes(`--revelai-clean-api-session=${session}`)) {
+  if (await processTableContains(`--revelai-clean-api-session=${session}`)) {
     throw new Error(failure);
   }
 }
 
-function readProcessTable() {
+function processTableContains(needle) {
   return new Promise((resolve, reject) => {
-    let output = Buffer.alloc(0);
-    let outputExceeded = false;
     let settled = false;
     let killTimer;
+    const search = createStreamingTokenSearch(needle);
     const child = spawn("ps", ["-ww", "-axo", "command="], {
       detached: true,
       stdio: ["ignore", "pipe", "ignore"],
     });
     const close = observeClose(child);
-    const timeout = setTimeout(() => terminate(child.pid), 5_000);
+    const timeout = setTimeout(() => {
+      terminate(child.pid);
+      killTimer = setTimeout(() => kill(child.pid), terminationGraceMs);
+    }, 5_000);
     const settle = (callback) => {
       if (settled) return;
       settled = true;
@@ -252,33 +256,43 @@ function readProcessTable() {
       clearTimeout(killTimer);
       callback();
     };
-    const terminateAudit = () => {
-      terminate(child.pid);
-      killTimer = setTimeout(() => kill(child.pid), terminationGraceMs);
-    };
-
     child.stdout.on("data", (chunk) => {
-      const bytes = Buffer.from(chunk);
-      const remaining = processAuditMaxOutputBytes - output.length;
-      if (remaining > 0) {
-        output = Buffer.concat([output, bytes.subarray(0, remaining)]);
-      }
-      if (bytes.length > remaining) {
-        outputExceeded = true;
-        terminateAudit();
-      }
+      search.push(chunk);
     });
     child.once("error", () => settle(() => reject(new Error(failure))));
     child.once("close", (exitCode) => {
-      if (exitCode !== 0 || outputExceeded) {
+      if (exitCode !== 0) {
         settle(() => reject(new Error(failure)));
         return;
       }
-      settle(() => resolve(output.toString("utf8")));
+      settle(() => resolve(search.found));
     });
 
     void close.closed.catch(() => undefined);
   });
+}
+
+function createStreamingTokenSearch(needle) {
+  let found = false;
+  let overlap = "";
+  return Object.freeze({
+    get found() {
+      return found;
+    },
+    push(chunk) {
+      if (found) return;
+      const text = overlap + Buffer.from(chunk).toString("utf8");
+      found = text.includes(needle);
+      overlap = text.slice(-(needle.length - 1));
+    },
+  });
+}
+
+function assertChunkBoundarySearch(needle) {
+  const search = createStreamingTokenSearch(needle);
+  search.push(Buffer.from(needle.slice(0, -1)));
+  search.push(Buffer.from(needle.slice(-1)));
+  if (!search.found) throw new Error(failure);
 }
 
 async function terminateAndWait(child, close, { requireKill }) {
