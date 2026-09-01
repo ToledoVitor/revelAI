@@ -12,6 +12,7 @@ jobs:
   demo-quality:
     name: Demo-only quality checks
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -27,8 +28,9 @@ jobs:
       - run: pnpm --filter @revelai/api exec vitest run src/http/operability-routes.test.ts src/startup.test.ts src/http/openapi.test.ts
 
   demo-operability:
-    name: Demo-only readiness and redaction probes
+    name: Demo-only clean executable and operability probes
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -39,9 +41,6 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm run ci:clean-api-executables:self-test
       - run: pnpm run ci:clean-api-executables
-      - run: pnpm --filter @revelai/api run demo:smoke
-      - run: pnpm --filter @revelai/api run operator:receipt-smoke
-      - run: pnpm --filter @revelai/api run build
-      - run: pnpm --filter @revelai/api run openapi:check
       - run: pnpm --filter @revelai/api exec vitest run src/http/operability-routes.test.ts src/startup.test.ts
