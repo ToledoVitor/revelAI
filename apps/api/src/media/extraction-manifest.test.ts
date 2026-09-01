@@ -286,6 +286,44 @@ describe("extraction manifest", () => {
         authority: { upload: authority },
       }),
     ).rejects.toThrow("durable extraction frame mismatch");
+    const mutatedReader = {
+      ...substitutedReader,
+      readFrame: async (reference: string) => {
+        const frame = splitFrames.find(
+          (candidate) => candidate.reference === reference,
+        )!;
+        return reference === splitFrames[7]!.reference
+          ? Uint8Array.of(...frame.rawBytes, 0xff)
+          : frame.rawBytes;
+      },
+    };
+    await expect(
+      reconstructDurableProcessingContext({
+        context,
+        frames: mutatedReader,
+        receipts: mutatedReader,
+        authority: { upload: authority },
+      }),
+    ).rejects.toThrow("durable extraction frame mismatch");
+    const reorderedReader = {
+      ...substitutedReader,
+      readFrame: async (reference: string) => {
+        const ordinal = splitFrames.findIndex(
+          (candidate) => candidate.reference === reference,
+        );
+        if (ordinal === 8) return splitFrames[9]!.rawBytes;
+        if (ordinal === 9) return splitFrames[8]!.rawBytes;
+        return splitFrames[ordinal]!.rawBytes;
+      },
+    };
+    await expect(
+      reconstructDurableProcessingContext({
+        context,
+        frames: reorderedReader,
+        receipts: reorderedReader,
+        authority: { upload: authority },
+      }),
+    ).rejects.toThrow("durable extraction frame mismatch");
     await expect(
       reconstructDurableProcessingContext({
         context,

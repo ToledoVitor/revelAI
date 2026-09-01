@@ -25,6 +25,17 @@ class ManualScheduler implements QueueScheduler {
   }
 }
 
+function deferred<Value>(): Readonly<{
+  promise: Promise<Value>;
+  resolve(value: Value): void;
+}> {
+  let resolve: (value: Value) => void = () => undefined;
+  const promise = new Promise<Value>((settle) => {
+    resolve = settle;
+  });
+  return Object.freeze({ promise, resolve });
+}
+
 describe("InMemoryAnalysisQueue", () => {
   it("delivers queued job identifiers in FIFO order to a later subscriber", async () => {
     const scheduler = new ManualScheduler();
@@ -66,6 +77,35 @@ describe("InMemoryAnalysisQueue", () => {
     await expect(
       queue.enqueue({ attemptId: "attempt-1", generation: 1 }),
     ).rejects.toBeInstanceOf(QueueUnavailableError);
+  });
+
+  it("rejects admission when close races an awaited pre-enqueue hook", async () => {
+    const scheduler = new ManualScheduler();
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const queue = new InMemoryAnalysisQueue({
+      scheduler,
+      beforeEnqueue: async () => {
+        entered.resolve();
+        await release.promise;
+      },
+    });
+    const received: string[] = [];
+    queue.subscribe(async (job) => {
+      received.push(job.attemptId);
+    });
+
+    const admission = queue.enqueue({
+      attemptId: "attempt-race",
+      generation: 1,
+    });
+    await entered.promise;
+    queue.close();
+    release.resolve();
+
+    await expect(admission).rejects.toBeInstanceOf(QueueUnavailableError);
+    await scheduler.runAll();
+    expect(received).toEqual([]);
   });
 
   it("stops delivery after its only subscriber unsubscribes", async () => {

@@ -118,6 +118,7 @@ export function createVerifiedFixtureVisionProvider(
     workflowVersion?: string;
     fiducialXOffsetForFrame?: (frameIndex: number) => number;
     workflowResponse?: unknown;
+    workflowError?: Error;
   }> = {},
 ): VisionProvider {
   if (provenance === "demo") return createDemoVisionProvider();
@@ -161,6 +162,7 @@ export function createVerifiedFixtureVisionProvider(
       const index = frameIndexes.shift();
       if (index === undefined) throw new Error("fixture frame index required");
       await options.beforeWorkflowResponse?.(index);
+      if (options.workflowError) throw options.workflowError;
       return {
         status: 200,
         json: async () => ({

@@ -3,9 +3,9 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
-  rename,
   rm,
   stat,
   symlink,
@@ -25,9 +25,7 @@ import {
   MediaUploadAcceptedSchema,
   RouteErrorSchema,
   WorkflowBenchmarkReceiptSchema,
-  failedWorkflowBenchmarkReceiptFixture,
   passingWorkflowBenchmarkReceiptFixture,
-  staleWorkflowBenchmarkReceiptFixture,
 } from "@revelai/contracts";
 import {
   createDemoVisionProvider,
@@ -35,7 +33,7 @@ import {
   VisionBatchScheduler,
   type VisionProvider,
 } from "@revelai/vision";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createProductionTrainingAttemptApi } from "../composition/training-analysis-composition.js";
 import { openSqliteDatabase } from "../database/sqlite-database.js";
 import { createC5PipelineTestSupport } from "../media/c5-pipeline-test-support.js";
@@ -50,8 +48,8 @@ import { SQLiteCompetitivePolicyRepository } from "../repositories/sqlite-compet
 import { createLocalC8AcceptedMediaCleaner } from "../services/local-c8-accepted-media-cleaner.js";
 import type { BoundedFrameProcessRunner } from "../storage/local-frame-extraction.js";
 import type {
+  AtomicMediaRenamer,
   LocalMediaProber,
-  NoReplacePublisher,
 } from "../storage/local-media-storage.js";
 
 const ATHLETE_ID = "11111111-1111-4111-8111-111111111111";
@@ -231,6 +229,7 @@ describe("Core acceptance through the production Fastify seam", () => {
     const fixture = await makeRoot({
       verifiedProvider: createDemoVisionProvider(),
       freeProvider: free.provider,
+      approvedPolicy: true,
       c5Mode: "free",
       c5Prober: {
         probe: async (input) => {
@@ -248,6 +247,7 @@ describe("Core acceptance through the production Fastify seam", () => {
       },
     });
     try {
+      installFreeForbiddenPortGuards(fixture);
       const created = await fixture.app.inject({
         method: "POST",
         url: "/v1/attempts",
@@ -301,6 +301,7 @@ describe("Core acceptance through the production Fastify seam", () => {
         mode: "free",
         status: "uploaded",
       });
+      await expectPrivateMediaTree(fixture, attemptId);
       const receipt = await durableReceiptFor(fixture, attemptId);
       await fixture.scheduler.runAll();
       const result = await resultFor(fixture.app, attemptId);
@@ -587,8 +588,8 @@ describe("Core acceptance through the production Fastify seam", () => {
     const gatedProvider = () => {
       let gated = false;
       return createVerifiedFixtureVisionProvider("roboflow", {
-        beforeWorkflowResponse: async () => {
-          if (gated) return;
+        beforeWorkflowResponse: async (frameIndex) => {
+          if (frameIndex !== 639 || gated) return;
           gated = true;
           arrivals += 1;
           if (arrivals === 2) entered.resolve();
@@ -622,6 +623,7 @@ describe("Core acceptance through the production Fastify seam", () => {
       });
       const secondDelivery = runNext(secondary.scheduler);
       await entered.promise;
+      expect(arrivals).toBe(2);
       release.resolve();
       await Promise.all([firstDelivery, secondDelivery]);
       await primary.scheduler.runAll();
@@ -690,8 +692,8 @@ describe("Core acceptance through the production Fastify seam", () => {
     let gated = false;
     const primary = await makeRoot({
       verifiedProvider: createVerifiedFixtureVisionProvider("roboflow", {
-        beforeWorkflowResponse: async () => {
-          if (gated) return;
+        beforeWorkflowResponse: async (frameIndex) => {
+          if (frameIndex !== 639 || gated) return;
           gated = true;
           entered.resolve();
           await release.promise;
@@ -714,14 +716,14 @@ describe("Core acceptance through the production Fastify seam", () => {
       const attempt = await createVerifiedAttempt(primary.app);
       const finalizer = runNext(primary.scheduler);
       await entered.promise;
-      const deleted = await secondary.app.inject({
+      const deleting = secondary.app.inject({
         method: "DELETE",
         url: `/v1/attempts/${attempt.attemptId}`,
         headers: athleteHeaders(),
       });
-      expect(deleted.statusCode).toBe(204);
       release.resolve();
-      await finalizer;
+      const [, deleted] = await Promise.all([finalizer, deleting]);
+      expect(deleted.statusCode).toBe(204);
       await primary.scheduler.runAll();
       await secondary.close();
       secondary = undefined;
@@ -1072,30 +1074,45 @@ describe("Core acceptance through the production Fastify seam", () => {
       verifiedProvider: createDemoVisionProvider(),
       c5Mode: "free",
     });
+    const writePrototypeHandle = await open(
+      join(writeFailure.root, ".c10-filehandle-prototype"),
+      "w",
+      0o600,
+    );
+    const writeSpy = vi
+      .spyOn(Object.getPrototypeOf(writePrototypeHandle), "write")
+      .mockRejectedValueOnce(
+        new Error("C10 real FileHandle.write fault /private/write"),
+      );
     try {
       const attemptId = await createFreeAttempt(writeFailure.app);
-      await expect(
-        writeFailure.app.inject({
-          method: "POST",
-          url: `/v1/attempts/${attemptId}/media`,
-          headers: multipartHeaders("storage-write"),
-          payload: Readable.from(
-            (async function* () {
-              yield multipart(
-                "storage-write",
-                "C10-write-private.mp4",
-              ).subarray(0, -8);
-              throw new Error("C10 local write stream disconnected");
-            })(),
-          ),
-        }),
-      ).rejects.toThrow("C10 local write stream disconnected");
+      const response = await writeFailure.app.inject({
+        method: "POST",
+        url: `/v1/attempts/${attemptId}/media`,
+        headers: multipartHeaders("storage-write"),
+        payload: multipart("storage-write", "C10-write-private.mp4"),
+      });
+      expect(response.statusCode).toBe(422);
+      expect(RouteErrorSchema.parse(response.json()).code).toBe(
+        "media_probe_failed",
+      );
+      expect(response.body).not.toMatch(
+        /C10|FileHandle|private|path|stack|sql/i,
+      );
       expect(attemptRow(writeFailure, attemptId)).toMatchObject({
         status: "awaiting-upload",
         media_json: null,
       });
       await expectEmptyMediaDirectories(writeFailure);
+      await expectNoTemporaryOrPublicationFacts(writeFailure, attemptId);
+      await writeFailure.restart();
+      await expectEmptyMediaDirectories(writeFailure);
     } finally {
+      writeSpy.mockRestore();
+      await writePrototypeHandle.close();
+      await rm(join(writeFailure.root, ".c10-filehandle-prototype"), {
+        force: true,
+      });
       await writeFailure.close();
     }
 
@@ -1145,22 +1162,9 @@ describe("Core acceptance through the production Fastify seam", () => {
     const publicationFailure = await makeRoot({
       verifiedProvider: createDemoVisionProvider(),
       c5Mode: "free",
-      c5Publisher: {
-        publish: async ({
-          temporaryPath,
-          finalDirectory,
-          payloadPath,
-          ownerToken,
-        }) => {
-          await mkdir(finalDirectory, { mode: 0o700 });
-          await chmod(finalDirectory, 0o700);
-          await writeFile(join(finalDirectory, ".owner"), ownerToken, {
-            flag: "wx",
-            mode: 0o600,
-          });
-          await rename(temporaryPath, payloadPath);
-          await chmod(payloadPath, 0o600);
-          throw new Error("C10 rename publication failure /private/payload");
+      c5Renamer: {
+        rename: async () => {
+          throw new Error("C10 production rename fault /private/payload");
         },
       },
     });
@@ -1181,7 +1185,7 @@ describe("Core acceptance through the production Fastify seam", () => {
       );
       expect(response.body).not.toMatch(
         new RegExp(
-          "C10-publication|rename publication|private/payload|path|stack|sql",
+          "C10-publication|production rename|private/payload|path|stack|sql",
           "i",
         ),
       );
@@ -1189,6 +1193,9 @@ describe("Core acceptance through the production Fastify seam", () => {
         status: "awaiting-upload",
         media_json: null,
       });
+      await expectEmptyMediaDirectories(publicationFailure);
+      await expectNoTemporaryOrPublicationFacts(publicationFailure, attemptId);
+      await publicationFailure.restart();
       await expectEmptyMediaDirectories(publicationFailure);
     } finally {
       await publicationFailure.close();
@@ -1254,33 +1261,42 @@ describe("Core acceptance through the production Fastify seam", () => {
   }, 20_000);
 
   it("never returns or logs injected provider secrets, media bytes, or private storage facts", async () => {
-    const apiKey = "C10_API_KEY_SENTINEL_8be37d";
+    const apiKey = "rf_C10_API_KEY_SENTINEL_8be37d";
     const authorization = "Bearer C10_AUTHORIZATION_SENTINEL_5d94a1";
     const mediaBytes = "C10_MEDIA_BYTES_SENTINEL_4fa91b";
     const rawPayload = "C10_RAW_PROVIDER_PAYLOAD_SENTINEL_7ac22e";
+    const filename = "C10_FILENAME_SENTINEL_0e56ab.mp4";
+    const rawPath = "/private/C10_PATH_SENTINEL_2c8a50";
+    const rawSql = "SELECT C10_SQL_SENTINEL_89ad2e";
+    const calibration = "C10_CALIBRATION_SENTINEL_9146bc";
+    const evidence = "C10_EVIDENCE_SENTINEL_7fe243";
     const logs: unknown[] = [];
     const workflowBodies: string[] = [];
+    const providerFailure = new Error(
+      [rawPayload, rawPath, rawSql, calibration, evidence].join(" "),
+    );
+    providerFailure.stack = `C10_STACK_SENTINEL_1da762 ${providerFailure.message}`;
     const fixture = await makeRoot({
       verifiedProvider: createVerifiedFixtureVisionProvider("roboflow", {
         apiKey,
         apiUrl: "https://roboflow.c10.invalid",
         onWorkflowRequest: (_url, init) => workflowBodies.push(init.body),
-        workflowResponse: {
-          outputs: [
-            {
-              authorization,
-              rawPayload,
-              image: { type: "base64", value: mediaBytes },
-            },
-          ],
-        },
+        workflowError: providerFailure,
       }),
       approvedPolicy: true,
       c5Mode: "verified",
       logs,
     });
     try {
-      const { attemptId, upload } = await createVerifiedAttempt(fixture.app);
+      const { attemptId, upload, uploadBody } = await createVerifiedAttempt(
+        fixture.app,
+        {
+          authorization,
+          boundary: "redaction-sentinel",
+          filename,
+          payloadSuffix: mediaBytes,
+        },
+      );
       await fixture.scheduler.runAll();
       const result = await resultResponse(fixture.app, attemptId);
       const listed = await fixture.app.inject({
@@ -1307,6 +1323,7 @@ describe("Core acceptance through the production Fastify seam", () => {
       expectNoLeaks(
         [
           upload,
+          uploadBody,
           result.body,
           listed.body,
           leaderboard.body,
@@ -1318,6 +1335,12 @@ describe("Core acceptance through the production Fastify seam", () => {
           authorization,
           mediaBytes,
           rawPayload,
+          filename,
+          rawPath,
+          rawSql,
+          calibration,
+          evidence,
+          "C10_STACK_SENTINEL_1da762",
           fixture.root,
           ATHLETE_ID,
           "api_key",
@@ -1645,91 +1668,114 @@ describe("Core acceptance through the production Fastify seam", () => {
   it("table-drives every competitive receipt and tuple mismatch to zero leaderboard impact", async () => {
     const cases: readonly Readonly<{
       name: string;
-      receipt?: unknown;
-      approvedPolicy?: boolean;
+      activePolicy?: boolean;
+      receiptMutation?: "failed" | "stale";
       invalidate?: boolean;
       provider?: VisionProvider;
       policyColumn?:
+        | "workspace_id"
+        | "model_bundle_id"
+        | "provider_version"
         | "calibration_evidence_version"
         | "extraction_evidence_version"
         | "observation_evidence_version";
       expected: "experimental" | "configuration-failed";
     }>[] = [
       {
-        name: "missing receipt/policy",
+        name: "missing receipt",
         expected: "experimental",
       },
       {
-        name: "failed receipt",
-        receipt: failedWorkflowBenchmarkReceiptFixture,
+        name: "active receipt changed to failed",
+        activePolicy: true,
+        receiptMutation: "failed",
         expected: "experimental",
       },
       {
-        name: "stale receipt",
-        receipt: staleWorkflowBenchmarkReceiptFixture,
+        name: "active receipt changed to stale",
+        activePolicy: true,
+        receiptMutation: "stale",
         expected: "experimental",
       },
       {
         name: "invalidated receipt",
-        approvedPolicy: true,
+        activePolicy: true,
         invalidate: true,
         expected: "experimental",
       },
       {
-        name: "workspace tuple",
-        approvedPolicy: true,
+        name: "provider workspace tuple",
+        activePolicy: true,
         provider: createVerifiedFixtureVisionProvider("roboflow", {
           workspaceId: "unapproved-workspace",
         }),
         expected: "experimental",
       },
       {
-        name: "model tuple",
-        approvedPolicy: true,
+        name: "provider model tuple",
+        activePolicy: true,
         provider: createVerifiedFixtureVisionProvider("roboflow", {
           verifiedModelBundleId: "unapproved-wall-pass-bundle-v1",
         }),
         expected: "experimental",
       },
       {
-        name: "provider-version tuple",
-        approvedPolicy: true,
+        name: "provider version tuple",
+        activePolicy: true,
         provider: createVerifiedFixtureVisionProvider("roboflow", {
           verifiedProviderVersion: "unapproved-provider-v2",
         }),
         expected: "experimental",
       },
       {
-        name: "workflow-id response",
-        approvedPolicy: true,
+        name: "malformed workflow-id contract configuration",
+        activePolicy: true,
         provider: createVerifiedFixtureVisionProvider("roboflow", {
           workflowId: "unexpected-workflow-id",
         }),
         expected: "configuration-failed",
       },
       {
-        name: "workflow-version response",
-        approvedPolicy: true,
+        name: "malformed workflow-version contract configuration",
+        activePolicy: true,
         provider: createVerifiedFixtureVisionProvider("roboflow", {
           workflowVersion: "2.0.0",
         }),
         expected: "configuration-failed",
       },
       {
-        name: "calibration-evidence policy tuple",
-        approvedPolicy: true,
+        name: "stored workspace tuple",
+        activePolicy: true,
+        policyColumn: "workspace_id",
+        expected: "experimental",
+      },
+      {
+        name: "stored model tuple",
+        activePolicy: true,
+        policyColumn: "model_bundle_id",
+        expected: "experimental",
+      },
+      {
+        name: "stored provider-version tuple",
+        activePolicy: true,
+        policyColumn: "provider_version",
+        expected: "experimental",
+      },
+      {
+        name: "stored calibration-evidence tuple",
+        activePolicy: true,
         policyColumn: "calibration_evidence_version",
         expected: "experimental",
       },
       {
-        name: "extraction-evidence policy tuple",
-        approvedPolicy: true,
+        name: "stored extraction-evidence tuple",
+        activePolicy: true,
         policyColumn: "extraction_evidence_version",
         expected: "experimental",
       },
       {
-        name: "observation-evidence policy tuple",
-        approvedPolicy: true,
+        name: "stored observation-evidence tuple",
+        activePolicy: true,
         policyColumn: "observation_evidence_version",
         expected: "experimental",
       },
@@ -1738,11 +1784,33 @@ describe("Core acceptance through the production Fastify seam", () => {
       const fixture = await makeRoot({
         verifiedProvider:
           scenario.provider ?? createVerifiedFixtureVisionProvider("roboflow"),
-        ...(scenario.approvedPolicy ? { approvedPolicy: true } : {}),
-        ...(scenario.receipt ? { benchmarkReceipt: scenario.receipt } : {}),
+        ...(scenario.activePolicy ? { approvedPolicy: true } : {}),
         c5Mode: "verified",
       });
       try {
+        if (scenario.activePolicy) {
+          if (!fixture.policy)
+            throw new Error("C10 active-policy fixture requires policy");
+          expect(
+            await fixture.policy.getActiveCompetitivePolicy(competitiveTuple()),
+            `${scenario.name}: baseline policy`,
+          ).not.toBeNull();
+        }
+        if (scenario.receiptMutation === "failed")
+          fixture.database.raw
+            .prepare(
+              "UPDATE workflow_benchmark_receipts SET status = 'failed' WHERE id = ?",
+            )
+            .run(passingWorkflowBenchmarkReceiptFixture.id);
+        if (scenario.receiptMutation === "stale")
+          fixture.database.raw
+            .prepare(
+              "UPDATE workflow_benchmark_receipts SET valid_until = ? WHERE id = ?",
+            )
+            .run(
+              "2030-01-15T11:59:59.999Z",
+              passingWorkflowBenchmarkReceiptFixture.id,
+            );
         if (scenario.invalidate) {
           if (!fixture.policy)
             throw new Error("C10 invalidation fixture requires a policy");
@@ -1752,12 +1820,27 @@ describe("Core acceptance through the production Fastify seam", () => {
             reason: "operator_revoked",
           });
         }
-        if (scenario.policyColumn)
+        if (scenario.policyColumn) {
+          fixture.database.raw.pragma("foreign_keys = OFF");
           fixture.database.raw
             .prepare(
               `UPDATE approved_competitive_model_policies SET ${scenario.policyColumn} = ?`,
             )
             .run(`unapproved-${scenario.policyColumn}`);
+          fixture.database.raw.pragma("foreign_keys = ON");
+        }
+        if (
+          scenario.receiptMutation ||
+          scenario.invalidate ||
+          scenario.policyColumn
+        ) {
+          if (!fixture.policy)
+            throw new Error("C10 mutated-policy fixture requires policy");
+          expect(
+            await fixture.policy.getActiveCompetitivePolicy(competitiveTuple()),
+            `${scenario.name}: mutation must remove eligibility`,
+          ).toBeNull();
+        }
         const { attemptId } = await createVerifiedAttempt(fixture.app);
         await fixture.scheduler.runAll();
         const outcome = await resultFor(fixture.app, attemptId);
@@ -1793,6 +1876,39 @@ describe("Core acceptance through the production Fastify seam", () => {
         await fixture.close();
       }
     }
+    for (const lockedColumn of [
+      "workflow_id",
+      "workflow_version",
+      "challenge_id",
+      "challenge_version",
+      "rule_version",
+    ] as const) {
+      const fixture = await makeRoot({
+        verifiedProvider: createVerifiedFixtureVisionProvider("roboflow"),
+        approvedPolicy: true,
+        c5Mode: "verified",
+      });
+      try {
+        const replacement =
+          lockedColumn === "challenge_version"
+            ? 2
+            : `unapproved-${lockedColumn}`;
+        expect(() =>
+          fixture.database.raw
+            .prepare(
+              `UPDATE approved_competitive_model_policies SET ${lockedColumn} = ?`,
+            )
+            .run(replacement),
+        ).toThrow();
+        expect(
+          fixture.database.raw
+            .prepare("SELECT COUNT(*) AS count FROM leaderboard_entries")
+            .get(),
+        ).toEqual({ count: 0 });
+      } finally {
+        await fixture.close();
+      }
+    }
   }, 30_000);
 });
 
@@ -1812,10 +1928,9 @@ async function makeRoot(
     ) => void | Promise<void>;
     c5Prober?: LocalMediaProber;
     c5Runner?: BoundedFrameProcessRunner;
-    c5Publisher?: NoReplacePublisher;
+    c5Renamer?: AtomicMediaRenamer;
     verifiedScheduler?: VisionBatchScheduler;
     logs?: unknown[];
-    benchmarkReceipt?: unknown;
     root?: string;
     activatePolicy?: boolean;
     repositoryIdPrefix?: string;
@@ -1847,7 +1962,7 @@ async function makeRoot(
       mode: input.c5Mode,
       ...(input.c5Prober ? { prober: input.c5Prober } : {}),
       ...(input.c5Runner ? { runner: input.c5Runner } : {}),
-      ...(input.c5Publisher ? { publisher: input.c5Publisher } : {}),
+      ...(input.c5Renamer ? { renamer: input.c5Renamer } : {}),
     });
     repository = new SQLiteAttemptRepository({
       database,
@@ -1856,16 +1971,11 @@ async function makeRoot(
       handoffVerifier: c5.handoffVerifier,
     });
     const retention = new SQLiteRetentionRepository({ database });
-    if (input.approvedPolicy || input.benchmarkReceipt) {
+    if (input.approvedPolicy) {
       policy = new SQLiteCompetitivePolicyRepository({
         database,
         clock: { now: () => NOW },
       });
-      if (activatePolicy && input.benchmarkReceipt) {
-        await policy.storeBenchmarkReceipt(
-          WorkflowBenchmarkReceiptSchema.parse(input.benchmarkReceipt),
-        );
-      }
       if (activatePolicy && input.approvedPolicy) {
         const receipt = WorkflowBenchmarkReceiptSchema.parse(
           passingWorkflowBenchmarkReceiptFixture,
@@ -2035,8 +2145,19 @@ function immediatelyExpiredVisionScheduler(): VisionBatchScheduler {
 
 async function createVerifiedAttempt(
   app: Awaited<ReturnType<typeof makeRoot>>["app"],
+  input: Readonly<{
+    authorization?: string;
+    boundary?: string;
+    filename?: string;
+    payloadSuffix?: string;
+  }> = {},
 ): Promise<
-  Readonly<{ attemptId: string; calibrationId: string; upload: unknown }>
+  Readonly<{
+    attemptId: string;
+    calibrationId: string;
+    upload: unknown;
+    uploadBody: string;
+  }>
 > {
   const calibration = await app.inject({
     method: "POST",
@@ -2068,17 +2189,27 @@ async function createVerifiedAttempt(
   });
   expect(created.statusCode).toBe(201);
   const attemptId = (created.json() as { id: string }).id;
+  const boundary = input.boundary ?? "verified";
   const upload = await app.inject({
     method: "POST",
     url: `/v1/attempts/${attemptId}/media`,
-    headers: multipartHeaders("verified"),
-    payload: multipart("verified"),
+    headers: {
+      ...multipartHeaders(boundary),
+      ...(input.authorization ? { authorization: input.authorization } : {}),
+    },
+    payload: multipart(
+      boundary,
+      input.filename,
+      "video/mp4",
+      input.payloadSuffix,
+    ),
   });
   expect(upload.statusCode).toBe(202);
   return Object.freeze({
     attemptId,
     calibrationId,
     upload: upload.json(),
+    uploadBody: upload.body,
   });
 }
 
@@ -2159,6 +2290,19 @@ async function expectEmptyMediaDirectories(
     expect(await readdir(join(fixture.mediaRoot, directory))).toEqual([]);
 }
 
+async function expectNoTemporaryOrPublicationFacts(
+  fixture: Awaited<ReturnType<typeof makeRoot>>,
+  attemptId: string,
+): Promise<void> {
+  expect(
+    fixture.database.raw
+      .prepare(
+        "SELECT COUNT(*) AS count FROM media_retention_records WHERE attempt_id = ?",
+      )
+      .get(attemptId),
+  ).toEqual({ count: 0 });
+}
+
 async function expectPrivateMediaTree(
   fixture: Awaited<ReturnType<typeof makeRoot>>,
   attemptId: string,
@@ -2201,9 +2345,14 @@ async function expectPrivateMediaTree(
   const frames = await readdir(frameDirectory);
   const jpegFrames = frames.filter((frame) => frame.endsWith(".jpg"));
   expect(jpegFrames).toHaveLength(row.mode === "verified" ? 640 : 128);
-  expect((await stat(join(frameDirectory, jpegFrames[0]!))).mode & 0o777).toBe(
-    0o600,
+  expect(frames).toEqual(
+    expect.arrayContaining([".complete", ".receipt.json"]),
   );
+  for (const file of ["payload", ...frames]) {
+    const path = file === "payload" ? payload : join(frameDirectory, file);
+    expect((await lstat(path)).isSymbolicLink()).toBe(false);
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+  }
   expect(await readdir(join(fixture.mediaRoot, "temporary"))).toEqual([]);
 }
 
@@ -2283,6 +2432,46 @@ async function resultResponse(
 function athleteHeaders() {
   return { "x-revelai-athlete-id": ATHLETE_ID };
 }
+
+function competitiveTuple() {
+  return {
+    workspaceId: "revelai-workspace",
+    modelBundleId: "wall-pass-bundle-v1",
+    workflowId: "revelai-wall-pass-geometry-v1",
+    workflowVersion: "1.0.0",
+    providerVersion: "roboflow-inference-v1",
+    calibrationEvidenceVersion: "wall-pass-calibration-evidence-v1",
+    extractionEvidenceVersion: "c5-frame-manifest-v1",
+    observationEvidenceVersion: "wall-pass-geometry-evidence-v1",
+    challengeId: "wall-pass",
+    challengeVersion: 1,
+    ruleVersion: "wall-pass-v1-score-1",
+  } as const;
+}
+
+function installFreeForbiddenPortGuards(
+  fixture: Awaited<ReturnType<typeof makeRoot>>,
+): void {
+  // The Free runtime has no calibration, integrity, policy, or ranking input.
+  // These real SQLite guards make any accidental write to those seams abort;
+  // removing the policy table also makes an accidental policy lookup fail.
+  fixture.database.raw.exec(`
+    CREATE TRIGGER c10_free_forbid_calibration
+    BEFORE INSERT ON calibration_sessions
+    BEGIN SELECT RAISE(ABORT, 'free calibration port invoked'); END;
+    CREATE TRIGGER c10_free_forbid_integrity
+    BEFORE INSERT ON canonical_observations
+    BEGIN SELECT RAISE(ABORT, 'free integrity port invoked'); END;
+    CREATE TRIGGER c10_free_forbid_leaderboard
+    BEFORE INSERT ON leaderboard_entries
+    BEGIN SELECT RAISE(ABORT, 'free leaderboard port invoked'); END;
+    CREATE TRIGGER c10_free_forbid_rank_clock
+    BEFORE UPDATE ON leaderboard_commit_clock
+    BEGIN SELECT RAISE(ABORT, 'free ranking port invoked'); END;
+    DROP TABLE approved_competitive_model_policies;
+  `);
+}
+
 function multipartHeaders(boundary: string) {
   return {
     ...athleteHeaders(),
@@ -2322,7 +2511,7 @@ async function responseBeforeRequestBody(
     const timeout = setTimeout(() => {
       socket.destroy();
       reject(new Error("queue preflight did not respond before the body"));
-    }, 1_000);
+    }, 3_000);
     const settle = (operation: () => void): void => {
       clearTimeout(timeout);
       socket.removeAllListeners();

@@ -11,9 +11,9 @@ import {
 } from "../storage/local-frame-extraction.js";
 import {
   createLocalMediaStorage,
+  type AtomicMediaRenamer,
   type LocalMediaStorage,
   type LocalMediaProber,
-  type NoReplacePublisher,
   type UploadRetentionRepository,
 } from "../storage/local-media-storage.js";
 import {
@@ -51,7 +51,7 @@ export function createC5PipelineTestSupport(
     root: string;
     prober?: LocalMediaProber;
     runner?: BoundedFrameProcessRunner;
-    publisher?: NoReplacePublisher;
+    renamer?: AtomicMediaRenamer;
     /** Selects deterministic runner evidence for real multipart route tests. */
     mode?: "free" | "verified";
   }>,
@@ -75,7 +75,7 @@ export function createC5PipelineTestSupport(
       },
     },
     prober: input.prober ?? defaultProber,
-    ...(input.publisher ? { publisher: input.publisher } : {}),
+    ...(input.renamer ? { renamer: input.renamer } : {}),
   });
   const extraction = createLocalFrameExtraction({
     root: input.root,
