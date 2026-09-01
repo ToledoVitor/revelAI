@@ -42,5 +42,6 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run ci:clean-api-executables:self-test
+      - run: pnpm run ci:clean-api-executables:cancellation-probe
       - run: pnpm run ci:clean-api-executables
       - run: pnpm --filter @revelai/api exec vitest run src/http/operability-routes.test.ts src/startup.test.ts

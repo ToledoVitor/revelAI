@@ -15,11 +15,11 @@ const executableCases = [
   { name: "openapi", script: "openapi:check" },
 ];
 const activeChildren = new Set();
-let shuttingDown = false;
+let shutdown;
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
-    stopForSignal();
+    void stopForSignal();
   });
 }
 
@@ -121,7 +121,7 @@ async function runCleanCase(executableCase, options = {}) {
 
     if (options.expectCommandFailure === true) throw new Error(COMMAND_FAILURE);
   } finally {
-    await rm(fixture, { recursive: true, force: true }).catch(() => undefined);
+    await rm(fixture, { recursive: true, force: true });
   }
 }
 
@@ -153,7 +153,11 @@ function run(executable, arguments_, options = {}) {
       settled: false,
       killTimer: undefined,
       timedOut: false,
+      resolveClosed: undefined,
     };
+    record.closed = new Promise((resolveClosed) => {
+      record.resolveClosed = resolveClosed;
+    });
     activeChildren.add(record);
 
     const settle = (callback) => {
@@ -162,6 +166,7 @@ function run(executable, arguments_, options = {}) {
       activeChildren.delete(record);
       clearTimeout(timeout);
       clearTimeout(record.killTimer);
+      record.resolveClosed();
       callback();
     };
     const fail = () => settle(() => reject(new Error(COMMAND_FAILURE)));
@@ -191,11 +196,15 @@ function run(executable, arguments_, options = {}) {
   });
 }
 
-function stopForSignal() {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  for (const record of activeChildren) terminate(record);
-  setTimeout(() => process.exit(1), TERMINATION_GRACE_MS + 100);
+async function stopForSignal() {
+  if (shutdown !== undefined) return shutdown;
+  shutdown = (async () => {
+    const records = [...activeChildren];
+    for (const record of records) terminate(record);
+    await Promise.all(records.map((record) => record.closed));
+    process.exitCode = 1;
+  })();
+  return shutdown;
 }
 
 function terminate(record) {

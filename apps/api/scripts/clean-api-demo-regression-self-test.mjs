@@ -5,46 +5,82 @@ const script = fileURLToPath(
   new URL("./clean-api-demo-regression.mjs", import.meta.url),
 );
 const MAX_OUTPUT_BYTES = 32 * 1024;
-const MODE_TIMEOUT_MS = 120_000;
-const TERMINATION_GRACE_MS = 250;
-
-await expectMode(
-  "--self-test",
-  "Clean API executable process guard regression passed.",
+const DEFAULT_MODE_TIMEOUT_MS = 120_000;
+const TERMINATION_GRACE_MS = 750;
+const FAILURE = "Clean API executable self-test failed.";
+const modeTimeoutMs = configuredTimeoutMs(
+  process.env.CLEAN_API_EXECUTABLE_SELF_TEST_TIMEOUT_MS,
 );
-await expectMode(
-  "--mutation-proof",
-  "Clean API executable independent mutation regression passed.",
-);
+const activeChildren = new Set();
+let shutdown;
 
-console.log("Clean API executable self-tests passed.");
+if (process.platform === "win32") {
+  console.error(
+    "Clean API executable self-test requires POSIX process groups.",
+  );
+  process.exitCode = 1;
+} else {
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.once(signal, () => {
+      void stopForSignal();
+    });
+  }
+
+  void main().catch(() => {
+    console.error(FAILURE);
+    process.exitCode = 1;
+  });
+}
+
+async function main() {
+  await expectMode(
+    "--self-test",
+    "Clean API executable process guard regression passed.",
+  );
+  await expectMode(
+    "--mutation-proof",
+    "Clean API executable independent mutation regression passed.",
+  );
+
+  console.log("Clean API executable self-tests passed.");
+}
 
 async function expectMode(mode, successMessage) {
   const result = await run(mode);
   if (result.exitCode !== 0 || !result.output.includes(successMessage)) {
-    throw new Error("Clean API executable self-test failed.");
+    throw new Error(FAILURE);
   }
 }
 
 function run(mode) {
   return new Promise((resolve, reject) => {
-    let settled = false;
     let output = Buffer.alloc(0);
     const child = spawn(process.execPath, [script, mode], {
+      detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), TERMINATION_GRACE_MS).unref();
-    }, MODE_TIMEOUT_MS);
-
-    const settle = (value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      resolve(value);
+    const record = {
+      child,
+      settled: false,
+      timedOut: false,
+      timeout: undefined,
+      killTimer: undefined,
+      resolveClosed: undefined,
     };
+    record.closed = new Promise((resolveClosed) => {
+      record.resolveClosed = resolveClosed;
+    });
+    activeChildren.add(record);
 
+    const settle = (callback) => {
+      if (record.settled) return;
+      record.settled = true;
+      activeChildren.delete(record);
+      clearTimeout(record.timeout);
+      clearTimeout(record.killTimer);
+      record.resolveClosed();
+      callback();
+    };
     const append = (chunk) => {
       const remaining = MAX_OUTPUT_BYTES - output.length;
       if (remaining <= 0) return;
@@ -56,11 +92,59 @@ function run(mode) {
 
     child.stdout.on("data", append);
     child.stderr.on("data", append);
-    child.once("error", () =>
-      reject(new Error("Clean API executable self-test failed.")),
-    );
+    child.once("error", () => settle(() => reject(new Error(FAILURE))));
     child.once("close", (exitCode) => {
-      settle({ exitCode, output: output.toString("utf8") });
+      if (exitCode === 0 && record.timedOut === false) {
+        settle(() => resolve({ exitCode, output: output.toString("utf8") }));
+      } else {
+        settle(() => reject(new Error(FAILURE)));
+      }
     });
+
+    record.timeout = setTimeout(() => {
+      record.timedOut = true;
+      terminate(record);
+    }, modeTimeoutMs);
   });
+}
+
+async function stopForSignal() {
+  if (shutdown !== undefined) return shutdown;
+  shutdown = (async () => {
+    const records = [...activeChildren];
+    for (const record of records) terminate(record);
+    await Promise.all(records.map((record) => record.closed));
+    process.exitCode = 1;
+  })();
+  return shutdown;
+}
+
+function terminate(record) {
+  if (record.settled || record.killTimer !== undefined) return;
+  sendSignal(record.child, "SIGTERM");
+  record.killTimer = setTimeout(() => {
+    if (record.settled === false) sendSignal(record.child, "SIGKILL");
+  }, TERMINATION_GRACE_MS);
+}
+
+function sendSignal(child, signal) {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    child.kill(signal);
+  }
+}
+
+function configuredTimeoutMs(value) {
+  if (value === undefined) return DEFAULT_MODE_TIMEOUT_MS;
+  const parsed = Number(value);
+  if (
+    !Number.isInteger(parsed) ||
+    parsed < 1_000 ||
+    parsed > DEFAULT_MODE_TIMEOUT_MS
+  ) {
+    return DEFAULT_MODE_TIMEOUT_MS;
+  }
+  return parsed;
 }
