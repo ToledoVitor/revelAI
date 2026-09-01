@@ -6,26 +6,13 @@ import {
   type VisionProvider,
 } from "@revelai/vision";
 import type { BoundedFrameProcessRunner } from "../storage/local-frame-extraction.js";
+import type {
+  MediaProcessCommand,
+  MediaProcessRunner,
+} from "../media/media-process-runner.js";
 
-export type LocalDemoProcessCommand = Readonly<{
-  executable: string;
-  arguments: readonly string[];
-  timeoutMilliseconds: number;
-  maxStdoutBytes: number;
-  maxStderrBytes: number;
-  maxOutputBytes: number;
-}>;
-
-export type LocalDemoProcessRunner = Readonly<{
-  run(command: LocalDemoProcessCommand): Promise<
-    Readonly<{
-      exitCode: number;
-      termination: "completed" | "timed_out" | "terminated";
-      stdout: string;
-      stderr: string;
-    }>
-  >;
-}>;
+export type LocalDemoProcessCommand = MediaProcessCommand;
+export type LocalDemoProcessRunner = MediaProcessRunner;
 
 export class LocalDemoPreflightError extends Error {
   public constructor() {

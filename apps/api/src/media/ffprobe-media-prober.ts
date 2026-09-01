@@ -1,49 +1,41 @@
 import type { LocalMediaProber } from "../storage/local-media-storage.js";
+import type { MediaProcessRunner } from "./media-process-runner.js";
 import {
   MediaPipelineError,
   parseFfprobePayload,
   type MediaProbe,
 } from "./probe.js";
 
-export interface MediaProcessRunner {
-  run(
-    command: Readonly<{
-      executable: string;
-      arguments: readonly string[];
-      timeoutMilliseconds: number;
-      maxOutputBytes: number;
-    }>,
-  ): Promise<
-    Readonly<{
-      exitCode: number;
-      termination: "completed" | "timed_out" | "terminated";
-      stdout: string;
-      stderr: string;
-    }>
-  >;
-}
+export type { MediaProcessRunner } from "./media-process-runner.js";
 
 /** FFprobe adapter: argv only, bounded output, and no process output leaks. */
 export class FfprobeMediaProber implements LocalMediaProber {
   private readonly runner: MediaProcessRunner;
   private readonly executable: string;
   private readonly timeoutMilliseconds: number;
+  private readonly maxOutputBytes: number;
 
   public constructor(
     input: Readonly<{
       runner: MediaProcessRunner;
       executable?: string;
       timeoutMilliseconds?: number;
+      maxOutputBytes?: number;
     }>,
   ) {
     this.runner = input.runner;
     this.executable = input.executable ?? "ffprobe";
     this.timeoutMilliseconds = input.timeoutMilliseconds ?? 8_000;
+    this.maxOutputBytes = input.maxOutputBytes ?? 256 * 1024;
     if (
       !Number.isSafeInteger(this.timeoutMilliseconds) ||
       this.timeoutMilliseconds < 1
     )
       throw new Error("FFprobe timeout must be a positive safe integer.");
+    if (!Number.isSafeInteger(this.maxOutputBytes) || this.maxOutputBytes < 2)
+      throw new Error(
+        "FFprobe output cap must be a safe integer of at least two.",
+      );
   }
 
   public async probe(
@@ -71,7 +63,10 @@ export class FfprobeMediaProber implements LocalMediaProber {
           input.filePath,
         ],
         timeoutMilliseconds: this.timeoutMilliseconds,
-        maxOutputBytes: 256 * 1024,
+        maxStdoutBytes: Math.floor((this.maxOutputBytes * 3) / 4),
+        maxStderrBytes:
+          this.maxOutputBytes - Math.floor((this.maxOutputBytes * 3) / 4),
+        maxOutputBytes: this.maxOutputBytes,
       });
     } catch {
       throw new MediaPipelineError("media_probe_failed");
