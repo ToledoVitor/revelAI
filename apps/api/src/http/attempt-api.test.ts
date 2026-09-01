@@ -5,6 +5,8 @@ import { Readable } from "node:stream";
 import ts from "typescript";
 import {
   AttemptListResponseSchema,
+  AttemptReadResponseSchema,
+  AttemptResultResponseSchema,
   CalibrationSessionSchema,
   ChallengeListResponseSchema,
   CreateAttemptResponseSchema,
@@ -15,7 +17,14 @@ import {
 } from "@revelai/contracts";
 import { type FastifyInstance, type InjectOptions } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { openSqliteDatabase } from "../database/sqlite-database.js";
+import {
+  openSqliteDatabase,
+  openSqliteDatabaseAtVersionForTest,
+} from "../database/sqlite-database.js";
+import {
+  createStoredMediaAttachment,
+  type TerminalCandidate,
+} from "../repositories/attempt-repository.js";
 import { SQLiteAttemptRepository } from "../repositories/sqlite-attempt-repository.js";
 import { createC5PipelineTestSupport } from "../media/c5-pipeline-test-support.js";
 import { MediaPipelineError } from "../media/probe.js";
@@ -1573,6 +1582,391 @@ describe("attempt HTTP foundation", () => {
     await fixture.close();
   });
 
+  it("reads an owned active attempt and its deterministic pending outcome", async () => {
+    const fixture = await makeApi();
+    const created = CreateAttemptResponseSchema.parse(
+      (
+        await fixture.app.inject({
+          method: "POST",
+          url: "/v1/attempts",
+          headers: athleteHeader(ATHLETE_A),
+          payload: { mode: "free" },
+        })
+      ).json(),
+    );
+
+    const attempt = await fixture.app.inject({
+      method: "GET",
+      url: `/v1/attempts/${created.id}`,
+      headers: athleteHeader(ATHLETE_A),
+    });
+    expect(attempt.statusCode).toBe(200);
+    expect(AttemptReadResponseSchema.parse(attempt.json())).toEqual({
+      id: created.id,
+      mode: "free",
+      status: "awaiting-upload",
+      createdAt: "2030-01-15T12:00:00.000Z",
+      outcome: {
+        state: "pending",
+        attemptId: created.id,
+        mode: "free",
+        status: "awaiting-upload",
+      },
+    });
+
+    const result = await fixture.app.inject({
+      method: "GET",
+      url: `/v1/attempts/${created.id}/result`,
+      headers: athleteHeader(ATHLETE_A),
+    });
+    expect(result.statusCode).toBe(202);
+    expect(AttemptResultResponseSchema.parse(result.json())).toEqual({
+      state: "pending",
+      attemptId: created.id,
+      mode: "free",
+      status: "awaiting-upload",
+    });
+    await fixture.close();
+  });
+
+  it("makes attempt reads identity-scoped and rejects malformed or tombstoned identifiers", async () => {
+    const fixture = await makeApi();
+    const created = CreateAttemptResponseSchema.parse(
+      (
+        await fixture.app.inject({
+          method: "POST",
+          url: "/v1/attempts",
+          headers: athleteHeader(ATHLETE_A),
+          payload: { mode: "free" },
+        })
+      ).json(),
+    );
+    const requests = [
+      {
+        label: "missing athlete header",
+        url: `/v1/attempts/${created.id}/result`,
+        headers: {},
+        statusCode: 400,
+        code: "invalid_athlete_identity",
+      },
+      {
+        label: "other athlete summary",
+        url: `/v1/attempts/${created.id}`,
+        headers: athleteHeader(ATHLETE_B),
+        statusCode: 404,
+        code: "attempt_not_found",
+      },
+      {
+        label: "other athlete result",
+        url: `/v1/attempts/${created.id}/result`,
+        headers: athleteHeader(ATHLETE_B),
+        statusCode: 404,
+        code: "attempt_not_found",
+      },
+      {
+        label: "unknown attempt summary",
+        url: "/v1/attempts/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        headers: athleteHeader(ATHLETE_A),
+        statusCode: 404,
+        code: "attempt_not_found",
+      },
+      {
+        label: "unknown attempt result",
+        url: "/v1/attempts/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/result",
+        headers: athleteHeader(ATHLETE_A),
+        statusCode: 404,
+        code: "attempt_not_found",
+      },
+      {
+        label: "noncanonical path",
+        url: "/v1/attempts/AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+        headers: athleteHeader(ATHLETE_A),
+        statusCode: 400,
+        code: "invalid_request",
+      },
+      {
+        label: "trimmed path",
+        url: `/v1/attempts/%20${created.id}%20`,
+        headers: athleteHeader(ATHLETE_A),
+        statusCode: 400,
+        code: "invalid_request",
+      },
+      {
+        label: "encoded UUID separator",
+        url: `/v1/attempts/${created.id.replaceAll("-", "%2D")}`,
+        headers: athleteHeader(ATHLETE_A),
+        statusCode: 400,
+        code: "invalid_request",
+      },
+      {
+        label: "query injection",
+        url: `/v1/attempts/${created.id}/result?athleteId=${ATHLETE_B}`,
+        headers: athleteHeader(ATHLETE_A),
+        statusCode: 400,
+        code: "invalid_request",
+      },
+    ] as const;
+    for (const request of requests) {
+      const response = await fixture.app.inject({
+        method: "GET",
+        url: request.url,
+        headers: request.headers,
+      });
+      expect(response.statusCode, request.label).toBe(request.statusCode);
+      expect(RouteErrorSchema.parse(response.json()).code, request.label).toBe(
+        request.code,
+      );
+    }
+
+    await fixture.repository.tombstoneAttempt({
+      attemptId: created.id,
+      athleteId: ATHLETE_A,
+    });
+    for (const suffix of ["", "/result"]) {
+      const response = await fixture.app.inject({
+        method: "GET",
+        url: `/v1/attempts/${created.id}${suffix}`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(response.statusCode).toBe(404);
+      expect(RouteErrorSchema.parse(response.json()).code).toBe(
+        "attempt_not_found",
+      );
+    }
+    await fixture.close();
+  });
+
+  it("projects C4's authoritative pending and terminal outcomes through the exact C2 schemas", async () => {
+    const issuedIds = [
+      "11111111-1111-4111-8111-111111111112",
+      "11111111-1111-4111-8111-111111111113",
+      "11111111-1111-4111-8111-111111111114",
+      "11111111-1111-4111-8111-111111111115",
+      "11111111-1111-4111-8111-111111111116",
+      "11111111-1111-4111-8111-111111111117",
+    ];
+    const fixture = await makeMediaApi({
+      ids: () => issuedIds.shift() ?? "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    });
+    const cases: readonly Readonly<{
+      id: string;
+      mode: "free" | "verified";
+      candidate: TerminalCandidate;
+      expectedStatus: "valid" | "invalid" | "failed";
+    }>[] = [
+      {
+        id: "abababab-abab-4bab-8bab-aaaaaaaaaaaa",
+        mode: "free",
+        candidate: freeTerminalCandidate(
+          "abababab-abab-4bab-8bab-aaaaaaaaaaaa",
+        ),
+        expectedStatus: "valid",
+      },
+      {
+        id: "bcbcbcbc-bcbc-4bcb-8bcb-bbbbbbbbbbbb",
+        mode: "free",
+        candidate: {
+          state: "failed",
+          attemptId: "bcbcbcbc-bcbc-4bcb-8bcb-bbbbbbbbbbbb",
+          mode: "free",
+          code: "analysis_temporary_unavailable",
+          message: "A análise está indisponível temporariamente.",
+          retryable: true,
+        },
+        expectedStatus: "failed",
+      },
+      {
+        id: "cdcdcdcd-cdcd-4dcd-8dcd-cccccccccccc",
+        mode: "verified",
+        candidate: {
+          state: "invalid",
+          attemptId: "cdcdcdcd-cdcd-4dcd-8dcd-cccccccccccc",
+          mode: "verified",
+          code: "calibration_not_verified",
+          message: "Refaça a calibração antes de tentar novamente.",
+          retryable: true,
+        },
+        expectedStatus: "invalid",
+      },
+      {
+        id: "dededede-dede-4ede-8ede-dddddddddddd",
+        mode: "verified",
+        candidate: verifiedDemoTerminalOutcome(
+          "dededede-dede-4ede-8ede-dddddddddddd",
+          "2030-01-15T12:00:00.000Z",
+        ),
+        expectedStatus: "valid",
+      },
+    ];
+    for (const input of cases) {
+      const attempt = await createAttemptForReadProjection(fixture, input);
+      const pending = await fixture.app.inject({
+        method: "GET",
+        url: `/v1/attempts/${attempt.id}/result`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(pending.statusCode).toBe(202);
+      expect(AttemptResultResponseSchema.parse(pending.json())).toEqual({
+        state: "pending",
+        attemptId: attempt.id,
+        mode: input.mode,
+        status: "uploaded",
+      });
+
+      const claim = await fixture.repository.claimProcessing({
+        attemptId: attempt.id,
+        generation: 1,
+      });
+      expect(claim).not.toBeNull();
+      const processing = await fixture.app.inject({
+        method: "GET",
+        url: `/v1/attempts/${attempt.id}/result`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(processing.statusCode).toBe(202);
+      expect(AttemptResultResponseSchema.parse(processing.json())).toEqual({
+        state: "pending",
+        attemptId: attempt.id,
+        mode: input.mode,
+        status: "processing",
+      });
+      await fixture.repository.finalizeTerminalResult({
+        attemptId: attempt.id,
+        leaseId: claim!.leaseId,
+        generation: claim!.generation,
+        candidate: input.candidate,
+      });
+
+      const attemptRead = await fixture.app.inject({
+        method: "GET",
+        url: `/v1/attempts/${attempt.id}`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(attemptRead.statusCode).toBe(200);
+      const summary = AttemptReadResponseSchema.parse(attemptRead.json());
+      expect(summary.status).toBe(input.expectedStatus);
+      expect(summary.outcome).toEqual(input.candidate);
+      expect(summary).not.toHaveProperty("athleteId");
+      expect(summary).not.toHaveProperty("media");
+      expect(JSON.stringify(summary)).not.toContain("lease");
+      expect(JSON.stringify(summary)).not.toContain("generation");
+
+      const result = await fixture.app.inject({
+        method: "GET",
+        url: `/v1/attempts/${attempt.id}/result`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(result.statusCode).toBe(200);
+      expect(AttemptResultResponseSchema.parse(result.json())).toEqual(
+        input.candidate,
+      );
+    }
+    await fixture.close();
+  });
+
+  it("normalizes a legacy terminal attempt once before presenting coherent public reads", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "revelai-legacy-read-"));
+    directories.push(directory);
+    const filename = join(directory, "api.sqlite");
+    const legacy = openSqliteDatabaseAtVersionForTest(filename, 4);
+    const completedAt = "2030-01-15T12:00:00.000Z";
+    const attemptId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const sessionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const outcome = verifiedDemoTerminalOutcome(attemptId, completedAt);
+    legacy.raw
+      .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+      .run(ATHLETE_A, completedAt);
+    legacy.raw
+      .prepare(
+        "INSERT INTO calibration_sessions (id, athlete_id, nonce, challenge_id, challenge_version, state, issued_at, expires_at, consumed_at) VALUES (?, ?, ?, 'wall-pass', 1, 'consumed', ?, ?, ?)",
+      )
+      .run(
+        sessionId,
+        ATHLETE_A,
+        "A".repeat(43),
+        completedAt,
+        "2030-01-15T12:15:00.000Z",
+        completedAt,
+      );
+    legacy.raw
+      .prepare(
+        "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, processing_lease_id, processing_lease_expires_at, created_at, updated_at) VALUES (?, ?, 'verified', 'wall-pass', 1, ?, 'processing', 'active', ?, 1, ?, ?, ?, ?)",
+      )
+      .run(
+        attemptId,
+        ATHLETE_A,
+        sessionId,
+        JSON.stringify({
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          contentType: "video/mp4",
+          bytes: 10,
+          deleteAt: "2030-01-16T12:00:00.000Z",
+        }),
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "2030-01-15T12:05:00.000Z",
+        completedAt,
+        completedAt,
+      );
+    legacy.raw
+      .prepare(
+        "INSERT INTO terminal_results (id, attempt_id, lease_id, generation, terminal_state, outcome_json, completed_at, created_at, request_outcome_json) VALUES (?, ?, ?, 1, 'valid', ?, ?, ?, ?)",
+      )
+      .run(
+        "legacy-result",
+        attemptId,
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        JSON.stringify(outcome),
+        completedAt,
+        completedAt,
+        JSON.stringify(outcome),
+      );
+    legacy.close();
+
+    const database = openSqliteDatabase(filename);
+    const repository = SQLiteAttemptRepository.forReadOnlyTest({
+      database,
+      clock: { now: () => completedAt },
+      ids: { next: () => "ffffffff-ffff-4fff-8fff-ffffffffffff" },
+    });
+    const app = createAttemptApi({
+      repository,
+      queue: { isAvailable: async () => true, enqueue: async () => undefined },
+      cleaner: { cleanup: async () => undefined },
+      scheduler: { everyHour: () => 1, cancel: () => undefined },
+    });
+    try {
+      const attempt = await app.inject({
+        method: "GET",
+        url: `/v1/attempts/${attemptId}`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(attempt.statusCode).toBe(200);
+      expect(AttemptReadResponseSchema.parse(attempt.json())).toEqual({
+        id: attemptId,
+        mode: "verified",
+        status: "valid",
+        createdAt: completedAt,
+        challenge: { id: "wall-pass", version: 1 },
+        outcome,
+      });
+      const result = await app.inject({
+        method: "GET",
+        url: `/v1/attempts/${attemptId}/result`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(result.statusCode).toBe(200);
+      expect(AttemptResultResponseSchema.parse(result.json())).toEqual(outcome);
+      expect(
+        database.raw
+          .prepare("SELECT status FROM attempts WHERE id = ?")
+          .get(attemptId),
+      ).toEqual({ status: "valid" });
+    } finally {
+      await app.close();
+      database.close();
+    }
+  });
+
   it("keeps list pagination opaque and scoped, rejects malformed requests, and drains the auto-started runtime on close", async () => {
     const fixture = await makeApi();
     const create = async (athleteId: string) =>
@@ -1949,6 +2343,7 @@ async function makeApi(
 
 async function makeMediaApi(
   input?: Readonly<{
+    ids?: () => string;
     maxUploadBytes?: number;
     prober?: LocalMediaProber;
   }>,
@@ -1963,7 +2358,9 @@ async function makeMediaApi(
   const repository = new SQLiteAttemptRepository({
     database,
     clock: { now: () => "2030-01-15T12:00:00.000Z" },
-    ids: { next: () => "ffffffff-ffff-4fff-8fff-ffffffffffff" },
+    ids: {
+      next: () => input?.ids?.() ?? "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    },
     handoffVerifier: c5.handoffVerifier,
   });
   let availability = (): boolean => true;
@@ -2063,6 +2460,153 @@ function validMp4Bytes(): Uint8Array {
   return Uint8Array.from([
     0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 1, 2, 3, 4,
   ]);
+}
+
+function freeTerminalCandidate(attemptId: string): TerminalCandidate {
+  return {
+    state: "valid",
+    result: {
+      kind: "free-insight",
+      attemptId,
+      provenance: {
+        kind: "demo",
+        fixtureId: "free-well-framed-active-v1",
+        providerVersion: "demo-observations-v1",
+      },
+      approximate: true,
+      observations: [
+        {
+          kind: "athlete-visibility",
+          unit: "percent",
+          value: 90,
+          range: "consistent",
+        },
+        {
+          kind: "ball-visibility",
+          unit: "percent",
+          value: 90,
+          range: "consistent",
+        },
+        {
+          kind: "movement-activity",
+          unit: "percent",
+          value: 90,
+          range: "high",
+        },
+      ],
+      tips: ["Boa cobertura para uma análise aproximada."],
+      generatedAt: "2030-01-15T12:00:00.000Z",
+    },
+  };
+}
+
+function verifiedDemoTerminalOutcome(
+  attemptId: string,
+  completedAt: string,
+): TerminalCandidate {
+  return {
+    state: "valid",
+    result: {
+      kind: "verified-result",
+      attemptId,
+      challengeId: "wall-pass",
+      challengeVersion: 1,
+      ruleVersion: "wall-pass-v1-score-1",
+      provenance: {
+        kind: "demo",
+        fixtureId: "wall-pass-balanced-v1",
+        providerVersion: "demo-observations-v1",
+      },
+      metrics: {
+        validPasses: 24,
+        accuracyPercent: 80,
+        meanCadenceSeconds: 2.5,
+        leftFootPercent: 50,
+        rightFootPercent: 50,
+      },
+      score: 76,
+      completedAt,
+      competitiveStatus: "demo",
+      competitiveEligible: false,
+    },
+  };
+}
+
+async function createAttemptForReadProjection(
+  fixture: Awaited<ReturnType<typeof makeMediaApi>>,
+  input: Readonly<{
+    id: string;
+    mode: "free" | "verified";
+    candidate: TerminalCandidate;
+  }>,
+) {
+  if (input.mode === "verified") {
+    await fixture.repository.issueCalibrationSession({
+      id: input.id,
+      athleteId: ATHLETE_A,
+      nonce: "A".repeat(43),
+      challengeId: "wall-pass",
+      challengeVersion: 1,
+    });
+    await fixture.repository.readyCalibrationSession({
+      id: input.id,
+      athleteId: ATHLETE_A,
+      requiredGates: ["device", "space", "athlete", "rehearsal", "record"],
+    });
+  }
+  const attempt = await fixture.repository.createAttempt({
+    id: input.id,
+    athleteId: ATHLETE_A,
+    input:
+      input.mode === "free"
+        ? { mode: "free" }
+        : {
+            mode: "verified",
+            challengeId: "wall-pass",
+            challengeVersion: 1,
+            calibrationSessionId: input.id,
+          },
+  });
+  if (input.mode === "verified") {
+    const context = await fixture.repository.prepareMediaUpload({
+      attemptId: attempt.id,
+      athleteId: ATHLETE_A,
+    });
+    const media = createStoredMediaAttachment({
+      id: input.id,
+      contentType: "video/mp4",
+      bytes: validMp4Bytes().byteLength,
+      uploadedAt: context.uploadedAt,
+      deleteAt: "2030-01-16T12:00:00.000Z",
+      transition: {
+        kind: "upload-transition",
+        resourceId: input.id,
+        deleteAt: "2030-01-15T13:00:00.000Z",
+      },
+    });
+    await fixture.repository.attachPreparedMedia({
+      accepted: await fixture.c5.accept(context, media, {
+        retentionRepository: fixture.retention,
+      }),
+    });
+  } else {
+    const response = await fixture.app.inject({
+      method: "POST",
+      url: `/v1/attempts/${attempt.id}/media`,
+      headers: {
+        ...athleteHeader(ATHLETE_A),
+        "content-type": "multipart/form-data; boundary=revelai-test-boundary",
+      },
+      payload: rawMultipartBody({
+        name: "media",
+        filename: "attempt.mp4",
+        contentType: "video/mp4",
+        bytes: validMp4Bytes(),
+      }),
+    });
+    expect(response.statusCode, `${input.id}: ${response.body}`).toBe(202);
+  }
+  return attempt;
 }
 
 function chunked(

@@ -1520,6 +1520,81 @@ describe("SQLiteAttemptRepository", () => {
     await expect(
       fixture.repository.getMediaDeliveryRecovery(job),
     ).resolves.toBeNull();
+    const persisted = await fixture.repository.getAttempt({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+    });
+    expect(persisted).not.toBeNull();
+    expect(Object.isFrozen(persisted!.outcome)).toBe(true);
+    if (
+      persisted!.outcome.state !== "valid" ||
+      persisted!.outcome.result.kind !== "free-insight"
+    )
+      throw new Error("Expected persisted free terminal outcome");
+    expect(Object.isFrozen(persisted!.outcome.result)).toBe(true);
+    expect(Object.isFrozen(persisted!.outcome.result.observations)).toBe(true);
+    expect(Object.isFrozen(persisted!.outcome.result.observations[0]!)).toBe(
+      true,
+    );
+  });
+
+  it("fails closed when a persisted terminal outcome no longer belongs to its active attempt", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await attachMedia(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const claim = (await fixture.repository.claimProcessing(job))!;
+    await fixture.repository.finalizeTerminalResult({
+      attemptId: ATTEMPT_A,
+      leaseId: claim.leaseId,
+      generation: claim.generation,
+      candidate: freeOutcome(ATTEMPT_A, fixture.clock.now()),
+    });
+    fixture.database.raw
+      .prepare("UPDATE attempts SET status = 'processing' WHERE id = ?")
+      .run(ATTEMPT_A);
+    await expect(
+      fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).rejects.toMatchObject({ code: "persisted_data_corrupt" });
+    fixture.database.raw
+      .prepare("UPDATE attempts SET status = 'valid' WHERE id = ?")
+      .run(ATTEMPT_A);
+    fixture.database.raw
+      .prepare(
+        "UPDATE terminal_results SET outcome_json = ? WHERE attempt_id = ?",
+      )
+      .run(
+        JSON.stringify({
+          state: "failed",
+          attemptId: ATTEMPT_B,
+          mode: "free",
+          code: "analysis_temporary_unavailable",
+          message: FailureMessageByCode.analysis_temporary_unavailable,
+          retryable: true,
+        }),
+        ATTEMPT_A,
+      );
+
+    await expect(
+      fixture.repository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).rejects.toMatchObject({ code: "persisted_data_corrupt" });
   });
 
   it("serializes independently-run ranked completions into frozen cohorts while preserving live ties", async () => {
@@ -3649,7 +3724,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toEqual({ count: 20 });
+    ).toEqual({ count: 21 });
     reopened.close();
   });
 
@@ -4189,7 +4264,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 20 });
+    ).toMatchObject({ count: 21 });
     reopened.close();
     upgraded.close();
 
@@ -4638,7 +4713,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 20 });
+    ).toMatchObject({ count: 21 });
     reopened.close();
     upgraded.close();
   });
@@ -4719,7 +4794,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 20 });
+    ).toMatchObject({ count: 21 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -4871,7 +4946,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 20 });
+    ).toMatchObject({ count: 21 });
     reopened.close();
   });
 
@@ -5144,7 +5219,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 20 });
+    ).toMatchObject({ count: 21 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);

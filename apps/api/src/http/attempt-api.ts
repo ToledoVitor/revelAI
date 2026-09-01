@@ -9,6 +9,8 @@ import {
   AttemptIdPathParamsSchema,
   AttemptListQuerySchema,
   AttemptListResponseSchema,
+  AttemptReadResponseSchema,
+  AttemptResultResponseSchema,
   CalibrationSessionCreateInputSchema,
   CalibrationSessionIdPathParamsSchema,
   CalibrationSessionReadyInputSchema,
@@ -44,6 +46,7 @@ import {
   type MediaDeliveryRedeliveryRepository,
   type OpaqueAcceptedMediaCleaner,
 } from "../services/media-attachment-recovery.js";
+import { createAttemptReadService } from "../services/attempt-read-service.js";
 import { MultipartParserError } from "./streamed-multipart.js";
 import {
   type BoundMediaUploadService,
@@ -147,6 +150,9 @@ function createAttemptApiInternal(
   const clock = input.clock ?? { now: () => new Date().toISOString() };
   const ids = input.ids ?? { next: randomUUID };
   const nonce = input.nonce ?? (() => randomBytes(32).toString("base64url"));
+  const attemptRead = createAttemptReadService({
+    repository: input.repository,
+  });
   let recovery: C8RecoveryRuntimeHandle | undefined;
   try {
     app.addHook("onRequest", async (request) => {
@@ -254,6 +260,31 @@ function createAttemptApiInternal(
         items: page.items.map(projectAttempt),
         nextCursor: page.nextCursor,
       });
+    });
+
+    app.get("/v1/attempts/:id/result", async (request, reply) => {
+      assertNoQuery(request.query);
+      const outcome = await attemptRead.result({
+        attemptId: requiredCanonicalAttemptId(request),
+        athleteId: requiredAthleteId(athleteIds, request),
+      });
+      if (!outcome) throw new AttemptRouteError("attempt_not_found");
+      return sendResponse(
+        reply,
+        outcome.state === "pending" ? 202 : 200,
+        AttemptResultResponseSchema,
+        outcome,
+      );
+    });
+
+    app.get("/v1/attempts/:id", async (request, reply) => {
+      assertNoQuery(request.query);
+      const attempt = await attemptRead.read({
+        attemptId: requiredCanonicalAttemptId(request),
+        athleteId: requiredAthleteId(athleteIds, request),
+      });
+      if (!attempt) throw new AttemptRouteError("attempt_not_found");
+      return sendResponse(reply, 200, AttemptReadResponseSchema, attempt);
     });
 
     app.setNotFoundHandler((_request, reply) =>
@@ -364,6 +395,32 @@ function requiredAthleteId(
   const athleteId = athleteIds.get(request);
   if (!athleteId) throw new AttemptRouteError("invalid_athlete_identity");
   return athleteId;
+}
+
+function requiredCanonicalAttemptId(request: FastifyRequest): string {
+  const id = parseRequest(AttemptIdPathParamsSchema, request.params).id;
+  if (
+    !hasExactCanonicalAttemptPath(request, id) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      id,
+    )
+  )
+    throw new AttemptRouteError("invalid_request");
+  return id;
+}
+
+/** C2 decodes/trims generic path strings; reads require literal canonical URI. */
+function hasExactCanonicalAttemptPath(
+  request: FastifyRequest,
+  attemptId: string,
+): boolean {
+  const rawUrl = request.raw.url;
+  if (typeof rawUrl !== "string") return false;
+  const path = rawUrl.split("?", 1)[0];
+  return (
+    path === `/v1/attempts/${attemptId}` ||
+    path === `/v1/attempts/${attemptId}/result`
+  );
 }
 
 function requiredGeneratedUuid(value: string): string {

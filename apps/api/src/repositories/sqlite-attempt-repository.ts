@@ -1937,7 +1937,13 @@ function parseAttemptRow(row: unknown): AttemptRecord {
       (value.status === "valid" ||
         value.status === "invalid" ||
         value.status === "failed")) ||
-    (value.outcome_json !== null && outcome.state === "pending")
+    (value.outcome_json !== null &&
+      (outcome.state === "pending" ||
+        !isPersistedTerminalOutcomeForAttempt(outcome, {
+          id: value.id as string,
+          mode: value.mode,
+          status: value.status,
+        })))
   )
     throw new RepositoryError("persisted_data_corrupt");
   return Object.freeze({
@@ -2518,10 +2524,41 @@ function parsePersistedOutcome(
     const parsed = AttemptOutcomeSchema.safeParse(JSON.parse(outcomeJson));
     if (!parsed.success || parsed.data.state === "pending")
       throw new Error("invalid outcome");
-    return parsed.data;
+    return deeplyFreeze(parsed.data);
   } catch {
     throw new RepositoryError("persisted_data_corrupt");
   }
+}
+
+function isPersistedTerminalOutcomeForAttempt(
+  outcome: Exclude<AttemptOutcome, { state: "pending" }>,
+  attempt: Readonly<{
+    id: string;
+    mode: "free" | "verified";
+    status: AttemptRecord["status"];
+  }>,
+): boolean {
+  if (outcome.state === "valid")
+    return (
+      attempt.status === "valid" &&
+      outcome.result.attemptId === attempt.id &&
+      (outcome.result.kind === "free-insight"
+        ? attempt.mode === "free"
+        : attempt.mode === "verified")
+    );
+  return (
+    outcome.state === attempt.status &&
+    outcome.attemptId === attempt.id &&
+    outcome.mode === attempt.mode
+  );
+}
+
+function deeplyFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    for (const child of Object.values(value)) deeplyFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 function parseCohortRow(row: unknown): DomainWallPassRankableResult {

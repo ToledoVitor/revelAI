@@ -1,5 +1,7 @@
 import Database from "better-sqlite3";
 import {
+  AttemptOutcomeSchema,
+  type AttemptOutcome,
   WorkflowBenchmarkReceiptSchema,
   workflowBenchmarkReceiptDigest,
 } from "@revelai/contracts";
@@ -806,6 +808,13 @@ const migrations: readonly Migration[] = [
     sql: "SELECT 1;",
     afterApply: normalizeDeliveryRecoveryV19,
   },
+  {
+    // Historical terminal rows predate C8's atomic status transition. Repair
+    // only an exact terminal fact once at reopen; current reads stay strict.
+    version: 21,
+    sql: "SELECT 1;",
+    afterApply: normalizeLegacyTerminalAttemptStatusesV21,
+  },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {
@@ -1064,6 +1073,78 @@ function resetLegacyProcessingRowsV16(raw: Database.Database): void {
       "UPDATE attempts SET media_json = NULL, media_sha256 = NULL, processing_context_json = NULL, processing_receipt_id = NULL, processing_receipt_sha256 = NULL, status = 'awaiting-upload', processing_generation = processing_generation + 1, processing_lease_id = NULL, processing_lease_expires_at = NULL WHERE deletion_state = 'active' AND status IN ('uploaded', 'processing')",
     )
     .run();
+}
+
+type V21LegacyTerminalRow = Readonly<{
+  id: string;
+  mode: "free" | "verified";
+  terminal_state: string;
+  outcome_json: string;
+}>;
+
+/**
+ * Earlier terminal rows were written before the attempt status changed in
+ * that same durable fact. v16 deliberately retired their live upload state;
+ * v21 restores only a strictly parsed, identity-matching terminal projection.
+ */
+function normalizeLegacyTerminalAttemptStatusesV21(
+  raw: Database.Database,
+): void {
+  const rows = raw
+    .prepare(
+      `SELECT a.id, a.mode, tr.terminal_state, tr.outcome_json
+         FROM attempts a
+         INNER JOIN terminal_results tr ON tr.attempt_id = a.id
+        WHERE a.deletion_state = 'active'
+          AND a.status IN ('awaiting-upload', 'uploaded', 'processing')`,
+    )
+    .all() as readonly V21LegacyTerminalRow[];
+  const normalize = raw.prepare(
+    `UPDATE attempts
+        SET status = ?, processing_context_json = NULL,
+            processing_lease_id = NULL, processing_lease_expires_at = NULL
+      WHERE id = ? AND deletion_state = 'active'
+        AND status IN ('awaiting-upload', 'uploaded', 'processing')`,
+  );
+  const deleteProcessingRecovery = raw.prepare(
+    "DELETE FROM processing_recovery_records WHERE attempt_id = ?",
+  );
+  const deleteLiveDeliveryRecovery = raw.prepare(
+    "DELETE FROM media_delivery_recovery_records WHERE attempt_id = ? AND state IN ('pending-delivery', 'queued')",
+  );
+  for (const row of rows) {
+    const outcome = parseV21LegacyTerminalOutcome(row);
+    if (!outcome) continue;
+    if (normalize.run(outcome.state, row.id).changes !== 1) continue;
+    deleteProcessingRecovery.run(row.id);
+    deleteLiveDeliveryRecovery.run(row.id);
+  }
+}
+
+function parseV21LegacyTerminalOutcome(
+  row: V21LegacyTerminalRow,
+): Exclude<AttemptOutcome, { state: "pending" }> | null {
+  try {
+    const parsed = AttemptOutcomeSchema.safeParse(JSON.parse(row.outcome_json));
+    if (
+      !parsed.success ||
+      parsed.data.state === "pending" ||
+      parsed.data.state !== row.terminal_state
+    )
+      return null;
+    if (parsed.data.state === "valid") {
+      const resultMode =
+        parsed.data.result.kind === "free-insight" ? "free" : "verified";
+      return parsed.data.result.attemptId === row.id && resultMode === row.mode
+        ? parsed.data
+        : null;
+    }
+    return parsed.data.attemptId === row.id && parsed.data.mode === row.mode
+      ? parsed.data
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
