@@ -8,11 +8,18 @@ const MAX_OUTPUT_BYTES = 32 * 1024;
 const DEFAULT_MODE_TIMEOUT_MS = 120_000;
 const TERMINATION_GRACE_MS = 750;
 const FAILURE = "Clean API executable self-test failed.";
+const readinessPrefix = "REVELAI_EXECUTABLE_READY ";
 const modeTimeoutMs = configuredTimeoutMs(
   process.env.CLEAN_API_EXECUTABLE_SELF_TEST_TIMEOUT_MS,
 );
 const activeChildren = new Set();
+let boundaryReleased;
+const boundaryRelease = new Promise((resolve) => {
+  boundaryReleased = resolve;
+});
+let mainOperation;
 let shutdown;
+let shuttingDown = false;
 
 if (process.platform === "win32") {
   console.error(
@@ -26,17 +33,20 @@ if (process.platform === "win32") {
     });
   }
 
-  void main().catch(() => {
+  mainOperation = main();
+  void mainOperation.catch(() => {
     console.error(FAILURE);
     process.exitCode = 1;
   });
 }
 
 async function main() {
+  assertCanStart();
   await expectMode(
     "--self-test",
     "Clean API executable process guard regression passed.",
   );
+  await pauseAtBoundary("outer:before-mode:--mutation-proof");
   await expectMode(
     "--mutation-proof",
     "Clean API executable independent mutation regression passed.",
@@ -46,6 +56,7 @@ async function main() {
 }
 
 async function expectMode(mode, successMessage) {
+  assertCanStart();
   const result = await run(mode);
   if (result.exitCode !== 0 || !result.output.includes(successMessage)) {
     throw new Error(FAILURE);
@@ -53,8 +64,10 @@ async function expectMode(mode, successMessage) {
 }
 
 function run(mode) {
+  if (shuttingDown) return Promise.reject(new Error(FAILURE));
   return new Promise((resolve, reject) => {
     let output = Buffer.alloc(0);
+    let readinessOutput = "";
     const child = spawn(process.execPath, [script, mode], {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -83,11 +96,25 @@ function run(mode) {
     };
     const append = (chunk) => {
       const remaining = MAX_OUTPUT_BYTES - output.length;
-      if (remaining <= 0) return;
-      output = Buffer.concat([
-        output,
-        Buffer.from(chunk).subarray(0, remaining),
-      ]);
+      if (remaining > 0) {
+        output = Buffer.concat([
+          output,
+          Buffer.from(chunk).subarray(0, remaining),
+        ]);
+      }
+      readinessOutput += Buffer.from(chunk).toString("utf8");
+      while (true) {
+        const newline = readinessOutput.indexOf("\n");
+        if (newline === -1) break;
+        const line = readinessOutput.slice(0, newline);
+        readinessOutput = readinessOutput.slice(newline + 1);
+        if (/^REVELAI_EXECUTABLE_READY [^ ]+ [1-9][0-9]*$/.test(line)) {
+          console.log(line);
+        }
+      }
+      if (readinessOutput.length > 1024) {
+        readinessOutput = readinessOutput.slice(-1024);
+      }
     };
 
     child.stdout.on("data", append);
@@ -110,13 +137,33 @@ function run(mode) {
 
 async function stopForSignal() {
   if (shutdown !== undefined) return shutdown;
+  shuttingDown = true;
+  boundaryReleased();
   shutdown = (async () => {
     const records = [...activeChildren];
     for (const record of records) terminate(record);
     await Promise.all(records.map((record) => record.closed));
+    await mainOperation?.catch(() => undefined);
     process.exitCode = 1;
   })();
   return shutdown;
+}
+
+async function pauseAtBoundary(name) {
+  assertCanStart();
+  if (process.env.CLEAN_API_EXECUTABLE_BOUNDARY !== name) return;
+  console.log(`${readinessPrefix}${name} ${process.pid}`);
+  const keepAlive = setInterval(() => undefined, 1_000);
+  try {
+    await boundaryRelease;
+  } finally {
+    clearInterval(keepAlive);
+  }
+  assertCanStart();
+}
+
+function assertCanStart() {
+  if (shuttingDown) throw new Error(FAILURE);
 }
 
 function terminate(record) {

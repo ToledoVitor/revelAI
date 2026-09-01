@@ -9,13 +9,21 @@ const COMMAND_TIMEOUT_MS = 120_000;
 const TERMINATION_GRACE_MS = 250;
 const MAX_CAPTURED_OUTPUT_BYTES = 32 * 1024;
 const COMMAND_FAILURE = "Clean API executable regression command failed.";
+const readinessPrefix = "REVELAI_EXECUTABLE_READY ";
 const executableCases = [
   { name: "demo", script: "demo:smoke" },
   { name: "operator", script: "operator:receipt-smoke" },
   { name: "openapi", script: "openapi:check" },
 ];
 const activeChildren = new Set();
+const activeFixtures = new Set();
+let boundaryReleased;
+const boundaryRelease = new Promise((resolve) => {
+  boundaryReleased = resolve;
+});
+let mainOperation;
 let shutdown;
+let shuttingDown = false;
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
@@ -23,12 +31,14 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   });
 }
 
-void main().catch(() => {
+mainOperation = main();
+void mainOperation.catch(() => {
   console.error("Clean API executable regression failed.");
   process.exitCode = 1;
 });
 
 async function main() {
+  assertCanStart();
   const [mode] = process.argv.slice(2);
 
   if (mode === "--self-test") {
@@ -46,6 +56,7 @@ async function main() {
   if (mode !== undefined) throw new Error(COMMAND_FAILURE);
 
   for (const executableCase of executableCases) {
+    assertCanStart();
     await runCleanCase(executableCase);
   }
 
@@ -53,6 +64,7 @@ async function main() {
 }
 
 async function verifyProcessGuard() {
+  assertCanStart();
   const capped = await run(process.execPath, [
     "-e",
     `process.stdout.write("x".repeat(${MAX_CAPTURED_OUTPUT_BYTES * 2}))`,
@@ -77,6 +89,8 @@ async function verifyProcessGuard() {
 
 async function verifyIndependentMutation() {
   for (const executableCase of executableCases) {
+    assertCanStart();
+    announceReadiness(`inner:before-case:${executableCase.name}`);
     const mutation =
       executableCase.name === "operator"
         ? { removeWorkspaceBuildFrom: executableCase.script }
@@ -85,14 +99,20 @@ async function verifyIndependentMutation() {
       expectCommandFailure: mutation !== undefined,
       mutation,
     });
+    if (executableCase.name === "demo") {
+      await pauseAtBoundary("inner:between-case:demo");
+    }
   }
 }
 
 async function runCleanCase(executableCase, options = {}) {
+  assertCanStart();
   const fixture = await mkdtemp(join(tmpdir(), "revelai-clean-api-demo-"));
+  activeFixtures.add(fixture);
   const archive = join(fixture, "revelai.tar");
 
   try {
+    assertCanStart();
     await run("git", ["archive", "--format=tar", "--output", archive, "HEAD"], {
       cwd: repository,
     });
@@ -121,7 +141,11 @@ async function runCleanCase(executableCase, options = {}) {
 
     if (options.expectCommandFailure === true) throw new Error(COMMAND_FAILURE);
   } finally {
-    await rm(fixture, { recursive: true, force: true });
+    try {
+      await rm(fixture, { recursive: true, force: true });
+    } finally {
+      activeFixtures.delete(fixture);
+    }
   }
 }
 
@@ -140,6 +164,7 @@ async function removeWorkspaceBuild(fixture, scriptName) {
 }
 
 function run(executable, arguments_, options = {}) {
+  if (shuttingDown) return Promise.reject(new Error(COMMAND_FAILURE));
   return new Promise((resolve, reject) => {
     let timeout;
     let capturedOutputBytes = 0;
@@ -198,13 +223,38 @@ function run(executable, arguments_, options = {}) {
 
 async function stopForSignal() {
   if (shutdown !== undefined) return shutdown;
+  shuttingDown = true;
+  boundaryReleased();
   shutdown = (async () => {
     const records = [...activeChildren];
     for (const record of records) terminate(record);
     await Promise.all(records.map((record) => record.closed));
+    await mainOperation.catch(() => undefined);
     process.exitCode = 1;
   })();
   return shutdown;
+}
+
+async function pauseAtBoundary(name) {
+  assertCanStart();
+  if (process.env.CLEAN_API_EXECUTABLE_BOUNDARY !== name) return;
+  announceReadiness(name);
+  const keepAlive = setInterval(() => undefined, 1_000);
+  try {
+    await boundaryRelease;
+  } finally {
+    clearInterval(keepAlive);
+  }
+  assertCanStart();
+}
+
+function announceReadiness(name) {
+  if (process.env.CLEAN_API_EXECUTABLE_HANDSHAKE !== "1") return;
+  console.log(`${readinessPrefix}${name} ${process.pid}`);
+}
+
+function assertCanStart() {
+  if (shuttingDown) throw new Error(COMMAND_FAILURE);
 }
 
 function terminate(record) {
