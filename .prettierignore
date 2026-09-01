@@ -1,1 +1,15 @@
+AGENTS.md
+docs/adr/0002-vision-and-scoring-boundary.md
+docs/agents/domain.md
+docs/agents/issue-tracker.md
+docs/agents/triage-labels.md
+docs/design/asset-manifest.md
+docs/reviews/revelai-planning-fix-report.md
+docs/specs/2026-08-30-revelai-mvp.md
+docs/superpowers/plans/2026-08-30-revelai-delivery-dag.md
+.superpowers/sdd/2026-08-30-revelai-core-platform/progress.md
+node_modules/
+dist/
+coverage/
+.turbo/
 apps/api/openapi.json
