@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +32,7 @@ const foreign = spawn(
     `process.on("SIGTERM", () => { require("node:fs").writeFileSync(${JSON.stringify(
       terminationMarker,
     )}, "terminated"); }); setInterval(() => {}, 1_000);`,
+    "--",
     `--revelai-clean-api-session=${foreignSession}`,
   ],
   { detached: true, stdio: "ignore" },
@@ -75,7 +76,7 @@ console.log(
 );
 
 function runProbe(environment) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     let output = "";
     let settled = false;
     let killTimer;
