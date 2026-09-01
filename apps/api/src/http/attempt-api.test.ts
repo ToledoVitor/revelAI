@@ -73,6 +73,154 @@ afterEach(async () => {
 });
 
 describe("attempt HTTP foundation", () => {
+  it("starts the official recovery and retention owners atomically when scheduler registration fails", async () => {
+    const fixture = await makeMediaApi();
+    let healthyApp: FastifyInstance | undefined;
+    let stopDeliveries: (() => void) | undefined;
+    try {
+      await fixture.app.close();
+      const cleanup = await seedAttachedMedia(fixture, {
+        attemptId: "a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1",
+        mediaId: "a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2",
+        transitionId: "a3a3a3a3-a3a3-4a3a-8a3a-a3a3a3a3a3a3",
+      });
+      await fixture.repository.beginMediaAttachmentRecovery({
+        attemptId: cleanup.attemptId,
+        generation: cleanup.generation,
+        mediaId: cleanup.mediaId,
+        frameBatchId: cleanup.frameBatchId,
+      });
+      const delivery = await seedAttachedMedia(fixture, {
+        attemptId: "b1b1b1b1-b1b1-4b1a-8b1a-b1b1b1b1b1b1",
+        mediaId: "b2b2b2b2-b2b2-4b2a-8b2a-b2b2b2b2b2b2",
+        transitionId: "b3b3b3b3-b3b3-4b3a-8b3a-b3b3b3b3b3b3",
+      });
+      const delivered: unknown[] = [];
+      stopDeliveries = fixture.queue.subscribe(async (job) => {
+        delivered.push(job);
+      });
+      const cleanupPayload = join(
+        fixture.directory,
+        "c5",
+        "originals",
+        cleanup.mediaId,
+        "payload",
+      );
+      await expect(readFile(cleanupPayload)).resolves.toHaveLength(
+        validMp4Bytes().byteLength,
+      );
+      const acceptedHandle = Object.freeze({ timer: "recovery" });
+      const cancelled: unknown[] = [];
+      let registrations = 0;
+      let clockReads = 0;
+      const failingInput: Parameters<typeof createProductionAttemptApi>[0] = {
+        repository: fixture.repository,
+        retention: fixture.retention,
+        queue: fixture.queue,
+        mediaPipeline: fixture.c5.pipeline,
+        cleaner: createLocalC8AcceptedMediaCleaner({
+          repository: fixture.repository,
+          storage: fixture.c5.storage,
+        }),
+        scheduler: {
+          everyHour: (task) => {
+            registrations += 1;
+            if (registrations === 1) {
+              // A host is permitted to invoke synchronously while registering;
+              // the paired lifecycle must still be inert at this point.
+              task();
+              return acceptedHandle;
+            }
+            throw new Error("retention scheduler unavailable");
+          },
+          cancel: (handle) => {
+            cancelled.push(handle);
+          },
+        },
+        clock: {
+          now: () => {
+            clockReads += 1;
+            return "2030-01-15T12:00:00.000Z";
+          },
+        },
+      };
+
+      expect(() =>
+        createProductionAttemptApi({
+          ...failingInput,
+          scheduler: {
+            everyHour: () => {
+              throw new Error("recovery scheduler unavailable");
+            },
+            cancel: () => {
+              throw new Error("no timer was accepted");
+            },
+          },
+        }),
+      ).toThrow("recovery scheduler unavailable");
+      expect(cancelled).toEqual([]);
+      expect(clockReads).toBe(0);
+      expect(delivered).toEqual([]);
+
+      expect(() => createProductionAttemptApi(failingInput)).toThrow(
+        "retention scheduler unavailable",
+      );
+      expect(cancelled).toEqual([acceptedHandle]);
+      expect(clockReads).toBe(0);
+      // A prematurely activated recovery pass would enqueue the pending
+      // delivery and roll back/delete this exact C5 original and frame batch.
+      await nextEventTurn();
+      expect(delivered).toEqual([]);
+      await expect(readFile(cleanupPayload)).resolves.toHaveLength(
+        validMp4Bytes().byteLength,
+      );
+      await expect(
+        fixture.repository.getMediaDeliveryRecovery({
+          attemptId: cleanup.attemptId,
+          generation: cleanup.generation,
+        }),
+      ).resolves.toMatchObject({ state: "cleanup-recoverable" });
+      await expect(
+        fixture.repository.getMediaDeliveryRecovery({
+          attemptId: delivery.attemptId,
+          generation: delivery.generation,
+        }),
+      ).resolves.toMatchObject({ state: "pending-delivery" });
+
+      const scheduled: Array<() => void> = [];
+      healthyApp = createProductionAttemptApi({
+        ...failingInput,
+        scheduler: {
+          everyHour: (task) => {
+            scheduled.push(task);
+            return task;
+          },
+          cancel: (handle) => {
+            cancelled.push(handle);
+          },
+        },
+      });
+      await nextEventTurn();
+      expect(scheduled).toHaveLength(2);
+      expect(clockReads).toBe(1);
+      await healthyApp.close();
+      healthyApp = undefined;
+      expect(delivered).toEqual([
+        {
+          attemptId: delivery.attemptId,
+          generation: delivery.generation,
+          mode: "free",
+        },
+      ]);
+      await expect(readFile(cleanupPayload)).rejects.toThrow();
+      expect(cancelled).toEqual([acceptedHandle, ...scheduled]);
+    } finally {
+      stopDeliveries?.();
+      await healthyApp?.close();
+      await fixture.close();
+    }
+  });
+
   it("tombstones an owned active attempt through one empty DELETE response", async () => {
     const fixture = await makeMediaApi();
     try {
@@ -4098,6 +4246,64 @@ async function createAttemptForReadProjection(
     expect(response.statusCode, `${input.id}: ${response.body}`).toBe(202);
   }
   return attempt;
+}
+
+/** Creates real C4/C5 durable work without using the route's queue seam. */
+async function seedAttachedMedia(
+  fixture: Awaited<ReturnType<typeof makeMediaApi>>,
+  input: Readonly<{
+    attemptId: string;
+    mediaId: string;
+    transitionId: string;
+  }>,
+) {
+  const attempt = await fixture.repository.createAttempt({
+    id: input.attemptId,
+    athleteId: ATHLETE_A,
+    input: { mode: "free" },
+  });
+  const context = await fixture.repository.prepareMediaUpload({
+    attemptId: attempt.id,
+    athleteId: ATHLETE_A,
+  });
+  const media = createStoredMediaAttachment({
+    id: input.mediaId,
+    contentType: "video/mp4",
+    bytes: validMp4Bytes().byteLength,
+    uploadedAt: context.uploadedAt,
+    deleteAt: "2030-01-16T12:00:00.000Z",
+    transition: {
+      kind: "upload-transition",
+      resourceId: input.transitionId,
+      deleteAt: "2030-01-15T13:00:00.000Z",
+    },
+  });
+  await fixture.repository.attachPreparedMedia({
+    accepted: await fixture.c5.accept(context, media, {
+      retentionRepository: fixture.retention,
+    }),
+  });
+  const recovery = await fixture.repository.getMediaDeliveryRecovery({
+    attemptId: attempt.id,
+    generation: context.generation,
+  });
+  if (!recovery) throw new Error("C8 seed must create delivery recovery.");
+  // The deterministic C5 fixture's frame extractor has an intentionally
+  // storage-only retention stub, whereas production schedules this frame
+  // record. Install the matching durable fact so C4 can authorize a real C5
+  // cleanup if an inactive runtime were ever to run.
+  await fixture.retention.schedule({
+    id: recovery.frameBatchId,
+    attemptId: attempt.id,
+    kind: "frame",
+    deleteAt: media.deleteAt,
+  });
+  return Object.freeze({
+    attemptId: attempt.id,
+    generation: context.generation,
+    mediaId: media.id,
+    frameBatchId: recovery.frameBatchId,
+  });
 }
 
 function chunked(

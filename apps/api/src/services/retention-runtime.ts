@@ -12,11 +12,25 @@ export interface C8RetentionRuntimeHandle {
   drain(): Promise<void>;
 }
 
+/** Inert owner reservation used by the paired C8 startup supervisor. */
+export interface C8RetentionRuntimePreparation
+  extends C8RetentionRuntimeHandle {
+  register(scheduler: HourlyScheduler): void;
+  activate(now: string): void;
+  abortStartup(): void;
+}
+
 /**
- * HTTP receives only this narrow starter from the outer production
+ * HTTP receives only this narrow lifecycle factory from the outer production
  * composition. It cannot obtain the retention database or C5 storage port.
  */
 export interface RetentionRuntimeFactory {
+  prepare(
+    input: Readonly<{
+      maxBatchSize: number;
+      now: () => string;
+    }>,
+  ): C8RetentionRuntimePreparation;
   start(
     input: Readonly<{
       scheduler: HourlyScheduler;
@@ -45,6 +59,29 @@ export function createC8RetentionRuntime(
     now: () => string;
   }>,
 ): C8RetentionRuntimeHandle {
+  const runtime = prepareC8RetentionRuntime(input);
+  try {
+    runtime.register(input.scheduler);
+    runtime.activate(input.now());
+    return runtime;
+  } catch (error) {
+    runtime.abortStartup();
+    throw error;
+  }
+}
+
+/** Reserve retention ownership without calling C4, C5, or a scheduler. */
+export function prepareC8RetentionRuntime(
+  input: Readonly<{
+    owner: object;
+    repository: RetentionRepository;
+    objects: RetentionObjectStore;
+    log: RetentionLog;
+    scheduler?: HourlyScheduler;
+    maxBatchSize: number;
+    now?: () => string;
+  }>,
+): C8RetentionRuntimePreparation {
   const existing = runtimeByRetentionRepository.get(input.owner);
   if (existing)
     throw new Error("Retention runtime already has an active owner.");
@@ -56,25 +93,20 @@ export function createC8RetentionRuntime(
     },
   });
   runtimeByRetentionRepository.set(input.owner, runtime);
-  try {
-    runtime.start();
-    return runtime;
-  } catch (error) {
-    if (runtimeByRetentionRepository.get(input.owner) === runtime)
-      runtimeByRetentionRepository.delete(input.owner);
-    throw error;
-  }
+  return runtime;
 }
 
-class C8RetentionRuntime implements C8RetentionRuntimeHandle {
+class C8RetentionRuntime implements C8RetentionRuntimePreparation {
   private readonly scavenger: RetentionScavenger;
-  private readonly scheduler: HourlyScheduler;
+  private scheduler: HourlyScheduler | undefined;
   private readonly log: RetentionLog;
   private readonly now: () => string;
   private readonly onStopped: () => void;
-  private started = false;
+  private activated = false;
   private schedulerRegistered = false;
+  private timerRegistered = false;
   private stopped = false;
+  private ownerReleased = false;
   private scheduledHandle: unknown;
   private inFlight: Promise<void> | undefined;
   private stopping: Promise<void> | undefined;
@@ -84,9 +116,9 @@ class C8RetentionRuntime implements C8RetentionRuntimeHandle {
       repository: RetentionRepository;
       objects: RetentionObjectStore;
       log: RetentionLog;
-      scheduler: HourlyScheduler;
+      scheduler?: HourlyScheduler;
       maxBatchSize: number;
-      now: () => string;
+      now?: () => string;
       onStopped: () => void;
     }>,
   ) {
@@ -98,52 +130,54 @@ class C8RetentionRuntime implements C8RetentionRuntimeHandle {
     });
     this.scheduler = input.scheduler;
     this.log = input.log;
-    this.now = input.now;
+    this.now = input.now ?? (() => new Date().toISOString());
     this.onStopped = input.onStopped;
   }
 
-  public start(): void {
-    if (this.started || this.stopped) return;
-    this.started = true;
-    try {
-      this.scheduledHandle = this.scheduler.everyHour(() => {
-        if (this.stopped || !this.schedulerRegistered) return;
-        try {
-          this.startRun(this.now());
-        } catch {
-          this.logRunFailure();
-        }
-      });
-      this.schedulerRegistered = true;
-      this.startRun(this.now());
-    } catch (error) {
-      // If registration or the injected clock throws synchronously, prevent
-      // a partially started owner from retaining an active timer.
+  /** Register an inert timer; callbacks remain gated until activation. */
+  public register(scheduler: HourlyScheduler): void {
+    if (this.stopped || this.timerRegistered) return;
+    this.scheduler = scheduler;
+    this.scheduledHandle = scheduler.everyHour(() => {
+      if (this.stopped || !this.schedulerRegistered) return;
+      try {
+        this.startRun(this.now());
+      } catch {
+        this.logRunFailure();
+      }
+    });
+    this.timerRegistered = true;
+  }
+
+  /** Starts the immediate pass only after both paired timers are registered. */
+  public activate(now: string): void {
+    if (this.stopped || this.activated) return;
+    this.activated = true;
+    this.schedulerRegistered = true;
+    this.startRun(now);
+  }
+
+  /** Synchronous rollback for failed paired startup before any pass begins. */
+  public abortStartup(): void {
+    if (this.activated) {
       void this.stop();
-      throw error;
+      return;
     }
+    this.stopped = true;
+    this.schedulerRegistered = false;
+    this.cancelScheduled();
+    this.releaseOwner();
   }
 
   public stop(): Promise<void> {
     if (this.stopping) return this.stopping;
     this.stopped = true;
     this.schedulerRegistered = false;
-    const handle = this.scheduledHandle;
-    this.scheduledHandle = undefined;
-    if (handle !== undefined)
-      try {
-        this.scheduler.cancel(handle);
-      } catch {
-        this.logRunFailure();
-      }
+    this.cancelScheduled();
     this.stopping = this.drain()
       .catch(() => this.logRunFailure())
       .then(() => {
-        try {
-          this.onStopped();
-        } catch {
-          this.logRunFailure();
-        }
+        this.releaseOwner();
       });
     return this.stopping;
   }
@@ -176,6 +210,28 @@ class C8RetentionRuntime implements C8RetentionRuntimeHandle {
         if (this.inFlight === tracked) this.inFlight = undefined;
       });
     this.inFlight = tracked;
+  }
+
+  private cancelScheduled(): void {
+    if (!this.timerRegistered) return;
+    this.timerRegistered = false;
+    const handle = this.scheduledHandle;
+    this.scheduledHandle = undefined;
+    try {
+      this.scheduler?.cancel(handle);
+    } catch {
+      this.logRunFailure();
+    }
+  }
+
+  private releaseOwner(): void {
+    if (this.ownerReleased) return;
+    this.ownerReleased = true;
+    try {
+      this.onStopped();
+    } catch {
+      this.logRunFailure();
+    }
   }
 
   private logRunFailure(): void {

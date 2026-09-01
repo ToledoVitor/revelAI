@@ -40,18 +40,18 @@ import type {
   AttemptRepository,
 } from "../repositories/attempt-repository.js";
 import {
-  createC8RecoveryRuntime,
-  type C8RecoveryRuntimeHandle,
+  prepareC8RecoveryRuntime,
   type HourlyRecoveryScheduler,
   type MediaAttachmentRecoveryLog,
   type MediaAttachmentRecoveryRepository,
   type MediaDeliveryRedeliveryRepository,
   type OpaqueAcceptedMediaCleaner,
 } from "../services/media-attachment-recovery.js";
+import { type RetentionRuntimeFactory } from "../services/retention-runtime.js";
 import {
-  type C8RetentionRuntimeHandle,
-  type RetentionRuntimeFactory,
-} from "../services/retention-runtime.js";
+  startC8RuntimeSupervisor,
+  type C8RuntimeSupervisorHandle,
+} from "../services/c8-runtime-supervisor.js";
 import { createAttemptReadService } from "../services/attempt-read-service.js";
 import { MultipartParserError } from "./streamed-multipart.js";
 import { type MediaUploadService } from "../services/media-upload-service.js";
@@ -166,8 +166,9 @@ function createAttemptApiInternal(
   const attemptRead = createAttemptReadService({
     repository: input.repository,
   });
-  let recovery: C8RecoveryRuntimeHandle | undefined;
-  let retention: C8RetentionRuntimeHandle | undefined;
+  let recovery: ReturnType<typeof prepareC8RecoveryRuntime> | undefined;
+  let retention: ReturnType<RetentionRuntimeFactory["prepare"]> | undefined;
+  let runtimeSupervisor: C8RuntimeSupervisorHandle | undefined;
   try {
     app.addHook("onRequest", async (request) => {
       if (isPublicRouteRequest(request)) return;
@@ -342,26 +343,39 @@ function createAttemptApiInternal(
     app.setErrorHandler((error, _request, reply) =>
       sendRouteError(reply, routeErrorCode(error)),
     );
-    recovery = createC8RecoveryRuntime({
+    // Install shutdown while no runtime is active so there is no fallible app
+    // composition step after paired activation.
+    app.addHook("onClose", async () => {
+      await runtimeSupervisor?.stop();
+    });
+    // Reserve both durable-runtime owners before either scheduler callback can
+    // run. The supervisor then registers both inert callbacks and activates
+    // their immediate passes only after every registration succeeds.
+    recovery = prepareC8RecoveryRuntime({
       repository: input.repository,
       queue: input.queue,
       cleaner: input.cleaner,
       log: input.log ?? silentRecoveryLog,
-      scheduler,
       maxBatchSize: input.recoveryBatchLimit ?? RECOVERY_BATCH_LIMIT,
       now,
     });
-    retention = input.retentionRuntime?.start({
-      scheduler,
+    retention = input.retentionRuntime?.prepare({
       maxBatchSize: input.recoveryBatchLimit ?? RECOVERY_BATCH_LIMIT,
       now,
     });
-    app.addHook("onClose", async () => {
-      await Promise.all([recovery?.stop(), retention?.stop()]);
+    runtimeSupervisor = startC8RuntimeSupervisor({
+      recovery,
+      ...(retention ? { retention } : {}),
+      scheduler,
+      now,
     });
     return app;
   } catch (error) {
-    void Promise.all([recovery?.stop(), retention?.stop()]);
+    // Paired startup rollback is synchronous while both runtimes are inert;
+    // this preserves an immediate retry even when a scheduler registration
+    // throws after accepting its first callback.
+    retention?.abortStartup();
+    recovery?.abortStartup();
     void app.close().catch(() => undefined);
     throw error;
   }

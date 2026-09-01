@@ -69,6 +69,18 @@ export interface C8RecoveryRuntimeHandle {
   drain(): Promise<void>;
 }
 
+/**
+ * An inert, already-owned runtime. Outer composition uses this lifecycle to
+ * atomically pair recovery with retention: timer callbacks are harmless until
+ * activation, and a failed paired registration can synchronously relinquish
+ * ownership without creating background work.
+ */
+export interface C8RecoveryRuntimePreparation extends C8RecoveryRuntimeHandle {
+  register(scheduler: HourlyRecoveryScheduler | undefined): void;
+  activate(now: string): void;
+  abortStartup(): void;
+}
+
 /** One app composition owns one scheduler for one C4 repository instance. */
 const productionRuntimeByRepository = new WeakMap<object, C8RecoveryRuntime>();
 
@@ -225,6 +237,33 @@ export function createC8RecoveryRuntime(
     now?: () => string;
   }>,
 ): C8RecoveryRuntimeHandle {
+  const runtime = prepareC8RecoveryRuntime(input);
+  try {
+    runtime.register(input.scheduler);
+    runtime.activate((input.now ?? (() => new Date().toISOString()))());
+    return runtime;
+  } catch (error) {
+    runtime.abortStartup();
+    throw error;
+  }
+}
+
+/**
+ * Reserve the exact repository owner without touching the scheduler, queue,
+ * or repository. The caller must either activate it or abort startup.
+ */
+export function prepareC8RecoveryRuntime(
+  input: Readonly<{
+    repository: MediaAttachmentRecoveryRepository &
+      MediaDeliveryRedeliveryRepository;
+    queue: Pick<AnalysisQueue, "enqueue">;
+    cleaner: OpaqueAcceptedMediaCleaner;
+    log: MediaAttachmentRecoveryLog;
+    scheduler?: HourlyRecoveryScheduler;
+    maxBatchSize: number;
+    now?: () => string;
+  }>,
+): C8RecoveryRuntimePreparation {
   const existing = productionRuntimeByRepository.get(input.repository);
   if (existing)
     throw new Error("C8 recovery runtime already has an active owner.");
@@ -236,29 +275,22 @@ export function createC8RecoveryRuntime(
     },
   });
   productionRuntimeByRepository.set(input.repository, runtime);
-  try {
-    runtime.start();
-    return runtime;
-  } catch (error) {
-    // Starting includes scheduler registration. A synchronous failure must not
-    // leave an inert runtime in the WeakMap for a later composition to inherit.
-    if (productionRuntimeByRepository.get(input.repository) === runtime)
-      productionRuntimeByRepository.delete(input.repository);
-    throw error;
-  }
+  return runtime;
 }
 
-class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
+class C8RecoveryRuntime implements C8RecoveryRuntimePreparation {
   private readonly delivery: MediaDeliveryRedeliveryExecutor;
   private readonly cleanup: MediaAttachmentRecoveryExecutor;
-  private readonly scheduler: HourlyRecoveryScheduler | undefined;
+  private scheduler: HourlyRecoveryScheduler | undefined;
   private readonly log: MediaAttachmentRecoveryLog;
   private readonly maxBatchSize: number;
   private readonly now: () => string;
   private running = false;
-  private started = false;
+  private activated = false;
   private schedulerRegistered = false;
+  private timerRegistered = false;
   private stopped = false;
+  private ownerReleased = false;
   private scheduledHandle: unknown;
   private inFlight: Promise<void> | undefined;
   private stopping: Promise<void> | undefined;
@@ -298,27 +330,40 @@ class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
     this.onStopped = input.onStopped;
   }
 
-  /** Start exactly once; successful registration is required before caching. */
-  public start(): void {
-    if (this.started || this.stopped) return;
-    this.started = true;
-    try {
-      this.scheduledHandle = this.scheduler?.everyHour(() => {
-        if (this.stopped || !this.schedulerRegistered) return;
-        try {
-          this.startRun(this.now());
-        } catch {
-          this.logRunFailure();
-        }
-      });
-      this.schedulerRegistered = true;
-      this.startRun(this.now());
-    } catch (error) {
-      // Immediate recovery is already contained by runSafely. Begin shutdown
-      // without awaiting it so startup still reports the scheduler failure.
+  /** Register an inert callback. Synchronous scheduler callbacks are no-ops. */
+  public register(scheduler: HourlyRecoveryScheduler | undefined): void {
+    if (this.stopped || this.timerRegistered) return;
+    this.scheduler = scheduler;
+    if (!scheduler) return;
+    this.scheduledHandle = scheduler.everyHour(() => {
+      if (this.stopped || !this.schedulerRegistered) return;
+      try {
+        this.startRun(this.now());
+      } catch {
+        this.logRunFailure();
+      }
+    });
+    this.timerRegistered = true;
+  }
+
+  /** Begin exactly one immediate pass after every paired timer is registered. */
+  public activate(now: string): void {
+    if (this.stopped || this.activated) return;
+    this.activated = true;
+    this.schedulerRegistered = true;
+    this.startRun(now);
+  }
+
+  /** Release an inert reservation synchronously after paired startup fails. */
+  public abortStartup(): void {
+    if (this.activated) {
       void this.stop();
-      throw error;
+      return;
     }
+    this.stopped = true;
+    this.schedulerRegistered = false;
+    this.cancelScheduled();
+    this.releaseOwner();
   }
 
   /** Shutdown first prevents new callbacks, then drains active recovery. */
@@ -326,22 +371,11 @@ class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
     if (this.stopping) return this.stopping;
     this.stopped = true;
     this.schedulerRegistered = false;
-    const handle = this.scheduledHandle;
-    this.scheduledHandle = undefined;
-    if (handle !== undefined)
-      try {
-        this.scheduler?.cancel(handle);
-      } catch {
-        this.logRunFailure();
-      }
+    this.cancelScheduled();
     this.stopping = this.drain()
       .catch(() => this.logRunFailure())
       .then(() => {
-        try {
-          this.onStopped();
-        } catch {
-          this.logRunFailure();
-        }
+        this.releaseOwner();
       });
     return this.stopping;
   }
@@ -413,6 +447,28 @@ class C8RecoveryRuntime implements C8RecoveryRuntimeHandle {
         if (this.inFlight === tracked) this.inFlight = undefined;
       });
     this.inFlight = tracked;
+  }
+
+  private cancelScheduled(): void {
+    if (!this.timerRegistered) return;
+    this.timerRegistered = false;
+    const handle = this.scheduledHandle;
+    this.scheduledHandle = undefined;
+    try {
+      this.scheduler?.cancel(handle);
+    } catch {
+      this.logRunFailure();
+    }
+  }
+
+  private releaseOwner(): void {
+    if (this.ownerReleased) return;
+    this.ownerReleased = true;
+    try {
+      this.onStopped();
+    } catch {
+      this.logRunFailure();
+    }
   }
 
   private logRunFailure(): void {

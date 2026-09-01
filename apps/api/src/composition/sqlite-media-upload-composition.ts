@@ -23,7 +23,7 @@ import {
   type BoundMediaUploadService,
 } from "../services/media-upload-service.js";
 import {
-  createC8RetentionRuntime,
+  prepareC8RetentionRuntime,
   type RetentionRuntimeFactory,
 } from "../services/retention-runtime.js";
 import { createInternallyComposedAttemptApi } from "../http/attempt-api.js";
@@ -163,36 +163,50 @@ export function createFactoryIssuedRetentionRuntimeFactory(
     if (!processing.isCurrent() || !retentionPort.isCurrent())
       throw new Error("C8 retention composition is no longer current.");
   };
+  const prepare = ({
+    maxBatchSize,
+    now,
+  }: Parameters<RetentionRuntimeFactory["prepare"]>[0]) => {
+    requireCurrent();
+    return prepareC8RetentionRuntime({
+      owner: snapshot.retention,
+      repository: Object.freeze({
+        listDue: (request: Parameters<typeof listDue>[0]) => {
+          requireCurrent();
+          return listDue(request);
+        },
+        acknowledge: (record: Parameters<typeof acknowledge>[0]) => {
+          requireCurrent();
+          return acknowledge(record);
+        },
+      }),
+      objects: Object.freeze({
+        delete: (record: Parameters<typeof deleteRetentionRecord>[0]) => {
+          requireCurrent();
+          return deleteRetentionRecord(record);
+        },
+      }),
+      log: retentionLog,
+      maxBatchSize,
+      now,
+    });
+  };
   return Object.freeze({
+    prepare,
     start: ({
       scheduler,
       maxBatchSize,
       now,
     }: Parameters<RetentionRuntimeFactory["start"]>[0]) => {
-      requireCurrent();
-      return createC8RetentionRuntime({
-        owner: snapshot.retention,
-        repository: Object.freeze({
-          listDue: (request: Parameters<typeof listDue>[0]) => {
-            requireCurrent();
-            return listDue(request);
-          },
-          acknowledge: (record: Parameters<typeof acknowledge>[0]) => {
-            requireCurrent();
-            return acknowledge(record);
-          },
-        }),
-        objects: Object.freeze({
-          delete: (record: Parameters<typeof deleteRetentionRecord>[0]) => {
-            requireCurrent();
-            return deleteRetentionRecord(record);
-          },
-        }),
-        log: retentionLog,
-        scheduler,
-        maxBatchSize,
-        now,
-      });
+      const runtime = prepare({ maxBatchSize, now });
+      try {
+        runtime.register(scheduler);
+        runtime.activate(now());
+        return runtime;
+      } catch (error) {
+        runtime.abortStartup();
+        throw error;
+      }
     },
   });
 }
