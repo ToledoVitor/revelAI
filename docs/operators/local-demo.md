@@ -73,7 +73,12 @@ curl --fail-with-body "$api_base_url/v1/leaderboards/wall-pass?version=1&ruleVer
 `demo:smoke` runs the same Fastify/C4–C7/worker composition through that HTTP
 trace, including the `202` upload and terminal result. To keep CI portable, its
 `--check` mode narrowly injects deterministic FFprobe/FFmpeg-edge fixtures;
-it does **not** claim that the host has proved a live codec path.
+it does **not** claim that the host has proved a live codec path. Check mode
+constructs its own development loopback/demo environment and temporary paths;
+it deliberately ignores surrounding API, provider, public-bind, and database
+configuration, including any Roboflow configuration. The normal in-process
+queue still processes the terminal trace; the check fixture releases only its
+deterministic media edge after observing the pending attempt.
 
 `GET /health` answers process liveness only. `GET /ready` checks SQLite
 `SELECT 1`, a private restrictive write/delete sentinel, and the queue under
