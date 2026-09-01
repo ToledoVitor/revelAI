@@ -27,6 +27,7 @@ import { createLocalFrameExtraction } from "../storage/local-frame-extraction.js
 import { createLocalMediaStorage } from "../storage/local-media-storage.js";
 import {
   createConfiguredVisionProvider,
+  createHostFrameProcessRunner,
   preflightMediaBinaries,
   type LocalDemoProcessRunner,
 } from "../demo/local-demo-support.js";
@@ -37,14 +38,14 @@ export type LocalDemoRuntime = Readonly<{
   database: SqliteDatabase;
   close(): Promise<void>;
   closeResources(): Promise<void>;
-  runCheckQueue(): Promise<void>;
+  waitForCheckFrameProcess(): Promise<void>;
+  releaseCheckFrameProcess(): void;
 }>;
 
-type CheckScheduler = Readonly<{
-  schedule(task: () => Promise<void>): void;
-  everyHour(task: () => void): number;
-  cancel(handle: unknown): void;
-  runAll(): Promise<void>;
+type CheckFrameProcessGate = Readonly<{
+  wait(): Promise<void>;
+  waitUntilBlocked(): Promise<void>;
+  release(): void;
 }>;
 
 /**
@@ -69,8 +70,11 @@ export async function createLocalDemoRuntime(
     await mkdir(config.paths.dataDir, { recursive: true, mode: 0o700 });
     database = openSqliteDatabase(config.paths.databasePath);
     const retention = new SQLiteRetentionRepository({ database });
+    const checkFrameProcessGate = input.check
+      ? createCheckFrameProcessGate()
+      : undefined;
     const adapters = input.check
-      ? createCheckMediaAdapters()
+      ? createCheckMediaAdapters(checkFrameProcessGate!)
       : createHostMediaAdapters(input.processRunner);
     const storage = createLocalMediaStorage({
       root: config.paths.mediaDir,
@@ -92,10 +96,7 @@ export async function createLocalDemoRuntime(
       ids: { next: randomUUID },
       handoffVerifier: pipeline.handoffVerifier(),
     });
-    const scheduler = input.check ? createCheckScheduler() : undefined;
-    queue = new InMemoryAnalysisQueue(
-      scheduler === undefined ? {} : { scheduler },
-    );
+    queue = new InMemoryAnalysisQueue();
     const provider = createConfiguredVisionProvider(config.visionProvider);
     // This durable lookup starts empty. Demo never imports/reads a receipt
     // directory and thus cannot activate a normal competitive policy.
@@ -109,7 +110,6 @@ export async function createLocalDemoRuntime(
       queue,
       mediaPipeline: pipeline,
       cleaner: createLocalC8AcceptedMediaCleaner({ repository, storage }),
-      ...(scheduler === undefined ? {} : { scheduler }),
       freeTraining: { provider },
       verifiedTraining: { provider, policy },
     });
@@ -131,10 +131,15 @@ export async function createLocalDemoRuntime(
         }
       },
       closeResources,
-      runCheckQueue: async () => {
-        if (!scheduler)
-          throw new Error("Local demo check queue is unavailable.");
-        await scheduler.runAll();
+      waitForCheckFrameProcess: async () => {
+        if (!checkFrameProcessGate)
+          throw new Error("Local demo check frame process is unavailable.");
+        await checkFrameProcessGate.waitUntilBlocked();
+      },
+      releaseCheckFrameProcess: () => {
+        if (!checkFrameProcessGate)
+          throw new Error("Local demo check frame process is unavailable.");
+        checkFrameProcessGate.release();
       },
     });
   } catch (error) {
@@ -190,7 +195,7 @@ export async function runLocalDemoCheckTrace(
   assertStatus(created.statusCode, 201);
   const attemptId = opaqueId(created.json());
   const boundary = "revelai-check";
-  const upload = await runtime.app.inject({
+  const uploading = runtime.app.inject({
     method: "POST",
     url: `/v1/attempts/${attemptId}/media`,
     headers: {
@@ -199,7 +204,8 @@ export async function runLocalDemoCheckTrace(
     },
     payload: multipartFixture(boundary),
   });
-  assertStatus(upload.statusCode, 202);
+
+  await waitForCheckFrameProcess(runtime);
 
   const pending = await runtime.app.inject({
     method: "GET",
@@ -213,9 +219,12 @@ export async function runLocalDemoCheckTrace(
       "Local demo check did not observe the pending upload state.",
     );
 
-  await runtime.runCheckQueue();
+  runtime.releaseCheckFrameProcess();
+  const upload = await uploading;
+  assertStatus(upload.statusCode, 202);
   let terminal: AttemptOutcome | undefined;
-  for (let poll = 0; poll < 8; poll += 1) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
     const result = await runtime.app.inject({
       method: "GET",
       url: `/v1/attempts/${attemptId}/result`,
@@ -232,7 +241,7 @@ export async function runLocalDemoCheckTrace(
       parsed.data.state !== "pending"
     )
       throw new Error("Local demo check could not parse an attempt result.");
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
   }
   if (
     !terminal ||
@@ -263,25 +272,11 @@ export async function runLocalDemoCheckTrace(
 function createHostMediaAdapters(processRunner: LocalDemoProcessRunner) {
   return Object.freeze({
     prober: new FfprobeMediaProber({ runner: processRunner }),
-    frameRunner: Object.freeze({
-      run: async (
-        command: Readonly<{
-          executable: string;
-          arguments: readonly string[];
-          timeoutMilliseconds: number;
-          maxStdoutBytes: number;
-          maxStderrBytes: number;
-          maxOutputBytes: number;
-        }>,
-      ) => {
-        const result = await processRunner.run(command);
-        return Object.freeze({ ...result, termination: "completed" as const });
-      },
-    }),
+    frameRunner: createHostFrameProcessRunner(processRunner),
   });
 }
 
-function createCheckMediaAdapters() {
+function createCheckMediaAdapters(gate: CheckFrameProcessGate) {
   return Object.freeze({
     prober: Object.freeze({
       probe: async () =>
@@ -297,6 +292,7 @@ function createCheckMediaAdapters() {
     }),
     frameRunner: Object.freeze({
       run: async (command: Readonly<{ outputDirectory: string }>) => {
+        await gate.wait();
         const timestamps = Array.from(
           { length: 640 },
           (_, index) => index / 10,
@@ -335,25 +331,45 @@ function createCheckMediaAdapters() {
   });
 }
 
-function createCheckScheduler(): CheckScheduler {
-  const tasks: Array<() => Promise<void>> = [];
-  const hourly = new Map<number, () => void>();
-  let nextHandle = 0;
-  return Object.freeze({
-    schedule: (task) => tasks.push(task),
-    everyHour: (task) => {
-      const handle = nextHandle;
-      nextHandle += 1;
-      hourly.set(handle, task);
-      return handle;
-    },
-    cancel: (handle) => {
-      if (typeof handle === "number") hourly.delete(handle);
-    },
-    runAll: async () => {
-      while (tasks.length > 0) await tasks.shift()!();
-    },
+function createCheckFrameProcessGate(): CheckFrameProcessGate {
+  let release: () => void = () => undefined;
+  let blocked: () => void = () => undefined;
+  const releasePromise = new Promise<void>((resolve) => {
+    release = resolve;
   });
+  const blockedPromise = new Promise<void>((resolve) => {
+    blocked = resolve;
+  });
+  return Object.freeze({
+    wait: async () => {
+      blocked();
+      await releasePromise;
+    },
+    waitUntilBlocked: () => blockedPromise,
+    release,
+  });
+}
+
+async function waitForCheckFrameProcess(
+  runtime: LocalDemoRuntime,
+): Promise<void> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      runtime.waitForCheckFrameProcess(),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              new Error("Local demo check did not reach frame extraction."),
+            ),
+          5_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 function opaqueId(value: unknown): string {

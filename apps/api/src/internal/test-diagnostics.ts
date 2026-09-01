@@ -28,16 +28,19 @@ export type TestDiagnostic = Readonly<{
   ): unknown;
 }>;
 
-const diagnostics = new WeakMap<object, TestDiagnostic>();
+type DiagnosticRegistration = Readonly<{ diagnostic: TestDiagnostic }>;
+
+const diagnostics = new WeakMap<object, DiagnosticRegistration>();
 
 /** Test support registers against internal instances, never production input. */
 export function registerTestDiagnostic(
   target: object,
   diagnostic: TestDiagnostic,
 ): () => void {
-  diagnostics.set(target, diagnostic);
+  const registration = Object.freeze({ diagnostic });
+  diagnostics.set(target, registration);
   return () => {
-    if (diagnostics.get(target) === diagnostic) diagnostics.delete(target);
+    if (diagnostics.get(target) === registration) diagnostics.delete(target);
   };
 }
 
@@ -46,7 +49,7 @@ export function emitTestDiagnostic(
   target: object,
   event: TestDiagnosticEvent,
 ): void {
-  const callback = diagnostics.get(target)?.onEvent;
+  const callback = diagnostics.get(target)?.diagnostic.onEvent;
   if (!callback) return;
   try {
     const result = callback(event);
@@ -67,7 +70,7 @@ export function beforeC4TransactionEntry(
     attemptId: string;
   }>,
 ): Promise<void> | undefined {
-  const callback = diagnostics.get(target)?.beforeC4TransactionEntry;
+  const callback = diagnostics.get(target)?.diagnostic.beforeC4TransactionEntry;
   if (!callback) return undefined;
   try {
     const result = callback(input);

@@ -5,6 +5,7 @@ import {
   type ProviderFetch,
   type VisionProvider,
 } from "@revelai/vision";
+import type { BoundedFrameProcessRunner } from "../storage/local-frame-extraction.js";
 
 export type LocalDemoProcessCommand = Readonly<{
   executable: string;
@@ -16,9 +17,14 @@ export type LocalDemoProcessCommand = Readonly<{
 }>;
 
 export type LocalDemoProcessRunner = Readonly<{
-  run(
-    command: LocalDemoProcessCommand,
-  ): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>>;
+  run(command: LocalDemoProcessCommand): Promise<
+    Readonly<{
+      exitCode: number;
+      termination: "completed" | "timed_out" | "terminated";
+      stdout: string;
+      stderr: string;
+    }>
+  >;
 }>;
 
 export class LocalDemoPreflightError extends Error {
@@ -69,13 +75,27 @@ export async function preflightMediaBinaries(
       ffmpeg.exitCode !== 0 ||
       filters.exitCode !== 0 ||
       encoders.exitCode !== 0 ||
-      !includesCapabilities(filters, ["showinfo", "metadata"]) ||
-      !includesCapabilities(encoders, ["mjpeg"])
+      probe.termination !== "completed" ||
+      ffmpeg.termination !== "completed" ||
+      filters.termination !== "completed" ||
+      encoders.termination !== "completed" ||
+      !includesExactCapabilities(filters, ["showinfo", "metadata"], 3) ||
+      !includesExactCapabilities(encoders, ["mjpeg"], 6)
     )
       throw new LocalDemoPreflightError();
   } catch {
     throw new LocalDemoPreflightError();
   }
+}
+
+/** Keeps the host process fact intact for C5's termination-safe extraction. */
+export function createHostFrameProcessRunner(
+  runner: LocalDemoProcessRunner,
+): BoundedFrameProcessRunner {
+  return Object.freeze({
+    run: async (command: Parameters<BoundedFrameProcessRunner["run"]>[0]) =>
+      Object.freeze({ ...(await runner.run(command)) }),
+  });
 }
 
 function command(
@@ -92,12 +112,19 @@ function command(
   });
 }
 
-function includesCapabilities(
+function includesExactCapabilities(
   result: Readonly<{ stdout: string; stderr: string }>,
   names: readonly string[],
+  flagWidth: number,
 ): boolean {
-  const output = `${result.stdout}\n${result.stderr}`.toLowerCase();
-  return names.every((name) => output.includes(name));
+  const capabilityNames = new Set<string>();
+  const line = new RegExp(
+    `^\\s*[A-Z.|]{${flagWidth}}\\s+([a-z0-9_]+)\\b`,
+    "gimu",
+  );
+  const output = `${result.stdout}\n${result.stderr}`;
+  for (const match of output.matchAll(line)) capabilityNames.add(match[1]!);
+  return names.every((name) => capabilityNames.has(name));
 }
 
 const processProviderFetch: ProviderFetch = async (url, init) => {

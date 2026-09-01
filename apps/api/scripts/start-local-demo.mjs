@@ -13,13 +13,7 @@ const isCheck = process.argv.includes("--check");
 const scratch = isCheck
   ? await mkdtemp(join(tmpdir(), "revelai-local-demo-check-"))
   : undefined;
-const environment = scratch
-  ? {
-      ...process.env,
-      DATA_DIR: join(scratch, "data"),
-      MEDIA_DIR: join(scratch, "media"),
-    }
-  : process.env;
+const environment = scratch ? checkEnvironment(scratch) : process.env;
 
 let runtime;
 
@@ -127,5 +121,15 @@ async function runProcess(input) {
         stderr: stderr.toString("utf8"),
       });
     });
+  });
+}
+
+function checkEnvironment(directory) {
+  return Object.freeze({
+    NODE_ENV: "development",
+    HOST: "127.0.0.1",
+    PORT: "3000",
+    DATA_DIR: join(directory, "data"),
+    MEDIA_DIR: join(directory, "media"),
   });
 }
