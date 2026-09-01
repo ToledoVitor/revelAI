@@ -67,18 +67,61 @@ describe("extraction manifest", () => {
       mediaId: IDs[1],
       preRoll: { count: 40 },
       active: { count: 600 },
-      rawPreRollSha256: createHash("sha256")
-        .update(
-          Buffer.concat(
-            frames.slice(0, 40).map((frame) => Buffer.from(frame.rawBytes)),
-          ),
-        )
-        .digest("hex"),
+      rawPreRollSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
     expect(JSON.stringify(manifest)).not.toContain("/");
     expect(
       parseExtractionManifest(JSON.parse(JSON.stringify(manifest))),
     ).toEqual(manifest);
+  });
+
+  it("frames the raw pre-roll digest and rejects extra nested partition fields", () => {
+    const leftFrames = verifiedFrames().map((frame, index) =>
+      index === 0
+        ? { ...frame, rawBytes: Uint8Array.of(1) }
+        : index === 1
+          ? { ...frame, rawBytes: Uint8Array.of(2, 3) }
+          : frame,
+    );
+    const rightFrames = verifiedFrames().map((frame, index) =>
+      index === 0
+        ? { ...frame, rawBytes: Uint8Array.of(1, 2) }
+        : index === 1
+          ? { ...frame, rawBytes: Uint8Array.of(3) }
+          : frame,
+    );
+    const left = createExtractionManifest({
+      attemptId: IDs[0],
+      generation: 1,
+      mediaId: IDs[1],
+      mediaSha256: "a".repeat(64),
+      mode: "verified",
+      probe,
+      frames: leftFrames,
+    });
+    const right = createExtractionManifest({
+      attemptId: IDs[0],
+      generation: 1,
+      mediaId: IDs[1],
+      mediaSha256: "a".repeat(64),
+      mode: "verified",
+      probe,
+      frames: rightFrames,
+    });
+    if (left.mode !== "verified" || right.mode !== "verified")
+      throw new Error("verified fixture required");
+    expect(left.rawPreRollSha256).not.toBe(right.rawPreRollSha256);
+
+    for (const nested of ["preRoll", "active"] as const) {
+      const persisted = JSON.parse(JSON.stringify(left)) as Record<
+        string,
+        Record<string, unknown>
+      >;
+      persisted[nested] = { ...persisted[nested], ignored: true };
+      expect(() => parseExtractionManifest(persisted)).toThrow(
+        "Invalid extraction manifest.",
+      );
+    }
   });
 
   it("rejects missing, reordered, unopaque, or path-bearing verified frames", () => {

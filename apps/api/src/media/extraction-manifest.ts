@@ -184,15 +184,7 @@ export function createExtractionManifest(
       }),
       preRoll: Object.freeze({ count: 40 }),
       active: Object.freeze({ count: 600 }),
-      rawPreRollSha256: createHash("sha256")
-        .update(
-          Buffer.concat(
-            input.frames
-              .slice(0, 40)
-              .map((frame) => Buffer.from(frame.rawBytes)),
-          ),
-        )
-        .digest("hex"),
+      rawPreRollSha256: framedRawPreRollSha256(input.frames.slice(0, 40)),
     });
     issueVerifiedExtractionCapability(manifest, input.frames);
     return manifest;
@@ -290,7 +282,7 @@ async function reconstructStorageBackedContext(
     frames,
   });
   if (
-    !sameExtractionAuthority(receipt.manifest, reconstructed) ||
+    !sameExtractionAuthority(receipt.manifest, reconstructed, frames) ||
     reconstructed.mediaSha256 !== input.authority.upload.sourceSha256
   )
     throw new Error("durable extraction authority mismatch");
@@ -473,11 +465,27 @@ function sameReceiptAuthority(
 function sameExtractionAuthority(
   left: ExtractionManifest,
   right: ExtractionManifest,
+  frames: readonly ExtractedFrame[],
 ): boolean {
   try {
+    const parsedLeft = parseExtractionManifest(left);
+    const parsedRight = parseExtractionManifest(right);
+    if (JSON.stringify(parsedLeft) === JSON.stringify(parsedRight)) return true;
+    // v1 receipts precede framing. They are accepted only when their exact
+    // ordered bytes verify the former digest and every other durable fact is
+    // identical; fresh manifests always use the unambiguous framed digest.
+    if (
+      parsedLeft.mode !== "verified" ||
+      parsedRight.mode !== "verified" ||
+      parsedLeft.rawPreRollSha256 !==
+        legacyRawPreRollSha256(frames.slice(0, 40))
+    )
+      return false;
+    const { rawPreRollSha256: _leftDigest, ...leftWithoutDigest } = parsedLeft;
+    const { rawPreRollSha256: _rightDigest, ...rightWithoutDigest } =
+      parsedRight;
     return (
-      JSON.stringify(parseExtractionManifest(left)) ===
-      JSON.stringify(parseExtractionManifest(right))
+      JSON.stringify(leftWithoutDigest) === JSON.stringify(rightWithoutDigest)
     );
   } catch {
     return false;
@@ -720,8 +728,10 @@ export function parseExtractionManifest(value: unknown): ExtractionManifest {
   if (mode === "verified") {
     if (
       !isRecord(value.preRoll) ||
+      !hasOnlyKeys(value.preRoll, ["count"]) ||
       value.preRoll.count !== 40 ||
       !isRecord(value.active) ||
+      !hasOnlyKeys(value.active, ["count"]) ||
       value.active.count !== 600
     )
       throw new Error("Invalid extraction manifest.");
@@ -948,6 +958,35 @@ function readDigest(value: unknown): string {
     throw new Error("Invalid extraction manifest.");
   assertDigest(value);
   return value;
+}
+
+/**
+ * The exact frame boundary is part of C5's private pre-roll binding. A plain
+ * concatenation aliases `[a, bc]` to `[ab, c]`; this stable header/count/size
+ * framing does not. The digest remains opaque outside C5/C7.
+ */
+function framedRawPreRollSha256(
+  frames: readonly Readonly<{ rawBytes: Uint8Array }>[],
+): string {
+  const hash = createHash("sha256").update("revelai:c5:pre-roll:v1\\0");
+  const count = Buffer.allocUnsafe(4);
+  count.writeUInt32BE(frames.length);
+  hash.update(count);
+  for (const frame of frames) {
+    const length = Buffer.allocUnsafe(8);
+    length.writeBigUInt64BE(BigInt(frame.rawBytes.byteLength));
+    hash.update(length);
+    hash.update(frame.rawBytes);
+  }
+  return hash.digest("hex");
+}
+
+function legacyRawPreRollSha256(
+  frames: readonly Readonly<{ rawBytes: Uint8Array }>[],
+): string {
+  return createHash("sha256")
+    .update(Buffer.concat(frames.map((frame) => Buffer.from(frame.rawBytes))))
+    .digest("hex");
 }
 
 function assertUuid(value: string): void {
