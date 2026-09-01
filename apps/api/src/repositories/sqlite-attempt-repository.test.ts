@@ -6217,6 +6217,14 @@ describe("SQLiteAttemptRepository", () => {
     legacy.close();
 
     const upgraded = openSqliteDatabase(filename);
+    const upgradedPolicy = new SQLiteCompetitivePolicyRepository({
+      database: upgraded,
+      clock: fixture.clock,
+    });
+    const quarantinedTuple = competitivePolicyActivation(
+      quarantinedReceipt,
+      "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    );
     expect(
       upgraded.raw
         .prepare(
@@ -6236,6 +6244,12 @@ describe("SQLiteAttemptRepository", () => {
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
     ).toEqual({ count: 22 });
+    await expect(
+      upgradedPolicy.storeBenchmarkReceipt(quarantinedReceipt),
+    ).resolves.toEqual(quarantinedReceipt);
+    await expect(
+      upgradedPolicy.getActiveCompetitivePolicy(quarantinedTuple),
+    ).resolves.toBeNull();
     upgraded.raw
       .prepare(
         "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, 'operator_revoked', ?)",
@@ -6256,6 +6270,30 @@ describe("SQLiteAttemptRepository", () => {
         .run(primaryReceipt.id, quarantinedReceipt.id),
     ).toThrow("invalidation already recorded");
     upgraded.close();
+
+    const reopened = openSqliteDatabase(filename);
+    const reopenedPolicy = new SQLiteCompetitivePolicyRepository({
+      database: reopened,
+      clock: fixture.clock,
+    });
+    await expect(
+      reopenedPolicy.getActiveCompetitivePolicy(quarantinedTuple),
+    ).resolves.toBeNull();
+    await expect(
+      reopenedPolicy.invalidateBenchmarkReceipt({
+        receiptId: quarantinedReceipt.id,
+        invalidatedAt: fixture.clock.now(),
+        reason: "operator_revoked",
+      }),
+    ).rejects.toMatchObject({ code: "competitive_policy_conflict" });
+    await expect(
+      reopenedPolicy.invalidateBenchmarkReceipt({
+        receiptId: quarantinedReceipt.id,
+        invalidatedAt: "2030-01-15T12:00:01.000Z",
+        reason: "operator_revoked",
+      }),
+    ).rejects.toMatchObject({ code: "competitive_policy_conflict" });
+    reopened.close();
   });
 
   it("drops corrupt legacy recovery states instead of aborting v9 startup", () => {

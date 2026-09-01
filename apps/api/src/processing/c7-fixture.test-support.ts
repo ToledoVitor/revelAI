@@ -106,11 +106,18 @@ export function createVerifiedFixtureVisionProvider(
       url: Parameters<ProviderFetch>[0],
       init: Parameters<ProviderFetch>[1],
     ) => void;
+    beforeWorkflowResponse?: (frameIndex: number) => void | Promise<void>;
     /** Exercises the production retry/deadline classification without I/O. */
     temporaryWorkflowFailures?: number;
+    apiUrl?: string;
     workspaceId?: string;
+    apiKey?: string;
     verifiedModelBundleId?: string;
     verifiedProviderVersion?: string;
+    workflowId?: string;
+    workflowVersion?: string;
+    fiducialXOffsetForFrame?: (frameIndex: number) => number;
+    workflowResponse?: unknown;
   }> = {},
 ): VisionProvider {
   if (provenance === "demo") return createDemoVisionProvider();
@@ -123,8 +130,9 @@ export function createVerifiedFixtureVisionProvider(
   let temporaryFailures = options.temporaryWorkflowFailures ?? 0;
   return createRoboflowVisionProvider({
     config: {
-      apiUrl: "http://127.0.0.1:9001",
+      apiUrl: options.apiUrl ?? "http://127.0.0.1:9001",
       workspaceId,
+      ...(options.apiKey ? { apiKey: options.apiKey } : {}),
       freeModelBundleId: "free-bundle-v1",
       verifiedModelBundleId,
       freeProviderVersion: "roboflow-inference-v1",
@@ -152,15 +160,23 @@ export function createVerifiedFixtureVisionProvider(
       }
       const index = frameIndexes.shift();
       if (index === undefined) throw new Error("fixture frame index required");
+      await options.beforeWorkflowResponse?.(index);
       return {
         status: 200,
         json: async () => ({
-          outputs: [
-            roboflowOutput(index, {
-              verifiedModelBundleId,
-              verifiedProviderVersion,
-            }),
-          ],
+          ...(options.workflowResponse
+            ? options.workflowResponse
+            : {
+                outputs: [
+                  roboflowOutput(index, {
+                    verifiedModelBundleId,
+                    verifiedProviderVersion,
+                    workflowId: options.workflowId,
+                    workflowVersion: options.workflowVersion,
+                    fiducialXOffset: options.fiducialXOffsetForFrame?.(index),
+                  }),
+                ],
+              }),
         }),
       };
     },
@@ -172,6 +188,9 @@ function roboflowOutput(
   input: Readonly<{
     verifiedModelBundleId: string;
     verifiedProviderVersion: string;
+    workflowId?: string;
+    workflowVersion?: string;
+    fiducialXOffset?: number;
   }>,
 ) {
   const activeIndex = frameIndex - 40;
@@ -193,8 +212,8 @@ function roboflowOutput(
     kind: "wall-pass-geometry-v1",
     image: { width: 1280, height: 720, coordinateSystem: "inference_pixels" },
     workflow: {
-      id: "revelai-wall-pass-geometry-v1",
-      version: "1.0.0",
+      id: input.workflowId ?? "revelai-wall-pass-geometry-v1",
+      version: input.workflowVersion ?? "1.0.0",
       modelBundleId: input.verifiedModelBundleId,
       providerVersion: input.verifiedProviderVersion,
     },
@@ -243,7 +262,12 @@ function roboflowOutput(
       ["b-top-right", 460, 290],
       ["b-bottom-right", 460, 310],
       ["b-bottom-left", 440, 310],
-    ].map(([name, x, y]) => ({ class: name, x, y, confidence: 0.92 })),
+    ].map(([name, x, y]) => ({
+      class: name,
+      x: Number(x) + (input.fiducialXOffset ?? 0),
+      y: Number(y),
+      confidence: 0.92,
+    })),
     geometry: {
       wallFloorEdge: { x1: 0, y1: 0, x2: 800, y2: 0, confidence: 0.94 },
     },

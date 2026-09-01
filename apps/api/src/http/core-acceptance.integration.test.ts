@@ -1,4 +1,18 @@
-import { lstat, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -17,6 +31,7 @@ import {
 } from "@revelai/contracts";
 import {
   createDemoVisionProvider,
+  VisionProviderError,
   VisionBatchScheduler,
   type VisionProvider,
 } from "@revelai/vision";
@@ -34,10 +49,27 @@ import { SQLiteAttemptRepository } from "../repositories/sqlite-attempt-reposito
 import { SQLiteCompetitivePolicyRepository } from "../repositories/sqlite-competitive-policy-repository.js";
 import { createLocalC8AcceptedMediaCleaner } from "../services/local-c8-accepted-media-cleaner.js";
 import type { BoundedFrameProcessRunner } from "../storage/local-frame-extraction.js";
-import type { LocalMediaProber } from "../storage/local-media-storage.js";
+import type {
+  LocalMediaProber,
+  NoReplacePublisher,
+} from "../storage/local-media-storage.js";
 
 const ATHLETE_ID = "11111111-1111-4111-8111-111111111111";
 const NOW = "2030-01-15T12:00:00.000Z";
+const FREE_SAMPLE_TIMESTAMP_MS = [
+  0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000,
+  6500, 7000, 7500, 8100, 8600, 9100, 9600, 10100, 10600, 11100, 11600, 12100,
+  12600, 13100, 13600, 14100, 14600, 15100, 15600, 16100, 16600, 17100, 17600,
+  18100, 18600, 19100, 19600, 20100, 20600, 21100, 21600, 22100, 22600, 23100,
+  23600, 24200, 24700, 25200, 25700, 26200, 26700, 27200, 27700, 28200, 28700,
+  29200, 29700, 30200, 30700, 31200, 31700, 32200, 32700, 33200, 33700, 34200,
+  34700, 35200, 35700, 36200, 36700, 37200, 37700, 38200, 38700, 39200, 39700,
+  40300, 40800, 41300, 41800, 42300, 42800, 43300, 43800, 44300, 44800, 45300,
+  45800, 46300, 46800, 47300, 47800, 48300, 48800, 49300, 49800, 50300, 50800,
+  51300, 51800, 52300, 52800, 53300, 53800, 54300, 54800, 55300, 55800, 56400,
+  56900, 57400, 57900, 58400, 58900, 59400, 59900, 60400, 60900, 61400, 61900,
+  62400, 62900, 63400, 63900,
+] as const;
 const directories: string[] = [];
 
 class ManualScheduler implements QueueScheduler {
@@ -73,6 +105,23 @@ class ManualScheduler implements QueueScheduler {
   public get hourlyTaskCount(): number {
     return this.hourlyTasks.size;
   }
+}
+
+function runNext(scheduler: ManualScheduler): Promise<void> {
+  const task = scheduler.tasks.shift();
+  if (!task) throw new Error("C10 expected one scheduled queue delivery");
+  return task();
+}
+
+function deferred<Value>(): Readonly<{
+  promise: Promise<Value>;
+  resolve(value: Value): void;
+}> {
+  let resolve: (value: Value) => void = () => undefined;
+  const promise = new Promise<Value>((settle) => {
+    resolve = settle;
+  });
+  return Object.freeze({ promise, resolve });
 }
 
 afterEach(async () => {
@@ -178,10 +227,25 @@ describe("Core acceptance through the production Fastify seam", () => {
 
   it("keeps a portrait Free multipart flow personal, noncompetitive, and retryable after an incomplete upload", async () => {
     const free = trackedFreeProvider();
+    const probeInputs: Array<Readonly<{ magicContainer: string }>> = [];
     const fixture = await makeRoot({
       verifiedProvider: createDemoVisionProvider(),
       freeProvider: free.provider,
       c5Mode: "free",
+      c5Prober: {
+        probe: async (input) => {
+          probeInputs.push({ magicContainer: input.magicContainer });
+          return Object.freeze({
+            container: "mov" as const,
+            durationSeconds: 64,
+            displayWidth: 720,
+            displayHeight: 1280,
+            nominalFps: 30,
+            codec: "h264",
+            sourceRotationDegrees: 0 as const,
+          });
+        },
+      },
     });
     try {
       const created = await fixture.app.inject({
@@ -237,6 +301,7 @@ describe("Core acceptance through the production Fastify seam", () => {
         mode: "free",
         status: "uploaded",
       });
+      const receipt = await durableReceiptFor(fixture, attemptId);
       await fixture.scheduler.runAll();
       const result = await resultFor(fixture.app, attemptId);
       expect(result).toMatchObject({
@@ -248,12 +313,53 @@ describe("Core acceptance through the production Fastify seam", () => {
       );
       if (result.state !== "valid" || result.result.kind !== "free-insight")
         throw new Error("Free fixture must produce a FreeInsight");
-      expect(result.result.observations).toHaveLength(3);
+      expect(probeInputs).toEqual([{ magicContainer: "mov" }]);
+      expect(free.freeFrames.map((frame) => frame.timestampMs)).toEqual(
+        FREE_SAMPLE_TIMESTAMP_MS,
+      );
+      expect(result.result.observations).toEqual([
+        {
+          kind: "athlete-visibility",
+          unit: "percent",
+          value: 100,
+          range: "consistent",
+        },
+        {
+          kind: "ball-visibility",
+          unit: "percent",
+          value: 100,
+          range: "consistent",
+        },
+        {
+          kind: "movement-activity",
+          unit: "percent",
+          value: 100,
+          range: "high",
+        },
+      ]);
       expect(result.result.tips).toEqual([
         "Boa cobertura para uma análise aproximada.",
       ]);
-      expect(free.freeCalls).toBeGreaterThan(0);
+      expect(free.freeCalls).toBe(128);
       expect(free.verifiedCalls).toBe(0);
+
+      expect(receipt).toMatchObject({
+        kind: "c5-storage-extraction-receipt-v1",
+        authority: { attemptId, mode: "free" },
+        activeScenes: null,
+        manifest: {
+          kind: "extraction-manifest",
+          mode: "free",
+          display: { width: 720, height: 1280, rotationDegrees: 0 },
+          frames: {
+            count: 128,
+            items: FREE_SAMPLE_TIMESTAMP_MS.map((timestampMs, ordinal) => ({
+              ordinal,
+              timestampSeconds: timestampMs / 1000,
+            })),
+          },
+        },
+      });
 
       const list = await fixture.app.inject({
         method: "GET",
@@ -474,8 +580,182 @@ describe("Core acceptance through the production Fastify seam", () => {
     }
   }, 20_000);
 
+  it("finalizes equal-score HTTP attempts concurrently through independent SQLite workers", async () => {
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let arrivals = 0;
+    const gatedProvider = () => {
+      let gated = false;
+      return createVerifiedFixtureVisionProvider("roboflow", {
+        beforeWorkflowResponse: async () => {
+          if (gated) return;
+          gated = true;
+          arrivals += 1;
+          if (arrivals === 2) entered.resolve();
+          await release.promise;
+        },
+      });
+    };
+    const primary = await makeRoot({
+      verifiedProvider: gatedProvider(),
+      approvedPolicy: true,
+      c5Mode: "verified",
+    });
+    let secondary: Awaited<ReturnType<typeof makeRoot>> | undefined;
+    try {
+      secondary = await makeRoot({
+        verifiedProvider: gatedProvider(),
+        approvedPolicy: true,
+        activatePolicy: false,
+        c5Mode: "verified",
+        root: primary.root,
+        repositoryIdPrefix: "cccccccc",
+        appIdPrefix: "eeeeeeee",
+      });
+      const first = await createVerifiedAttempt(primary.app);
+      const firstDelivery = runNext(primary.scheduler);
+      const second = await createVerifiedAttempt(primary.app);
+      await secondary.queue.enqueue({
+        attemptId: second.attemptId,
+        generation: 1,
+        mode: "verified",
+      });
+      const secondDelivery = runNext(secondary.scheduler);
+      await entered.promise;
+      release.resolve();
+      await Promise.all([firstDelivery, secondDelivery]);
+      await primary.scheduler.runAll();
+
+      const firstResult = await rankedResultFor(primary.app, first.attemptId);
+      const secondResult = await rankedResultFor(primary.app, second.attemptId);
+      expect(
+        [
+          firstResult.rankingSnapshot.cohortSize,
+          secondResult.rankingSnapshot.cohortSize,
+        ].sort(),
+      ).toEqual([1, 2]);
+      expect(await liveLeaderboard(primary.app)).toMatchObject({
+        cohortSize: 2,
+        entries: [
+          { rank: 1, score: firstResult.score },
+          { rank: 1, score: secondResult.score },
+        ],
+      });
+      const ordered = primary.database.raw
+        .prepare(
+          "SELECT attempt_id, id, completed_at, commit_sequence FROM leaderboard_entries ORDER BY score DESC, completed_at ASC, attempt_id ASC",
+        )
+        .all() as readonly Readonly<{
+        attempt_id: string;
+        id: string;
+        completed_at: string;
+        commit_sequence: number;
+      }>[];
+      expect(ordered).toHaveLength(2);
+      expect(ordered.map((entry) => entry.completed_at)).toEqual([NOW, NOW]);
+      expect(ordered.map((entry) => entry.attempt_id)).toEqual(
+        [first.attemptId, second.attemptId].sort(),
+      );
+      expect(ordered.map((entry) => entry.commit_sequence).sort()).toEqual([
+        1, 2,
+      ]);
+      const live = await liveLeaderboard(primary.app);
+      expect(live.entries.map((entry) => entry.entryId)).toEqual(
+        ordered.map((entry) => entry.id),
+      );
+      expect(JSON.stringify(live)).not.toContain(ATHLETE_ID);
+      const otherVersion = await primary.app.inject({
+        method: "GET",
+        url: "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-2&limit=20",
+      });
+      expect(otherVersion.statusCode).toBe(400);
+      expect(RouteErrorSchema.parse(otherVersion.json()).code).toBe(
+        "invalid_request",
+      );
+      expect(
+        primary.database.raw
+          .prepare("SELECT COUNT(*) AS count FROM leaderboard_entries")
+          .get(),
+      ).toEqual({ count: 2 });
+    } finally {
+      release.resolve();
+      await secondary?.close();
+      await primary.close();
+    }
+  }, 30_000);
+
+  it("lets an independent HTTP delete win a blocked finalizer without restart resurrection", async () => {
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let gated = false;
+    const primary = await makeRoot({
+      verifiedProvider: createVerifiedFixtureVisionProvider("roboflow", {
+        beforeWorkflowResponse: async () => {
+          if (gated) return;
+          gated = true;
+          entered.resolve();
+          await release.promise;
+        },
+      }),
+      approvedPolicy: true,
+      c5Mode: "verified",
+    });
+    let secondary: Awaited<ReturnType<typeof makeRoot>> | undefined;
+    try {
+      secondary = await makeRoot({
+        verifiedProvider: createVerifiedFixtureVisionProvider("roboflow"),
+        approvedPolicy: true,
+        activatePolicy: false,
+        c5Mode: "verified",
+        root: primary.root,
+        repositoryIdPrefix: "cccccccc",
+        appIdPrefix: "eeeeeeee",
+      });
+      const attempt = await createVerifiedAttempt(primary.app);
+      const finalizer = runNext(primary.scheduler);
+      await entered.promise;
+      const deleted = await secondary.app.inject({
+        method: "DELETE",
+        url: `/v1/attempts/${attempt.attemptId}`,
+        headers: athleteHeaders(),
+      });
+      expect(deleted.statusCode).toBe(204);
+      release.resolve();
+      await finalizer;
+      await primary.scheduler.runAll();
+      await secondary.close();
+      secondary = undefined;
+      await primary.restart();
+      await primary.scheduler.runAll();
+      const missing = await resultResponse(primary.app, attempt.attemptId);
+      expect(missing.statusCode).toBe(404);
+      expect(RouteErrorSchema.parse(missing.json()).code).toBe(
+        "attempt_not_found",
+      );
+      for (const table of [
+        "terminal_results",
+        "leaderboard_entries",
+        "canonical_observations",
+      ])
+        expect(
+          primary.database.raw
+            .prepare(
+              `SELECT COUNT(*) AS count FROM ${table} WHERE attempt_id = ?`,
+            )
+            .get(attempt.attemptId),
+        ).toEqual({ count: 0 });
+      expect(await liveLeaderboard(primary.app)).toMatchObject({
+        cohortSize: 0,
+        entries: [],
+      });
+    } finally {
+      release.resolve();
+      await secondary?.close();
+      await primary.close();
+    }
+  }, 20_000);
+
   it("contains queue, media, provider, integrity, and readiness failures at the public seam", async () => {
-    let preflightReads = 0;
     const unavailable = await makeRoot({
       verifiedProvider: createDemoVisionProvider(),
       c5Mode: "free",
@@ -483,26 +763,29 @@ describe("Core acceptance through the production Fastify seam", () => {
     });
     try {
       const attemptId = await createFreeAttempt(unavailable.app);
-      const response = await unavailable.app.inject({
-        method: "POST",
-        url: `/v1/attempts/${attemptId}/media`,
-        headers: multipartHeaders("queue-unavailable"),
-        payload: Readable.from(
-          (async function* () {
-            preflightReads += 1;
-            yield multipart("queue-unavailable", "private-before-body.mp4");
-          })(),
-        ),
+      const listener = await unavailable.app.listen({
+        host: "127.0.0.1",
+        port: 0,
       });
-      expect(response.statusCode).toBe(503);
-      expect(RouteErrorSchema.parse(response.json())).toMatchObject({
-        code: "queue_unavailable",
-        retryable: true,
+      const endpoint = new URL(listener);
+      const response = await responseBeforeRequestBody({
+        host: endpoint.hostname,
+        port: Number(endpoint.port),
+        request: [
+          `POST /v1/attempts/${attemptId}/media HTTP/1.1`,
+          `Host: ${endpoint.host}`,
+          `X-RevelAI-Athlete-Id: ${ATHLETE_ID}`,
+          "Content-Type: multipart/form-data; boundary=queue-unavailable",
+          "Content-Length: 1048576",
+          "Connection: close",
+          "",
+          "",
+        ].join("\r\n"),
       });
-      expect(response.body).not.toMatch(
+      expect(response).toMatch(/^HTTP\/1\.1 503 /);
+      expect(response).not.toMatch(
         /private-before-body|path|media|sql|stack|base64/i,
       );
-      expect(preflightReads).toBe(1);
       expect(attemptRow(unavailable, attemptId)).toMatchObject({
         status: "awaiting-upload",
         media_json: null,
@@ -519,13 +802,11 @@ describe("Core acceptance through the production Fastify seam", () => {
       await unavailable.close();
     }
 
-    let availabilityCalls = 0;
     const enqueueFailure = await makeRoot({
       verifiedProvider: createDemoVisionProvider(),
       c5Mode: "free",
-      queueAvailable: () => {
-        availabilityCalls += 1;
-        return availabilityCalls < 3;
+      queueBeforeEnqueue: () => {
+        throw new Error("injected local queue enqueue rejection");
       },
     });
     try {
@@ -728,7 +1009,397 @@ describe("Core acceptance through the production Fastify seam", () => {
     } finally {
       await invalid.close();
     }
+
+    const cameraContinuity = await makeRoot({
+      verifiedProvider: createVerifiedFixtureVisionProvider("roboflow", {
+        fiducialXOffsetForFrame: (frameIndex) => (frameIndex >= 320 ? 80 : 0),
+      }),
+      c5Mode: "verified",
+    });
+    try {
+      const { attemptId } = await createVerifiedAttempt(cameraContinuity.app);
+      await cameraContinuity.scheduler.runAll();
+      const outcome = await resultFor(cameraContinuity.app, attemptId);
+      expect(outcome).toMatchObject({
+        state: "invalid",
+        code: "calibration_not_verified",
+        retryable: true,
+      });
+      expect(JSON.stringify(outcome)).not.toMatch(
+        /homography|camera|fiducial|drift|evidence|payload/i,
+      );
+      expect(await liveLeaderboard(cameraContinuity.app)).toMatchObject({
+        cohortSize: 0,
+        entries: [],
+      });
+    } finally {
+      await cameraContinuity.close();
+    }
   }, 30_000);
+
+  it("contains real local-storage create, chmod, publication, traversal, and symlink failures", async () => {
+    const createFailure = await makeRoot({
+      verifiedProvider: createDemoVisionProvider(),
+      c5Mode: "free",
+    });
+    try {
+      await writeFile(createFailure.mediaRoot, "C10 media root is a file", {
+        mode: 0o600,
+      });
+      const attemptId = await createFreeAttempt(createFailure.app);
+      const response = await createFailure.app.inject({
+        method: "POST",
+        url: `/v1/attempts/${attemptId}/media`,
+        headers: multipartHeaders("storage-create"),
+        payload: multipart("storage-create", "C10-create-private.mp4"),
+      });
+      expect(response.statusCode).toBe(422);
+      expect(RouteErrorSchema.parse(response.json()).code).toBe(
+        "media_probe_failed",
+      );
+      expect(response.body).not.toMatch(
+        /C10-create|root is a file|path|stack|sql/i,
+      );
+      expect(attemptRow(createFailure, attemptId)).toMatchObject({
+        status: "awaiting-upload",
+        media_json: null,
+      });
+    } finally {
+      await createFailure.close();
+    }
+
+    const writeFailure = await makeRoot({
+      verifiedProvider: createDemoVisionProvider(),
+      c5Mode: "free",
+    });
+    try {
+      const attemptId = await createFreeAttempt(writeFailure.app);
+      await expect(
+        writeFailure.app.inject({
+          method: "POST",
+          url: `/v1/attempts/${attemptId}/media`,
+          headers: multipartHeaders("storage-write"),
+          payload: Readable.from(
+            (async function* () {
+              yield multipart(
+                "storage-write",
+                "C10-write-private.mp4",
+              ).subarray(0, -8);
+              throw new Error("C10 local write stream disconnected");
+            })(),
+          ),
+        }),
+      ).rejects.toThrow("C10 local write stream disconnected");
+      expect(attemptRow(writeFailure, attemptId)).toMatchObject({
+        status: "awaiting-upload",
+        media_json: null,
+      });
+      await expectEmptyMediaDirectories(writeFailure);
+    } finally {
+      await writeFailure.close();
+    }
+
+    let temporaryDirectory = "";
+    const chmodFailure = await makeRoot({
+      verifiedProvider: createDemoVisionProvider(),
+      c5Mode: "free",
+      c5Prober: {
+        probe: async () => {
+          await chmod(temporaryDirectory, 0o000);
+          return Object.freeze({
+            container: "mp4" as const,
+            durationSeconds: 64,
+            displayWidth: 1280,
+            displayHeight: 720,
+            nominalFps: 30,
+            codec: "h264",
+            sourceRotationDegrees: 0 as const,
+          });
+        },
+      },
+    });
+    temporaryDirectory = join(chmodFailure.mediaRoot, "temporary");
+    try {
+      const attemptId = await createFreeAttempt(chmodFailure.app);
+      const response = await chmodFailure.app.inject({
+        method: "POST",
+        url: `/v1/attempts/${attemptId}/media`,
+        headers: multipartHeaders("storage-chmod"),
+        payload: multipart("storage-chmod", "C10-chmod-private.mp4"),
+      });
+      expect(response.statusCode).toBe(422);
+      expect(RouteErrorSchema.parse(response.json()).code).toBe(
+        "media_probe_failed",
+      );
+      expect(response.body).not.toMatch(/C10-chmod|chmod|path|stack|sql/i);
+      expect(attemptRow(chmodFailure, attemptId)).toMatchObject({
+        status: "awaiting-upload",
+        media_json: null,
+      });
+    } finally {
+      await chmod(temporaryDirectory, 0o700).catch(() => undefined);
+      await chmodFailure.scheduler.runHourly();
+      await chmodFailure.close();
+    }
+
+    const publicationFailure = await makeRoot({
+      verifiedProvider: createDemoVisionProvider(),
+      c5Mode: "free",
+      c5Publisher: {
+        publish: async ({
+          temporaryPath,
+          finalDirectory,
+          payloadPath,
+          ownerToken,
+        }) => {
+          await mkdir(finalDirectory, { mode: 0o700 });
+          await chmod(finalDirectory, 0o700);
+          await writeFile(join(finalDirectory, ".owner"), ownerToken, {
+            flag: "wx",
+            mode: 0o600,
+          });
+          await rename(temporaryPath, payloadPath);
+          await chmod(payloadPath, 0o600);
+          throw new Error("C10 rename publication failure /private/payload");
+        },
+      },
+    });
+    try {
+      const attemptId = await createFreeAttempt(publicationFailure.app);
+      const response = await publicationFailure.app.inject({
+        method: "POST",
+        url: `/v1/attempts/${attemptId}/media`,
+        headers: multipartHeaders("storage-publication"),
+        payload: multipart(
+          "storage-publication",
+          "C10-publication-private.mp4",
+        ),
+      });
+      expect(response.statusCode).toBe(422);
+      expect(RouteErrorSchema.parse(response.json()).code).toBe(
+        "media_probe_failed",
+      );
+      expect(response.body).not.toMatch(
+        new RegExp(
+          "C10-publication|rename publication|private/payload|path|stack|sql",
+          "i",
+        ),
+      );
+      expect(attemptRow(publicationFailure, attemptId)).toMatchObject({
+        status: "awaiting-upload",
+        media_json: null,
+      });
+      await expectEmptyMediaDirectories(publicationFailure);
+    } finally {
+      await publicationFailure.close();
+    }
+
+    const hostile = await makeRoot({
+      verifiedProvider: createDemoVisionProvider(),
+      c5Mode: "free",
+    });
+    try {
+      const outside = join(hostile.root, "C10-outside-private.txt");
+      await writeFile(outside, "unchanged", { mode: 0o600 });
+      await mkdir(join(hostile.mediaRoot, "originals"), { recursive: true });
+      await symlink(
+        outside,
+        join(
+          hostile.mediaRoot,
+          "originals",
+          "dddddddd-dddd-4ddd-8ddd-000000000000",
+        ),
+      );
+      const symlinkAttempt = await createFreeAttempt(hostile.app);
+      const symlinkResponse = await hostile.app.inject({
+        method: "POST",
+        url: `/v1/attempts/${symlinkAttempt}/media`,
+        headers: multipartHeaders("storage-symlink"),
+        payload: multipart("storage-symlink", "C10-symlink-private.mp4"),
+      });
+      expect(symlinkResponse.statusCode).toBe(422);
+      expect(RouteErrorSchema.parse(symlinkResponse.json()).code).toBe(
+        "media_probe_failed",
+      );
+      expect(await readFile(outside, "utf8")).toBe("unchanged");
+      expect(attemptRow(hostile, symlinkAttempt)).toMatchObject({
+        status: "awaiting-upload",
+        media_json: null,
+      });
+
+      await unlink(
+        join(
+          hostile.mediaRoot,
+          "originals",
+          "dddddddd-dddd-4ddd-8ddd-000000000000",
+        ),
+      );
+      const traversalAttempt = await createFreeAttempt(hostile.app);
+      const traversal = await hostile.app.inject({
+        method: "POST",
+        url: `/v1/attempts/${traversalAttempt}/media`,
+        headers: multipartHeaders("storage-traversal"),
+        payload: multipart(
+          "storage-traversal",
+          "../../C10-traversal-private.mp4",
+        ),
+      });
+      expect(traversal.statusCode).toBe(202);
+      expect(traversal.body).not.toMatch(/C10-traversal|\.\.|path|stack|sql/i);
+      await expectPrivateMediaTree(hostile, traversalAttempt);
+      expect(await readFile(outside, "utf8")).toBe("unchanged");
+    } finally {
+      await hostile.close();
+    }
+  }, 20_000);
+
+  it("never returns or logs injected provider secrets, media bytes, or private storage facts", async () => {
+    const apiKey = "C10_API_KEY_SENTINEL_8be37d";
+    const authorization = "Bearer C10_AUTHORIZATION_SENTINEL_5d94a1";
+    const mediaBytes = "C10_MEDIA_BYTES_SENTINEL_4fa91b";
+    const rawPayload = "C10_RAW_PROVIDER_PAYLOAD_SENTINEL_7ac22e";
+    const logs: unknown[] = [];
+    const workflowBodies: string[] = [];
+    const fixture = await makeRoot({
+      verifiedProvider: createVerifiedFixtureVisionProvider("roboflow", {
+        apiKey,
+        apiUrl: "https://roboflow.c10.invalid",
+        onWorkflowRequest: (_url, init) => workflowBodies.push(init.body),
+        workflowResponse: {
+          outputs: [
+            {
+              authorization,
+              rawPayload,
+              image: { type: "base64", value: mediaBytes },
+            },
+          ],
+        },
+      }),
+      approvedPolicy: true,
+      c5Mode: "verified",
+      logs,
+    });
+    try {
+      const { attemptId, upload } = await createVerifiedAttempt(fixture.app);
+      await fixture.scheduler.runAll();
+      const result = await resultResponse(fixture.app, attemptId);
+      const listed = await fixture.app.inject({
+        method: "GET",
+        url: "/v1/attempts?limit=20",
+        headers: athleteHeaders(),
+      });
+      const leaderboard = await fixture.app.inject({
+        method: "GET",
+        url: "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=20",
+      });
+      expect(result.statusCode).toBe(200);
+      expect(AttemptResultResponseSchema.parse(result.json())).toMatchObject({
+        state: "failed",
+        code: "analysis_configuration_invalid",
+      });
+      expect(workflowBodies).not.toEqual([]);
+      expect(workflowBodies.every((body) => body.includes(apiKey))).toBe(true);
+      const candidate = fixture.database.raw
+        .prepare(
+          "SELECT candidate_json FROM terminal_results WHERE attempt_id = ?",
+        )
+        .get(attemptId) as Readonly<{ candidate_json: string }>;
+      expectNoLeaks(
+        [
+          upload,
+          result.body,
+          listed.body,
+          leaderboard.body,
+          candidate.candidate_json,
+          JSON.stringify(logs),
+        ],
+        [
+          apiKey,
+          authorization,
+          mediaBytes,
+          rawPayload,
+          fixture.root,
+          ATHLETE_ID,
+          "api_key",
+          "authorization",
+          "base64",
+          "rawPayload",
+          "stack",
+          "sql",
+          "calibration",
+          "evidence",
+        ],
+      );
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("keeps a tombstone durable when local deletion fails, then retries after restart", async () => {
+    const fixture = await makeRoot({
+      verifiedProvider: createDemoVisionProvider(),
+      c5Mode: "free",
+    });
+    try {
+      const attemptId = await createFreeAttempt(fixture.app);
+      const upload = await fixture.app.inject({
+        method: "POST",
+        url: `/v1/attempts/${attemptId}/media`,
+        headers: multipartHeaders("tombstone-retry"),
+        payload: multipart("tombstone-retry"),
+      });
+      expect(upload.statusCode).toBe(202);
+      await fixture.scheduler.runAll();
+      const media = JSON.parse(
+        (
+          fixture.database.raw
+            .prepare("SELECT media_json FROM attempts WHERE id = ?")
+            .get(attemptId) as Readonly<{ media_json: string }>
+        ).media_json,
+      ) as Readonly<{ id: string }>;
+      const original = join(fixture.mediaRoot, "originals", media.id);
+      await chmod(join(fixture.mediaRoot, "originals"), 0o500);
+      const deleted = await fixture.app.inject({
+        method: "DELETE",
+        url: `/v1/attempts/${attemptId}`,
+        headers: athleteHeaders(),
+      });
+      expect(deleted.statusCode).toBe(204);
+      await fixture.scheduler.runHourly();
+      expect(
+        fixture.database.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM media_retention_records WHERE attempt_id = ? AND cleanup_requested_at = ?",
+          )
+          .get(attemptId, NOW),
+      ).toEqual({ count: 1 });
+      await expect(lstat(original)).resolves.toMatchObject({});
+      await chmod(join(fixture.mediaRoot, "originals"), 0o700);
+      await fixture.restart();
+      await fixture.scheduler.runHourly();
+      await fixture.stopForDrain();
+      await expect(lstat(original)).rejects.toThrow();
+      expect(
+        fixture.database.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM media_retention_records WHERE attempt_id = ?",
+          )
+          .get(attemptId),
+      ).toEqual({ count: 0 });
+      expect(
+        fixture.database.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM attempts WHERE id = ? AND deletion_state = 'tombstoned'",
+          )
+          .get(attemptId),
+      ).toEqual({ count: 1 });
+    } finally {
+      await chmod(join(fixture.mediaRoot, "originals"), 0o700).catch(
+        () => undefined,
+      );
+      await fixture.close();
+    }
+  });
 
   it("reclaims an expired HTTP-upload processing lease, then persists a dead letter across restart", async () => {
     const fixture = await makeRoot({
@@ -806,6 +1477,111 @@ describe("Core acceptance through the production Fastify seam", () => {
     }
   });
 
+  it("uses worker deliveries for before-expiry, exact-expiry, and max-budget lease recovery", async () => {
+    const base = createDemoVisionProvider();
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let freeCalls = 0;
+    let carryInAttemptId: string | undefined;
+    const fixture = await makeRoot({
+      verifiedProvider: createDemoVisionProvider(),
+      c5Mode: "free",
+      freeProvider: Object.freeze({
+        ...base,
+        analyzeFree: async (
+          ...args: Parameters<VisionProvider["analyzeFree"]>
+        ) => {
+          freeCalls += 1;
+          if (args[0].attemptId === carryInAttemptId)
+            throw new VisionProviderError("provider_temporary_unavailable");
+          if (freeCalls === 1) {
+            entered.resolve();
+            await release.promise;
+          }
+          return base.analyzeFree(...args);
+        },
+      }) satisfies VisionProvider,
+    });
+    try {
+      const attemptId = await createFreeAttempt(fixture.app);
+      const upload = await fixture.app.inject({
+        method: "POST",
+        url: `/v1/attempts/${attemptId}/media`,
+        headers: multipartHeaders("lease-worker"),
+        payload: multipart("lease-worker"),
+      });
+      expect(upload.statusCode).toBe(202);
+      const firstDelivery = runNext(fixture.scheduler);
+      await entered.promise;
+      expect(
+        processingEventCount(fixture, attemptId, "processing-claimed"),
+      ).toBe(1);
+
+      fixture.setNow("2030-01-15T12:04:59.999Z");
+      await fixture.queue.enqueue({ attemptId, generation: 1, mode: "free" });
+      await runNext(fixture.scheduler);
+      expect(
+        processingEventCount(fixture, attemptId, "processing-claimed"),
+      ).toBe(1);
+
+      fixture.setNow("2030-01-15T12:05:00.000Z");
+      await fixture.queue.enqueue({ attemptId, generation: 1, mode: "free" });
+      await runNext(fixture.scheduler);
+      expect(
+        processingEventCount(fixture, attemptId, "processing-claimed"),
+      ).toBe(2);
+      expect(await resultFor(fixture.app, attemptId)).toMatchObject({
+        state: "valid",
+        result: { kind: "free-insight" },
+      });
+      release.resolve();
+      await firstDelivery;
+      await fixture.scheduler.runAll();
+      expect(
+        fixture.database.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
+          )
+          .get(attemptId),
+      ).toEqual({ count: 1 });
+
+      const carryIn = await createFreeAttempt(fixture.app);
+      const carryUpload = await fixture.app.inject({
+        method: "POST",
+        url: `/v1/attempts/${carryIn}/media`,
+        headers: multipartHeaders("lease-carry-in"),
+        payload: multipart("lease-carry-in"),
+      });
+      expect(carryUpload.statusCode).toBe(202);
+      fixture.database.raw
+        .prepare(
+          "INSERT INTO processing_recovery_records (attempt_id, generation, retry_attempts, state, created_at, updated_at) VALUES (?, 1, ?, 'retrying', ?, ?)",
+        )
+        .run(carryIn, Number.MAX_SAFE_INTEGER, NOW, NOW);
+      carryInAttemptId = carryIn;
+      await fixture.scheduler.runAll();
+      expect(await resultFor(fixture.app, carryIn)).toMatchObject({
+        state: "failed",
+        mode: "free",
+        code: "analysis_temporary_unavailable",
+        retryable: true,
+      });
+      expect(processingEventCount(fixture, carryIn, "processing-claimed")).toBe(
+        1,
+      );
+      expect(processingEventCount(fixture, carryIn, "processing-failed")).toBe(
+        1,
+      );
+      expect(await liveLeaderboard(fixture.app)).toMatchObject({
+        cohortSize: 0,
+        entries: [],
+      });
+    } finally {
+      release.resolve();
+      await fixture.close();
+    }
+  }, 20_000);
+
   it("redacts real database and storage readiness failures and catches scheduled run failures", async () => {
     const databaseLogs: unknown[] = [];
     const databaseFailure = await makeRoot({
@@ -866,33 +1642,96 @@ describe("Core acceptance through the production Fastify seam", () => {
     }
   });
 
-  it("table-drives non-current competitive receipts and tuples to experimental HTTP results", async () => {
+  it("table-drives every competitive receipt and tuple mismatch to zero leaderboard impact", async () => {
     const cases: readonly Readonly<{
       name: string;
       receipt?: unknown;
       approvedPolicy?: boolean;
       invalidate?: boolean;
       provider?: VisionProvider;
+      policyColumn?:
+        | "calibration_evidence_version"
+        | "extraction_evidence_version"
+        | "observation_evidence_version";
+      expected: "experimental" | "configuration-failed";
     }>[] = [
       {
-        name: "unapproved receipt",
+        name: "missing receipt/policy",
+        expected: "experimental",
+      },
+      {
+        name: "failed receipt",
         receipt: failedWorkflowBenchmarkReceiptFixture,
+        expected: "experimental",
       },
       {
         name: "stale receipt",
         receipt: staleWorkflowBenchmarkReceiptFixture,
+        expected: "experimental",
       },
       {
         name: "invalidated receipt",
         approvedPolicy: true,
         invalidate: true,
+        expected: "experimental",
       },
       {
-        name: "unapproved provider tuple",
+        name: "workspace tuple",
+        approvedPolicy: true,
+        provider: createVerifiedFixtureVisionProvider("roboflow", {
+          workspaceId: "unapproved-workspace",
+        }),
+        expected: "experimental",
+      },
+      {
+        name: "model tuple",
         approvedPolicy: true,
         provider: createVerifiedFixtureVisionProvider("roboflow", {
           verifiedModelBundleId: "unapproved-wall-pass-bundle-v1",
         }),
+        expected: "experimental",
+      },
+      {
+        name: "provider-version tuple",
+        approvedPolicy: true,
+        provider: createVerifiedFixtureVisionProvider("roboflow", {
+          verifiedProviderVersion: "unapproved-provider-v2",
+        }),
+        expected: "experimental",
+      },
+      {
+        name: "workflow-id response",
+        approvedPolicy: true,
+        provider: createVerifiedFixtureVisionProvider("roboflow", {
+          workflowId: "unexpected-workflow-id",
+        }),
+        expected: "configuration-failed",
+      },
+      {
+        name: "workflow-version response",
+        approvedPolicy: true,
+        provider: createVerifiedFixtureVisionProvider("roboflow", {
+          workflowVersion: "2.0.0",
+        }),
+        expected: "configuration-failed",
+      },
+      {
+        name: "calibration-evidence policy tuple",
+        approvedPolicy: true,
+        policyColumn: "calibration_evidence_version",
+        expected: "experimental",
+      },
+      {
+        name: "extraction-evidence policy tuple",
+        approvedPolicy: true,
+        policyColumn: "extraction_evidence_version",
+        expected: "experimental",
+      },
+      {
+        name: "observation-evidence policy tuple",
+        approvedPolicy: true,
+        policyColumn: "observation_evidence_version",
+        expected: "experimental",
       },
     ];
     for (const scenario of cases) {
@@ -913,17 +1752,29 @@ describe("Core acceptance through the production Fastify seam", () => {
             reason: "operator_revoked",
           });
         }
+        if (scenario.policyColumn)
+          fixture.database.raw
+            .prepare(
+              `UPDATE approved_competitive_model_policies SET ${scenario.policyColumn} = ?`,
+            )
+            .run(`unapproved-${scenario.policyColumn}`);
         const { attemptId } = await createVerifiedAttempt(fixture.app);
         await fixture.scheduler.runAll();
         const outcome = await resultFor(fixture.app, attemptId);
-        expect(outcome, scenario.name).toMatchObject({
-          state: "valid",
-          result: {
-            kind: "verified-result",
-            competitiveStatus: "experimental",
-            competitiveEligible: false,
-          },
-        });
+        if (scenario.expected === "experimental")
+          expect(outcome, scenario.name).toMatchObject({
+            state: "valid",
+            result: {
+              kind: "verified-result",
+              competitiveStatus: "experimental",
+              competitiveEligible: false,
+            },
+          });
+        else
+          expect(outcome, scenario.name).toMatchObject({
+            state: "failed",
+            code: "analysis_configuration_invalid",
+          });
         expect(
           fixture.database.raw
             .prepare(
@@ -952,20 +1803,36 @@ async function makeRoot(
     approvedPolicy?: boolean;
     c5Mode: "free" | "verified";
     queueAvailable?: () => boolean | Promise<boolean>;
+    queueBeforeEnqueue?: (
+      job: Readonly<{
+        attemptId: string;
+        generation: number;
+        mode?: "free" | "verified";
+      }>,
+    ) => void | Promise<void>;
     c5Prober?: LocalMediaProber;
     c5Runner?: BoundedFrameProcessRunner;
+    c5Publisher?: NoReplacePublisher;
     verifiedScheduler?: VisionBatchScheduler;
     logs?: unknown[];
     benchmarkReceipt?: unknown;
+    root?: string;
+    activatePolicy?: boolean;
+    repositoryIdPrefix?: string;
+    appIdPrefix?: string;
   }>,
 ) {
-  const root = await mkdtemp(join(tmpdir(), "revelai-c10-http-"));
-  directories.push(root);
+  const root =
+    input.root ?? (await mkdtemp(join(tmpdir(), "revelai-c10-http-")));
+  if (!input.root) directories.push(root);
   const mediaRoot = join(root, "media");
   const scheduler = new ManualScheduler();
   const queue = new InMemoryAnalysisQueue({
     scheduler,
     ...(input.queueAvailable ? { available: input.queueAvailable } : {}),
+    ...(input.queueBeforeEnqueue
+      ? { beforeEnqueue: input.queueBeforeEnqueue }
+      : {}),
   });
   let database = openSqliteDatabase(join(root, "api.sqlite"));
   let app: ReturnType<typeof createProductionTrainingAttemptApi>;
@@ -980,11 +1847,12 @@ async function makeRoot(
       mode: input.c5Mode,
       ...(input.c5Prober ? { prober: input.c5Prober } : {}),
       ...(input.c5Runner ? { runner: input.c5Runner } : {}),
+      ...(input.c5Publisher ? { publisher: input.c5Publisher } : {}),
     });
     repository = new SQLiteAttemptRepository({
       database,
       clock: { now: () => now },
-      ids: { next: ids("aaaaaaaa") },
+      ids: { next: ids(input.repositoryIdPrefix ?? "aaaaaaaa") },
       handoffVerifier: c5.handoffVerifier,
     });
     const retention = new SQLiteRetentionRepository({ database });
@@ -1035,7 +1903,7 @@ async function makeRoot(
       }),
       scheduler,
       clock: { now: () => now },
-      ids: { next: ids("bbbbbbbb") },
+      ids: { next: ids(input.appIdPrefix ?? "bbbbbbbb") },
       ...(input.logs
         ? {
             log: { event: (event: unknown) => input.logs!.push(event) },
@@ -1058,7 +1926,7 @@ async function makeRoot(
       },
     });
   };
-  await start(true);
+  await start(input.activatePolicy ?? true);
   return {
     get app() {
       return app;
@@ -1072,6 +1940,7 @@ async function makeRoot(
     get policy() {
       return policy;
     },
+    root,
     mediaRoot,
     scheduler,
     queue,
@@ -1107,6 +1976,14 @@ function trackedFreeProvider() {
   const provider = createDemoVisionProvider();
   let freeCalls = 0;
   let verifiedCalls = 0;
+  const freeFrames: Array<
+    Readonly<{
+      index: number;
+      timestampMs: number;
+      sourceWidth: number;
+      sourceHeight: number;
+    }>
+  > = [];
   return Object.freeze({
     provider: Object.freeze({
       ...provider,
@@ -1114,6 +1991,14 @@ function trackedFreeProvider() {
         ...args: Parameters<VisionProvider["analyzeFree"]>
       ) => {
         freeCalls += 1;
+        freeFrames.push(
+          Object.freeze({
+            index: args[0].frame.index,
+            timestampMs: args[0].frame.timestampMs,
+            sourceWidth: args[0].frame.sourceWidth,
+            sourceHeight: args[0].frame.sourceHeight,
+          }),
+        );
         return provider.analyzeFree(...args);
       },
       analyzeVerified: async (
@@ -1128,6 +2013,9 @@ function trackedFreeProvider() {
     },
     get verifiedCalls() {
       return verifiedCalls;
+    },
+    get freeFrames() {
+      return Object.freeze([...freeFrames]);
     },
   });
 }
@@ -1232,9 +2120,41 @@ function processingEventCount(
   ).count;
 }
 
+async function durableReceiptFor(
+  fixture: Awaited<ReturnType<typeof makeRoot>>,
+  attemptId: string,
+): Promise<unknown> {
+  const row = fixture.database.raw
+    .prepare("SELECT processing_context_json FROM attempts WHERE id = ?")
+    .get(attemptId) as Readonly<{ processing_context_json: string }>;
+  const context = JSON.parse(row.processing_context_json) as Readonly<{
+    processing: Readonly<{ receipt: Readonly<{ frameBatchId: string }> }>;
+  }>;
+  return JSON.parse(
+    await readFile(
+      join(
+        fixture.mediaRoot,
+        "frames",
+        context.processing.receipt.frameBatchId,
+        ".receipt.json",
+      ),
+      "utf8",
+    ),
+  );
+}
+
 async function expectEmptyMediaDirectories(
   fixture: Awaited<ReturnType<typeof makeRoot>>,
 ): Promise<void> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const contents = await Promise.all(
+      ["originals", "frames", "temporary"].map((directory) =>
+        readdir(join(fixture.mediaRoot, directory)),
+      ),
+    );
+    if (contents.every((directory) => directory.length === 0)) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
   for (const directory of ["originals", "frames", "temporary"])
     expect(await readdir(join(fixture.mediaRoot, directory))).toEqual([]);
 }
@@ -1245,9 +2165,10 @@ async function expectPrivateMediaTree(
 ): Promise<void> {
   const row = fixture.database.raw
     .prepare(
-      "SELECT media_json, processing_context_json FROM attempts WHERE id = ?",
+      "SELECT mode, media_json, processing_context_json FROM attempts WHERE id = ?",
     )
     .get(attemptId) as Readonly<{
+    mode: "free" | "verified";
     media_json: string;
     processing_context_json: string;
   }>;
@@ -1279,7 +2200,7 @@ async function expectPrivateMediaTree(
   expect((await lstat(payload)).isSymbolicLink()).toBe(false);
   const frames = await readdir(frameDirectory);
   const jpegFrames = frames.filter((frame) => frame.endsWith(".jpg"));
-  expect(jpegFrames).toHaveLength(640);
+  expect(jpegFrames).toHaveLength(row.mode === "verified" ? 640 : 128);
   expect((await stat(join(frameDirectory, jpegFrames[0]!))).mode & 0o777).toBe(
     0o600,
   );
@@ -1372,17 +2293,60 @@ function multipart(
   boundary: string,
   filename = "attempt.mp4",
   contentType = "video/mp4",
+  payloadSuffix = "",
 ) {
+  const brand = contentType === "video/quicktime" ? "qt  " : "isom";
   return Buffer.concat([
     Buffer.from(
       `--${boundary}\r\nContent-Disposition: form-data; name="media"; filename="${filename}"\r\nContent-Type: ${contentType}\r\n\r\n`,
     ),
-    Buffer.from([
-      0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 1, 2, 3, 4,
+    Buffer.concat([
+      Buffer.from([0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70]),
+      Buffer.from(brand, "ascii"),
+      Buffer.from([1, 2, 3, 4]),
+      Buffer.from(payloadSuffix, "utf8"),
     ]),
     Buffer.from(`\r\n--${boundary}--\r\n`),
   ]);
 }
+
+async function responseBeforeRequestBody(
+  input: Readonly<{
+    host: string;
+    port: number;
+    request: string;
+  }>,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: input.host, port: input.port });
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("queue preflight did not respond before the body"));
+    }, 1_000);
+    const settle = (operation: () => void): void => {
+      clearTimeout(timeout);
+      socket.removeAllListeners();
+      operation();
+    };
+    socket.once("connect", () => socket.write(input.request));
+    socket.once("data", (chunk) =>
+      settle(() => {
+        socket.end();
+        resolve(chunk.toString("utf8"));
+      }),
+    );
+    socket.once("error", (error) => settle(() => reject(error)));
+  });
+}
+
+function expectNoLeaks(
+  values: readonly unknown[],
+  forbidden: readonly string[],
+): void {
+  const rendered = values.map((value) => JSON.stringify(value)).join("\n");
+  for (const value of forbidden) expect(rendered).not.toContain(value);
+}
+
 function ids(prefix: string) {
   let sequence = 0;
   return () =>

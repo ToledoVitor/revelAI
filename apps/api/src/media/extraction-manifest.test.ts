@@ -208,6 +208,99 @@ describe("extraction manifest", () => {
     expect(rebuilt.rawPreRollSha256).not.toBe(legacy.rawPreRollSha256);
   });
 
+  it("rejects legacy ordered-byte, boundary, per-frame-digest, and authority substitutions", async () => {
+    const frameBatchId = IDs[2];
+    const splitFrames = verifiedFrames().map((frame, index) => ({
+      ...frame,
+      reference: `${frameBatchId}_${String(index).padStart(4, "0")}`,
+      ...(index === 0
+        ? { rawBytes: Uint8Array.of(1) }
+        : index === 1
+          ? { rawBytes: Uint8Array.of(2, 3) }
+          : {}),
+    }));
+    const joinedFrames = splitFrames.map((frame, index) => ({
+      ...frame,
+      ...(index === 0
+        ? { rawBytes: Uint8Array.of(1, 2) }
+        : index === 1
+          ? { rawBytes: Uint8Array.of(3) }
+          : {}),
+    }));
+    const current = createExtractionManifest({
+      attemptId: IDs[0],
+      generation: 1,
+      mediaId: IDs[1],
+      mediaSha256: "a".repeat(64),
+      mode: "verified",
+      probe,
+      frames: splitFrames,
+    });
+    if (current.mode !== "verified")
+      throw new Error("verified fixture required");
+    const scenes = current.frames.items.slice(40).map((frame) => ({
+      timestampSeconds: frame.timestampSeconds,
+      score: 0.1,
+    }));
+    attestVerifiedExtractionContinuity(current, scenes);
+    const legacy = {
+      ...current,
+      rawPreRollSha256: legacyDigest(splitFrames),
+    };
+    expect(legacy.rawPreRollSha256).toBe(legacyDigest(joinedFrames));
+    const authority = {
+      attemptId: IDs[0],
+      athleteId: "44444444-4444-4444-8444-444444444444",
+      generation: 1,
+      mode: "verified" as const,
+      mediaId: IDs[1],
+      sourceSha256: "a".repeat(64),
+      uploadedAt: "2030-01-15T12:00:00.000Z",
+      calibrationSessionId: "55555555-5555-4555-8555-555555555555",
+      calibrationNonce: "legacy-nonce",
+    };
+    const receipt = storageReceipt({
+      frameBatchId,
+      authority,
+      manifest: legacy,
+      frames: splitFrames.map((frame) => frame.rawBytes),
+      activeScenes: scenes,
+    });
+    const bytes = Buffer.from(JSON.stringify(receipt));
+    const context = storageContext({
+      frameBatchId,
+      mediaId: IDs[1],
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+    const substitutedReader = {
+      readReceipt: async () => ({ bytes }),
+      readFrame: async (reference: string) =>
+        joinedFrames.find((frame) => frame.reference === reference)!.rawBytes,
+      sourceSha256ForOriginal: async () => "a".repeat(64),
+    };
+    await expect(
+      reconstructDurableProcessingContext({
+        context,
+        frames: substitutedReader,
+        receipts: substitutedReader,
+        authority: { upload: authority },
+      }),
+    ).rejects.toThrow("durable extraction frame mismatch");
+    await expect(
+      reconstructDurableProcessingContext({
+        context,
+        frames: substitutedReader,
+        receipts: substitutedReader,
+        authority: {
+          upload: {
+            ...authority,
+            athleteId: "66666666-6666-4666-8666-666666666666",
+          },
+        },
+      }),
+    ).rejects.toThrow("durable extraction authority mismatch");
+  });
+
   it("rejects missing, reordered, unopaque, or path-bearing verified frames", () => {
     const base = verifiedFrames();
     for (const frames of [
@@ -528,6 +621,14 @@ function verifiedFrames() {
     reference: opaqueFrame(index),
     rawBytes: Uint8Array.of(index % 256),
   }));
+}
+
+function legacyDigest(
+  frames: readonly Readonly<{ rawBytes: Uint8Array }>[],
+): string {
+  return createHash("sha256")
+    .update(Buffer.concat(frames.slice(0, 40).map((frame) => frame.rawBytes)))
+    .digest("hex");
 }
 
 function opaqueFrame(index: number): string {

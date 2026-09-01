@@ -13,6 +13,7 @@ import {
   createLocalMediaStorage,
   type LocalMediaStorage,
   type LocalMediaProber,
+  type NoReplacePublisher,
   type UploadRetentionRepository,
 } from "../storage/local-media-storage.js";
 import {
@@ -50,6 +51,7 @@ export function createC5PipelineTestSupport(
     root: string;
     prober?: LocalMediaProber;
     runner?: BoundedFrameProcessRunner;
+    publisher?: NoReplacePublisher;
     /** Selects deterministic runner evidence for real multipart route tests. */
     mode?: "free" | "verified";
   }>,
@@ -73,6 +75,7 @@ export function createC5PipelineTestSupport(
       },
     },
     prober: input.prober ?? defaultProber,
+    ...(input.publisher ? { publisher: input.publisher } : {}),
   });
   const extraction = createLocalFrameExtraction({
     root: input.root,
