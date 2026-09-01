@@ -105,9 +105,28 @@ type ProductionSQLiteAttemptUploadPort = Readonly<{
   }>;
 }>;
 
+type ProductionSQLiteAttemptProcessingPort = Readonly<{
+  token: SqliteDatabaseCompositionToken;
+  isCurrent(): boolean;
+  handoffVerifier: AcceptedMediaHandoffVerifier;
+  processing: Pick<
+    AttemptRepository,
+    | "claimProcessing"
+    | "getProcessingContext"
+    | "releaseProcessingClaim"
+    | "recordProcessingFailure"
+    | "deadLetterProcessingClaim"
+    | "finalizeTerminalResult"
+  >;
+}>;
+
 const productionSQLiteAttemptUploadPorts = new WeakMap<
   object,
   ProductionSQLiteAttemptUploadPort
+>();
+const productionSQLiteAttemptProcessingPorts = new WeakMap<
+  object,
+  ProductionSQLiteAttemptProcessingPort
 >();
 
 /**
@@ -128,6 +147,14 @@ export function resolveProductionSQLiteAttemptUploadPort(
 ): ProductionSQLiteAttemptUploadPort | undefined {
   if (typeof repository !== "object" || repository === null) return undefined;
   return productionSQLiteAttemptUploadPorts.get(repository);
+}
+
+/** Resolves only the sealed C4 lease/finalization facade for this exact instance. */
+export function resolveProductionSQLiteAttemptProcessingPort(
+  repository: unknown,
+): ProductionSQLiteAttemptProcessingPort | undefined {
+  if (typeof repository !== "object" || repository === null) return undefined;
+  return productionSQLiteAttemptProcessingPorts.get(repository);
 }
 
 const MAX_RECOVERY_ATTEMPTS = Number.MAX_SAFE_INTEGER;
@@ -189,6 +216,7 @@ type TerminalResultRow = Readonly<{
 }>;
 
 type MediaDeliveryRecoveryRow = Readonly<{
+  attempt_mode?: "free" | "verified";
   attempt_id: string;
   generation: number;
   media_id: string;
@@ -334,6 +362,11 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       if (!token)
         throw new Error("C4 factory database composition token is required.");
       registerProductionSQLiteAttemptUploadPort(
+        this,
+        token,
+        input.handoffVerifier,
+      );
+      registerProductionSQLiteAttemptProcessingPort(
         this,
         token,
         input.handoffVerifier,
@@ -681,6 +714,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       return Object.freeze({
         attemptId: context.attemptId,
         generation: context.generation,
+        mode: context.mode,
       });
     });
   }
@@ -987,13 +1021,14 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     return this.#transaction(() => {
       const candidates = this.#raw
         .prepare(
-          `SELECT attempt_id, generation, media_id, state, requires_rollback,
+          `SELECT a.mode AS attempt_mode, r.attempt_id, r.generation, r.media_id, r.state, r.requires_rollback,
                   frame_batch_id, queued_at, rollback_completed_at, cleanup_completed_at,
                   recovery_lease_id, recovery_lease_expires_at
-             FROM media_delivery_recovery_records
-            WHERE state IN ('pending-delivery', 'queued')
-              AND (recovery_lease_expires_at IS NULL OR recovery_lease_expires_at <= ?)
-            ORDER BY updated_at ASC, attempt_id ASC
+             FROM media_delivery_recovery_records r
+             JOIN attempts a ON a.id = r.attempt_id
+            WHERE r.state IN ('pending-delivery', 'queued')
+              AND (r.recovery_lease_expires_at IS NULL OR r.recovery_lease_expires_at <= ?)
+            ORDER BY r.updated_at ASC, r.attempt_id ASC
             LIMIT ?`,
         )
         .all(input.now, input.limit) as MediaDeliveryRecoveryRow[];
@@ -1815,6 +1850,17 @@ const exactAcknowledgeMediaAttachmentCleanup =
   SQLiteAttemptRepository.prototype.acknowledgeMediaAttachmentCleanup;
 const exactMarkMediaDeliveryQueued =
   SQLiteAttemptRepository.prototype.markMediaDeliveryQueued;
+const exactClaimProcessing = SQLiteAttemptRepository.prototype.claimProcessing;
+const exactGetProcessingContext =
+  SQLiteAttemptRepository.prototype.getProcessingContext;
+const exactReleaseProcessingClaim =
+  SQLiteAttemptRepository.prototype.releaseProcessingClaim;
+const exactRecordProcessingFailure =
+  SQLiteAttemptRepository.prototype.recordProcessingFailure;
+const exactDeadLetterProcessingClaim =
+  SQLiteAttemptRepository.prototype.deadLetterProcessingClaim;
+const exactFinalizeTerminalResult =
+  SQLiteAttemptRepository.prototype.finalizeTerminalResult;
 
 function registerProductionSQLiteAttemptUploadPort(
   repository: SQLiteAttemptRepository,
@@ -1862,6 +1908,42 @@ function registerProductionSQLiteAttemptUploadPort(
   );
 }
 
+function registerProductionSQLiteAttemptProcessingPort(
+  repository: SQLiteAttemptRepository,
+  token: SqliteDatabaseCompositionToken,
+  handoffVerifier: AcceptedMediaHandoffVerifier,
+): void {
+  if (!isCurrentProductionSQLiteAttemptRepository(repository)) return;
+  productionSQLiteAttemptProcessingPorts.set(
+    repository,
+    Object.freeze({
+      token,
+      isCurrent: () => isCurrentProductionSQLiteAttemptRepository(repository),
+      handoffVerifier,
+      processing: Object.freeze({
+        claimProcessing: (
+          job: Parameters<AttemptRepository["claimProcessing"]>[0],
+        ) => exactClaimProcessing.call(repository, job),
+        getProcessingContext: (
+          input: Parameters<AttemptRepository["getProcessingContext"]>[0],
+        ) => exactGetProcessingContext.call(repository, input),
+        releaseProcessingClaim: (
+          input: Parameters<AttemptRepository["releaseProcessingClaim"]>[0],
+        ) => exactReleaseProcessingClaim.call(repository, input),
+        recordProcessingFailure: (
+          input: Parameters<AttemptRepository["recordProcessingFailure"]>[0],
+        ) => exactRecordProcessingFailure.call(repository, input),
+        deadLetterProcessingClaim: (
+          input: Parameters<AttemptRepository["deadLetterProcessingClaim"]>[0],
+        ) => exactDeadLetterProcessingClaim.call(repository, input),
+        finalizeTerminalResult: (
+          input: Parameters<AttemptRepository["finalizeTerminalResult"]>[0],
+        ) => exactFinalizeTerminalResult.call(repository, input),
+      }),
+    }),
+  );
+}
+
 function isCurrentProductionSQLiteAttemptRepository(
   repository: SQLiteAttemptRepository,
 ): boolean {
@@ -1873,6 +1955,12 @@ function isCurrentProductionSQLiteAttemptRepository(
     !Object.hasOwn(repository, "beginMediaAttachmentRecovery") &&
     !Object.hasOwn(repository, "acknowledgeMediaAttachmentCleanup") &&
     !Object.hasOwn(repository, "markMediaDeliveryQueued") &&
+    !Object.hasOwn(repository, "claimProcessing") &&
+    !Object.hasOwn(repository, "getProcessingContext") &&
+    !Object.hasOwn(repository, "releaseProcessingClaim") &&
+    !Object.hasOwn(repository, "recordProcessingFailure") &&
+    !Object.hasOwn(repository, "deadLetterProcessingClaim") &&
+    !Object.hasOwn(repository, "finalizeTerminalResult") &&
     SQLiteAttemptRepository.prototype.prepareMediaUpload ===
       exactPrepareMediaUpload &&
     SQLiteAttemptRepository.prototype.attachPreparedMedia ===
@@ -1884,7 +1972,19 @@ function isCurrentProductionSQLiteAttemptRepository(
     SQLiteAttemptRepository.prototype.acknowledgeMediaAttachmentCleanup ===
       exactAcknowledgeMediaAttachmentCleanup &&
     SQLiteAttemptRepository.prototype.markMediaDeliveryQueued ===
-      exactMarkMediaDeliveryQueued
+      exactMarkMediaDeliveryQueued &&
+    SQLiteAttemptRepository.prototype.claimProcessing ===
+      exactClaimProcessing &&
+    SQLiteAttemptRepository.prototype.getProcessingContext ===
+      exactGetProcessingContext &&
+    SQLiteAttemptRepository.prototype.releaseProcessingClaim ===
+      exactReleaseProcessingClaim &&
+    SQLiteAttemptRepository.prototype.recordProcessingFailure ===
+      exactRecordProcessingFailure &&
+    SQLiteAttemptRepository.prototype.deadLetterProcessingClaim ===
+      exactDeadLetterProcessingClaim &&
+    SQLiteAttemptRepository.prototype.finalizeTerminalResult ===
+      exactFinalizeTerminalResult
   );
 }
 
@@ -2214,6 +2314,9 @@ function projectMediaDeliveryRecovery(
 ): MediaDeliveryRecovery {
   if (
     !isUuid(row.attempt_id) ||
+    (row.attempt_mode !== undefined &&
+      row.attempt_mode !== "free" &&
+      row.attempt_mode !== "verified") ||
     !Number.isSafeInteger(row.generation) ||
     row.generation < 1 ||
     typeof row.media_id !== "string" ||
@@ -2257,6 +2360,7 @@ function projectMediaDeliveryRecovery(
   return Object.freeze({
     attemptId: row.attempt_id,
     generation: row.generation,
+    ...(row.attempt_mode === undefined ? {} : { mode: row.attempt_mode }),
     mediaId: row.media_id,
     frameBatchId: row.frame_batch_id,
     state: row.state,

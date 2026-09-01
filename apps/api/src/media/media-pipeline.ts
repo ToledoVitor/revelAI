@@ -1,6 +1,10 @@
 import { isMediaProbeAdmissible, type MediaMode } from "./eligibility.js";
 import { MediaPipelineError } from "./probe.js";
-import type { ExtractionManifest } from "./extraction-manifest.js";
+import {
+  reconstructDurableProcessingContext,
+  type DurableReconstructionAuthority,
+  type ExtractionManifest,
+} from "./extraction-manifest.js";
 import {
   type AcceptedMediaCleanup,
   type AcceptedMediaHandoff,
@@ -71,6 +75,18 @@ type FactoryIssuedC5MediaPipelinePort = Readonly<{
   acceptMultipart(
     input: MediaPipelineMultipartAcceptanceInput,
   ): Promise<AcceptedMedia>;
+  /**
+   * Rebuilds one durable C5 manifest through the factory-owned frame and
+   * receipt readers. C8 supplies only persisted facts and never sees paths or
+   * storage implementations.
+   */
+  reconstructDurableProcessingContext(
+    input: Readonly<{
+      context: unknown;
+      authority: DurableReconstructionAuthority;
+    }>,
+  ): Promise<ExtractionManifest>;
+  readFrame(reference: string): Promise<Uint8Array>;
 }>;
 const factoryIssuedC5MediaPipelinePorts = new WeakMap<
   object,
@@ -168,6 +184,18 @@ class MediaPipeline implements C5MediaPipeline {
   public publicApi(): C5MediaPipeline {
     const accept = this.accept.bind(this);
     const acceptMultipart = this.acceptMultipart.bind(this);
+    const reconstruct = (
+      input: Readonly<{
+        context: unknown;
+        authority: DurableReconstructionAuthority;
+      }>,
+    ) =>
+      reconstructDurableProcessingContext({
+        context: input.context,
+        frames: this.extractor,
+        receipts: this.extractor,
+        authority: input.authority,
+      });
     const publicApi: C5MediaPipeline = Object.freeze({
       handoffVerifier: () => this.handoffVerifier(),
       accept,
@@ -175,7 +203,12 @@ class MediaPipeline implements C5MediaPipeline {
     });
     factoryIssuedC5MediaPipelinePorts.set(
       publicApi,
-      Object.freeze({ handoffVerifier: this.verifier, acceptMultipart }),
+      Object.freeze({
+        handoffVerifier: this.verifier,
+        acceptMultipart,
+        reconstructDurableProcessingContext: reconstruct,
+        readFrame: (reference) => this.extractor.readFrame(reference),
+      }),
     );
     return publicApi;
   }

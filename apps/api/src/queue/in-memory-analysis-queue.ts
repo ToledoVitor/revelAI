@@ -30,7 +30,12 @@ export class InMemoryAnalysisQueue implements AnalysisQueue {
   private readonly available: () => boolean | Promise<boolean>;
   private readonly scheduler: QueueScheduler;
   private readonly pending: AnalysisJob[] = [];
-  private readonly subscribers = new Set<AnalysisJobDelivery>();
+  private readonly subscribers = new Set<
+    Readonly<{
+      deliver: AnalysisJobDelivery;
+      mode: "free" | "verified" | undefined;
+    }>
+  >();
   private drainScheduled = false;
   private closed = false;
 
@@ -52,15 +57,19 @@ export class InMemoryAnalysisQueue implements AnalysisQueue {
     this.scheduleDrain();
   }
 
-  public subscribe(deliver: AnalysisJobDelivery): () => void {
+  public subscribe(
+    deliver: AnalysisJobDelivery,
+    options?: Readonly<{ mode: "free" | "verified" }>,
+  ): () => void {
     if (this.closed) {
       throw new QueueUnavailableError();
     }
 
-    this.subscribers.add(deliver);
+    const subscription = Object.freeze({ deliver, mode: options?.mode });
+    this.subscribers.add(subscription);
     this.scheduleDrain();
     return () => {
-      this.subscribers.delete(deliver);
+      this.subscribers.delete(subscription);
     };
   }
 
@@ -84,18 +93,23 @@ export class InMemoryAnalysisQueue implements AnalysisQueue {
   private async drain(): Promise<void> {
     while (await this.isAvailable()) {
       if (this.pending.length === 0 || this.subscribers.size === 0) return;
-      const job = this.pending.shift()!;
-      const deliver = this.subscribers.values().next().value as
-        | AnalysisJobDelivery
-        | undefined;
-
-      if (!deliver) {
-        this.pending.unshift(job);
+      const jobIndex = this.pending.findIndex((job) =>
+        [...this.subscribers].some((subscription) =>
+          acceptsDelivery(subscription, job),
+        ),
+      );
+      if (jobIndex < 0) return;
+      const job = this.pending.splice(jobIndex, 1)[0]!;
+      const subscription = [...this.subscribers].find((candidate) =>
+        acceptsDelivery(candidate, job),
+      );
+      if (!subscription) {
+        this.pending.splice(jobIndex, 0, job);
         return;
       }
 
       try {
-        await deliver(job);
+        await subscription.deliver(job);
       } catch {
         this.pending.unshift(job);
         this.scheduleDrain();
@@ -103,4 +117,17 @@ export class InMemoryAnalysisQueue implements AnalysisQueue {
       }
     }
   }
+}
+
+function acceptsDelivery(
+  subscription: Readonly<{ mode: "free" | "verified" | undefined }>,
+  job: AnalysisJob,
+): boolean {
+  // Older queue payloads have no mode. Deliver one to a scoped worker so its
+  // C4 claim can recover the durable mode; a tagged job stays mode-isolated.
+  return (
+    subscription.mode === undefined ||
+    job.mode === undefined ||
+    subscription.mode === job.mode
+  );
 }

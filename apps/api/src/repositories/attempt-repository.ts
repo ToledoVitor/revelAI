@@ -210,6 +210,8 @@ export type ProcessingFailureRecordOutcome =
 export type MediaDeliveryRecovery = Readonly<{
   attemptId: string;
   generation: number;
+  /** Durable attempt mode is selected with redelivery facts, never guessed. */
+  mode?: AttemptMode;
   mediaId: string;
   frameBatchId: string;
   state: "pending-delivery" | "queued" | "cleanup-recoverable" | "resolved";

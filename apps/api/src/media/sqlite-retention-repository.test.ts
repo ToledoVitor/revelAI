@@ -636,7 +636,11 @@ describe("SQLiteRetentionRepository", () => {
         enqueue: async () => undefined,
       },
     }).attachAcceptedMedia({ accepted: retry });
-    expect(retried).toEqual({ attemptId: retryAttempt, generation: 2 });
+    expect(retried).toEqual({
+      attemptId: retryAttempt,
+      generation: 2,
+      mode: "free",
+    });
   });
 });
 

@@ -61,6 +61,32 @@ describe("MediaAttachmentRecoveryExecutor", () => {
 });
 
 describe("MediaDeliveryRedeliveryExecutor", () => {
+  it("preserves the durable Free mode when a recovery executor re-enqueues a job", async () => {
+    const delivered: unknown[] = [];
+    const executor = new MediaDeliveryRedeliveryExecutor(
+      {
+        claimMediaDeliveryRedelivery: async () => [
+          { ...claim, mode: "free" as const, state: "queued" as const },
+        ],
+        acknowledgeMediaDeliveryRedelivery: async () => undefined,
+        releaseMediaDeliveryRedelivery: async () => undefined,
+      },
+      { enqueue: async (job) => void delivered.push(job) },
+      { event: () => undefined },
+    );
+
+    await expect(
+      executor.run({ now: "2030-01-15T12:00:00.000Z", limit: 1 }),
+    ).resolves.toBe(1);
+    expect(delivered).toEqual([
+      {
+        attemptId: claim.attemptId,
+        generation: claim.generation,
+        mode: "free",
+      },
+    ]);
+  });
+
   it("releases a failed leased delivery for at-least-once retry without exposing queue detail", async () => {
     const calls: string[] = [];
     const executor = new MediaDeliveryRedeliveryExecutor(

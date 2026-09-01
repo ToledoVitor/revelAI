@@ -3,6 +3,7 @@ import {
   InMemoryAnalysisQueue,
   type QueueScheduler,
 } from "../queue/in-memory-analysis-queue.js";
+import { QueueUnavailableError } from "../queue/analysis-queue.js";
 import {
   AnalysisWorker,
   ExpectedProcessingFailure,
@@ -107,6 +108,134 @@ describe("AnalysisWorker", () => {
     expect(finalized).toMatchObject([
       { attemptId: "attempt-a", generation: 1 },
     ]);
+  });
+
+  it("corrects untagged duplicate/stale delivery from C4 without spending retry budget or looping", async () => {
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    let releases = 0;
+    let processed = 0;
+    let recoveryWrites = 0;
+    let claims = 0;
+    const worker = new AnalysisWorker({
+      queue,
+      mode: "free",
+      repository: {
+        claimProcessing: async () => {
+          claims += 1;
+          if (claims > 1) return null;
+          return { leaseId: "lease-a", generation: 1, mode: "verified" };
+        },
+        releaseProcessingClaim: async () => {
+          releases += 1;
+          return true;
+        },
+        recordProcessingFailure: async () => {
+          recoveryWrites += 1;
+          return { kind: "recorded" as const, retryAttempt: 1 };
+        },
+        deadLetterProcessingClaim: async () => deadLettered,
+        finalizeTerminalResult: async () => acknowledgedFinalization,
+      },
+      process: async () => {
+        processed += 1;
+        return outcome;
+      },
+    });
+    const stop = worker.start();
+
+    await queue.enqueue({
+      attemptId: "attempt-a",
+      generation: 1,
+    });
+    await queue.enqueue({
+      attemptId: "attempt-a",
+      generation: 1,
+    });
+    await scheduler.runAll();
+
+    const corrected: Array<Readonly<{ mode?: string }>> = [];
+    const unsubscribe = queue.subscribe(
+      async (job) => {
+        corrected.push(job);
+      },
+      { mode: "verified" },
+    );
+    await scheduler.runAll();
+    stop();
+    unsubscribe();
+
+    expect({
+      claims,
+      releases,
+      processed,
+      recoveryWrites,
+      scheduled: scheduler.tasks.length,
+    }).toEqual({
+      claims: 2,
+      releases: 1,
+      processed: 0,
+      recoveryWrites: 0,
+      scheduled: 0,
+    });
+    expect(corrected).toEqual([
+      { attemptId: "attempt-a", generation: 1, mode: "verified" },
+    ]);
+  });
+
+  it("leaves mode correction unacknowledged without retry accounting when its queue is unavailable", async () => {
+    let delivery:
+      | ((
+          job: Readonly<{
+            attemptId: string;
+            generation: number;
+            mode?: "free" | "verified";
+          }>,
+        ) => Promise<void>)
+      | undefined;
+    let releases = 0;
+    let recoveryWrites = 0;
+    const worker = new AnalysisWorker({
+      queue: {
+        isAvailable: async () => true,
+        subscribe: (deliver) => {
+          delivery = deliver;
+          return () => undefined;
+        },
+        enqueue: async () => {
+          throw new QueueUnavailableError();
+        },
+      },
+      mode: "free",
+      repository: {
+        claimProcessing: async () => ({
+          leaseId: "lease-a",
+          generation: 1,
+          mode: "verified",
+        }),
+        releaseProcessingClaim: async () => {
+          releases += 1;
+          return true;
+        },
+        recordProcessingFailure: async () => {
+          recoveryWrites += 1;
+          return { kind: "recorded" as const, retryAttempt: 1 };
+        },
+        deadLetterProcessingClaim: async () => deadLettered,
+        finalizeTerminalResult: async () => acknowledgedFinalization,
+      },
+      process: async () => outcome,
+    });
+    worker.start();
+
+    await expect(
+      delivery!({ attemptId: "attempt-a", generation: 1, mode: "free" }),
+    ).rejects.toBeInstanceOf(QueueUnavailableError);
+
+    expect({ releases, recoveryWrites }).toEqual({
+      releases: 1,
+      recoveryWrites: 0,
+    });
   });
 
   it("releases a failed lease and leaves delivery unacknowledged for one terminal redelivery", async () => {

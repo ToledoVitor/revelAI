@@ -899,7 +899,7 @@ describe("SQLiteAttemptRepository", () => {
       fixture.repository.attachPreparedMedia({
         accepted: await fixture.c5.accept(context, media),
       }),
-    ).resolves.toEqual({ attemptId: ATTEMPT_A, generation: 1 });
+    ).resolves.toEqual({ attemptId: ATTEMPT_A, generation: 1, mode: "free" });
   });
 
   it("creates a first-use athlete and scopes reads and tombstones to that exact identity", async () => {
@@ -1432,7 +1432,7 @@ describe("SQLiteAttemptRepository", () => {
         deleteAt: "2030-01-16T12:00:00.000Z",
       },
     });
-    expect(job).toEqual({ attemptId: ATTEMPT_A, generation: 1 });
+    expect(job).toEqual({ attemptId: ATTEMPT_A, generation: 1, mode: "free" });
 
     await expect(
       fixture.repository.getMediaDeliveryRecovery(job),
@@ -2775,7 +2775,11 @@ describe("SQLiteAttemptRepository", () => {
       generation: firstJob.generation,
     });
 
-    expect(secondJob).toEqual({ attemptId: ATTEMPT_A, generation: 2 });
+    expect(secondJob).toEqual({
+      attemptId: ATTEMPT_A,
+      generation: 2,
+      mode: "free",
+    });
     expect(
       await fixture.repository.getAttempt({
         attemptId: ATTEMPT_A,

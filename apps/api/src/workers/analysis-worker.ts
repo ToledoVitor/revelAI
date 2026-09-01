@@ -95,6 +95,7 @@ export class AnalysisWorker {
   private readonly queue: AnalysisQueue;
   private readonly repository: ProcessingRepository;
   private readonly process: AnalysisProcessor;
+  private readonly mode: ProcessingClaim["mode"] | undefined;
   private readonly unexpectedRetryPolicy: UnexpectedRetryPolicy;
   private readonly retryWaiter: RetryWaiter;
 
@@ -103,6 +104,7 @@ export class AnalysisWorker {
       queue: AnalysisQueue;
       repository: ProcessingRepository;
       process: AnalysisProcessor;
+      mode?: ProcessingClaim["mode"];
       unexpectedRetryPolicy?: UnexpectedRetryPolicy;
       retryWaiter?: RetryWaiter;
     }>,
@@ -110,6 +112,7 @@ export class AnalysisWorker {
     this.queue = input.queue;
     this.repository = input.repository;
     this.process = input.process;
+    this.mode = input.mode;
     this.unexpectedRetryPolicy =
       input.unexpectedRetryPolicy ?? defaultUnexpectedRetryPolicy;
     this.retryWaiter = input.retryWaiter ?? timerRetryWaiter;
@@ -130,33 +133,55 @@ export class AnalysisWorker {
   }
 
   public start(): () => void {
-    return this.queue.subscribe(async (job) => {
-      const claim = await this.repository.claimProcessing(job);
-      if (!claim) return;
-      let candidate: TerminalCandidate;
-      try {
+    return this.queue.subscribe(
+      async (job) => {
+        const claim = await this.repository.claimProcessing(job);
+        if (!claim) return;
+        if (this.mode && claim.mode !== this.mode) {
+          // Queue mode selects a consumer but is not C4 authority. Correct a
+          // malformed/stale delivery before any processor sees the claim, so
+          // Free can never terminalize a Verified row.
+          const released = await this.repository.releaseProcessingClaim({
+            attemptId: job.attemptId,
+            leaseId: claim.leaseId,
+            generation: claim.generation,
+          });
+          if (!released) throw new LostProcessingClaimError();
+          await this.queue.enqueue(
+            Object.freeze({
+              attemptId: job.attemptId,
+              generation: claim.generation,
+              mode: claim.mode,
+            }),
+          );
+          return;
+        }
+        let candidate: TerminalCandidate;
         try {
-          candidate = await this.process({ job, claim });
+          try {
+            candidate = await this.process({ job, claim });
+          } catch (error) {
+            if (error instanceof ExpectedProcessingFailure)
+              candidate = error.candidate;
+            else throw error;
+          }
+          const finalization = await this.repository.finalizeTerminalResult({
+            attemptId: job.attemptId,
+            leaseId: claim.leaseId,
+            generation: claim.generation,
+            candidate,
+          });
+          if (!acknowledges(finalization)) {
+            await this.releaseForRetry(job, claim);
+            throw new LostProcessingClaimError();
+          }
         } catch (error) {
-          if (error instanceof ExpectedProcessingFailure)
-            candidate = error.candidate;
-          else throw error;
+          if (error instanceof LostProcessingClaimError) throw error;
+          await this.recover(job, claim, error);
         }
-        const finalization = await this.repository.finalizeTerminalResult({
-          attemptId: job.attemptId,
-          leaseId: claim.leaseId,
-          generation: claim.generation,
-          candidate,
-        });
-        if (!acknowledges(finalization)) {
-          await this.releaseForRetry(job, claim);
-          throw new LostProcessingClaimError();
-        }
-      } catch (error) {
-        if (error instanceof LostProcessingClaimError) throw error;
-        await this.recover(job, claim, error);
-      }
-    });
+      },
+      this.mode ? Object.freeze({ mode: this.mode }) : undefined,
+    );
   }
 
   private async recover(

@@ -81,4 +81,22 @@ describe("InMemoryAnalysisQueue", () => {
 
     expect(received).toEqual([]);
   });
+
+  it("hands a legacy untagged delivery to one scoped worker for authoritative routing", async () => {
+    const scheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler });
+    const received: Array<Readonly<{ attemptId: string; mode?: string }>> = [];
+    const unsubscribe = queue.subscribe(
+      async (job) => {
+        received.push(job);
+      },
+      { mode: "free" },
+    );
+
+    await queue.enqueue({ attemptId: "attempt-legacy", generation: 1 });
+    await scheduler.runAll();
+    unsubscribe();
+
+    expect(received).toEqual([{ attemptId: "attempt-legacy", generation: 1 }]);
+  });
 });

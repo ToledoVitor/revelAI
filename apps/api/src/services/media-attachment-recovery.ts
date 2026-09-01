@@ -170,6 +170,7 @@ export class MediaDeliveryRedeliveryExecutor {
         Object.freeze({
           attemptId: claim.attemptId,
           generation: claim.generation,
+          ...(claim.mode === undefined ? {} : { mode: claim.mode }),
         }),
       );
       await this.repository.acknowledgeMediaDeliveryRedelivery({
