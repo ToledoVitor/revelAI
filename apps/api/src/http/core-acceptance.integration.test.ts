@@ -148,6 +148,7 @@ describe("Core acceptance through the production Fastify seam", () => {
           rankingSnapshot: { rank: 1, cohortSize: 1 },
         },
       });
+      expect(JSON.stringify(result)).not.toMatch(/authorization|api[_-]?key|base64/i);
       await fixture.scheduler.runAll();
       expect(
         fixture.database.raw
