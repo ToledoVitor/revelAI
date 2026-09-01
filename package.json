@@ -17,6 +17,7 @@
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "ci:clean-api-executables": "node apps/api/scripts/clean-api-demo-regression.mjs",
     "ci:clean-api-executables:self-test": "node apps/api/scripts/clean-api-demo-regression-self-test.mjs",
+    "ci:clean-api-executables:cancellation-probe": "node apps/api/scripts/clean-api-demo-regression-cancellation-probe.mjs",
     "import:design-assets": "node packages/design-system/scripts/import-approved-design-assets.mjs",
     "verify:design-assets": "node packages/design-system/scripts/verify-design-assets.mjs"
   },
