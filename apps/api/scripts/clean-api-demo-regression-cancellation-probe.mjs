@@ -94,6 +94,7 @@ async function runScenario(options) {
       try {
         await terminateProcessGroups(processGroups);
         await waitForClose(close, closeAfterCleanupMs);
+        await waitForProcessGroupsToClose(processGroups, closeAfterCleanupMs);
         await captureFixtures(fixturesBefore, ownedFixtures);
       } finally {
         await removeOwnedFixtures(ownedFixtures);
@@ -236,6 +237,15 @@ async function terminateProcessGroups(processGroups) {
   for (const processGroup of processGroups) {
     if (isProcessGroupActive(processGroup)) sendSignal(processGroup, "SIGKILL");
   }
+}
+
+async function waitForProcessGroupsToClose(processGroups, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (![...processGroups].some(isProcessGroupActive)) return;
+    await delay(25);
+  }
+  throw new Error(failure);
 }
 
 function sendSignal(processGroup, signal) {
