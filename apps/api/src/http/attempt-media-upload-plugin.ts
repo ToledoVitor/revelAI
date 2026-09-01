@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { resolveProductionMediaUploadServiceForHost } from "../composition/sqlite-media-upload-composition.js";
+import { resolveMediaUploadCapability } from "../composition/media-upload-capability.js";
 import type { MediaUploadContext } from "../repositories/attempt-repository.js";
 import {
   createStreamingMultipartIntake,
@@ -17,8 +17,6 @@ export function registerAttemptMediaUploadPlugin(
   app: FastifyInstance,
   input: Readonly<{
     mediaUpload: unknown;
-    repository: unknown;
-    queue: unknown;
     maxUploadBytes: number;
     maxMultipartBytes: number;
     requiredAthleteId(request: FastifyRequest): string;
@@ -26,10 +24,7 @@ export function registerAttemptMediaUploadPlugin(
     sendAccepted(reply: FastifyReply, value: unknown): unknown;
   }>,
 ): void {
-  const mediaUpload = resolveProductionMediaUploadServiceForHost(
-    input.mediaUpload,
-    { repository: input.repository, queue: input.queue },
-  );
+  const mediaUpload = resolveMediaUploadCapability(input.mediaUpload);
   if (!mediaUpload)
     throw new Error("C8 requires a factory-issued media upload composition.");
   app.register((mediaApp, _options, done) => {

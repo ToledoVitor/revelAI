@@ -70,7 +70,7 @@ export class SQLiteRetentionRepository implements RetentionRepository {
     assertIdentifier(input.id);
     assertIdentifier(input.attemptId);
     assertTimestamp(input.deleteAt);
-    return this.transaction(() => {
+    return this.#transaction(() => {
       const existing = this.#raw
         .prepare(
           "SELECT attempt_id, resource_kind, delete_at FROM retention_cleanup_records WHERE resource_id = ?",
@@ -112,7 +112,7 @@ export class SQLiteRetentionRepository implements RetentionRepository {
   ): Promise<void> {
     assertIdentifier(input.attemptId);
     assertTimestamp(input.requestedAt);
-    this.transaction(() => {
+    this.#transaction(() => {
       this.#raw
         .prepare(
           "UPDATE media_retention_records SET cleanup_requested_at = ? WHERE attempt_id = ?",
@@ -152,7 +152,7 @@ export class SQLiteRetentionRepository implements RetentionRepository {
   }
 
   public async acknowledge(record: RetentionRecord): Promise<void> {
-    this.transaction(() => {
+    this.#transaction(() => {
       if (record.kind === "original") {
         this.#raw
           .prepare(
@@ -187,7 +187,7 @@ export class SQLiteRetentionRepository implements RetentionRepository {
     });
   }
 
-  private transaction<T>(operation: () => T): T {
+  #transaction<T>(operation: () => T): T {
     this.#raw.exec("BEGIN IMMEDIATE");
     try {
       const result = operation();

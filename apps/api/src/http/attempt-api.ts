@@ -36,9 +36,10 @@ import type {
   AttemptRepository,
 } from "../repositories/attempt-repository.js";
 import {
-  createUnavailableProductionMediaUploadService,
-  isProductionMediaUploadServiceForHost,
-} from "../composition/sqlite-media-upload-composition.js";
+  createUnavailableMediaUploadCapability,
+  resolveMediaUploadCapabilityForHost,
+  type MediaUploadCapability,
+} from "../composition/media-upload-capability.js";
 import {
   createC8RecoveryRuntime,
   type C8RecoveryRuntimeHandle,
@@ -49,10 +50,7 @@ import {
   type OpaqueAcceptedMediaCleaner,
 } from "../services/media-attachment-recovery.js";
 import { MultipartParserError } from "./streamed-multipart.js";
-import {
-  MediaUploadServiceUnavailableError,
-  type MediaUploadService,
-} from "../services/media-upload-service.js";
+import { MediaUploadServiceUnavailableError } from "../services/media-upload-service.js";
 import { registerAttemptMediaUploadPlugin } from "./attempt-media-upload-plugin.js";
 
 type AttemptHttpRepository = AttemptRepository &
@@ -94,7 +92,7 @@ export function createAttemptApi(
     repository: AttemptHttpRepository;
     queue: AttemptUploadQueue;
     cleaner: OpaqueAcceptedMediaCleaner;
-    mediaUpload?: MediaUploadService;
+    mediaUpload?: MediaUploadCapability;
     maxUploadBytes?: number;
     scheduler?: HourlyRecoveryScheduler;
     recoveryBatchLimit?: number;
@@ -124,20 +122,18 @@ export function createAttemptApi(
   const ids = input.ids ?? { next: randomUUID };
   const nonce = input.nonce ?? (() => randomBytes(32).toString("base64url"));
   let recovery: C8RecoveryRuntimeHandle | undefined;
+  const mediaUploadHost = Object.freeze({
+    repository: input.repository,
+    queue: input.queue,
+  });
   if (
     input.mediaUpload &&
-    !isProductionMediaUploadServiceForHost(input.mediaUpload, {
-      repository: input.repository,
-      queue: input.queue,
-    })
+    !resolveMediaUploadCapabilityForHost(input.mediaUpload, mediaUploadHost)
   )
     throw new Error("C8 requires a factory-issued media upload composition.");
   const mediaUploadService =
     input.mediaUpload ??
-    createUnavailableProductionMediaUploadService({
-      repository: input.repository,
-      queue: input.queue,
-    });
+    createUnavailableMediaUploadCapability(mediaUploadHost);
 
   try {
     recovery = createC8RecoveryRuntime({
@@ -160,8 +156,6 @@ export function createAttemptApi(
     });
     registerAttemptMediaUploadPlugin(app, {
       mediaUpload: mediaUploadService,
-      repository: input.repository,
-      queue: input.queue,
       maxUploadBytes,
       maxMultipartBytes,
       requiredAthleteId: (request) => requiredAthleteId(athleteIds, request),
