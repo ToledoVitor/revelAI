@@ -103,6 +103,7 @@ try {
 
   await assertRealSessionProcessAudit();
   await assertSyntheticProcessAuditFindsLateSession();
+  await assertPresenceAuditFailsClosed();
 } finally {
   try {
     await terminateAndWait(foreign, foreignClose, { requireKill: true });
@@ -161,6 +162,7 @@ async function assertRealSessionProcessAudit() {
   const close = observeClose(child);
 
   try {
+    await assertSessionProcessPresent(session);
     await assertSessionAuditDetectsLiveSession(session);
   } finally {
     await terminateAndWait(child, close, { requireKill: true });
@@ -197,13 +199,7 @@ async function assertSyntheticProcessAuditFindsLateSession() {
     process.env[processAuditMarkerEnvironment] = marker;
     assertChunkBoundarySearch(marker);
 
-    let rejected = false;
-    try {
-      await assertNoSessionProcesses(session);
-    } catch (error) {
-      rejected = error instanceof Error && error.message === failure;
-    }
-    if (!rejected) throw new Error(failure);
+    await assertSessionProcessPresent(session);
   } finally {
     restoreEnvironment(processAuditMarkerEnvironment, previousMarker);
     restoreEnvironment("PATH", previousPath);
@@ -223,6 +219,56 @@ async function assertSessionAuditDetectsLiveSession(session) {
     await wait(25);
   }
   throw new Error(failure);
+}
+
+async function assertPresenceAuditFailsClosed() {
+  for (const mode of ["broken", "nonzero", "hang", "overflow"]) {
+    const session = sessionToken();
+    const stubDirectory = await mkdtemp(
+      join(tmpdir(), "revelai-clean-api-process-audit-fault-"),
+    );
+    const stub = join(stubDirectory, "ps");
+    const previousPath = process.env.PATH;
+    const environment = {
+      ...process.env,
+      PATH: [stubDirectory, previousPath]
+        .filter((entry) => entry !== undefined && entry.length > 0)
+        .join(delimiter),
+    };
+
+    try {
+      await writeFile(stub, processAuditFaultStub(mode), { mode: 0o700 });
+      if (mode !== "broken") await chmod(stub, 0o700);
+      let accepted = false;
+      try {
+        await assertSessionProcessPresent(session, environment);
+        accepted = true;
+      } catch {
+        // Audit infrastructure failures must not prove process presence.
+      }
+      if (accepted) throw new Error(failure);
+    } finally {
+      await rm(stubDirectory, { recursive: true, force: true });
+    }
+  }
+}
+
+function processAuditFaultStub(mode) {
+  switch (mode) {
+    case "broken":
+      return "#!/revelai-clean-api-no-such-interpreter\n";
+    case "nonzero":
+      return "#!/bin/sh\nexit 9\n";
+    case "hang":
+      return "#!/bin/sh\ntrap '' TERM\nwhile :; do :; done\n";
+    case "overflow":
+      return `#!/usr/bin/env node
+process.stdout.write("x".repeat(513 * 1024));
+setInterval(() => {}, 1_000);
+`;
+    default:
+      throw new Error(failure);
+  }
 }
 
 function syntheticProcessTableScript() {
