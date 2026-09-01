@@ -22,6 +22,40 @@ import type {
 
 export type FreeTrainingAnalysisClock = Readonly<{ now(): string }>;
 
+/**
+ * Fail-closed mode-separation ports. Free processing receives no calibration,
+ * integrity/scoring, policy, ranking, or leaderboard capability; these ports
+ * make any malformed value that tries to cross that boundary fail at once.
+ */
+export type FreeTrainingForbiddenPorts = Readonly<{
+  forbidCalibration(): never;
+  forbidIntegrityScoring(): never;
+  forbidPolicyLookup(): never;
+  forbidRankedFinalization(): never;
+  forbidLeaderboard(): never;
+  allowFreeTerminalPersistence(): void;
+}>;
+
+export const defaultFreeTrainingForbiddenPorts: FreeTrainingForbiddenPorts =
+  Object.freeze({
+    forbidCalibration: () => {
+      throw new Error("Free processing cannot access calibration.");
+    },
+    forbidIntegrityScoring: () => {
+      throw new Error("Free processing cannot access integrity or scoring.");
+    },
+    forbidPolicyLookup: () => {
+      throw new Error("Free processing cannot access competitive policy.");
+    },
+    forbidRankedFinalization: () => {
+      throw new Error("Free processing cannot finalize a ranked result.");
+    },
+    forbidLeaderboard: () => {
+      throw new Error("Free processing cannot write a leaderboard entry.");
+    },
+    allowFreeTerminalPersistence: () => undefined,
+  });
+
 /** C8-only C4/C5 closures; no route, SQLite, score, policy, or rank surface. */
 export type FreeTrainingAnalysisDependencies = Readonly<{
   getProcessingContext(
@@ -41,6 +75,7 @@ export type FreeTrainingAnalysisDependencies = Readonly<{
   provider: VisionProvider;
   scheduler?: VisionBatchScheduler;
   clock: FreeTrainingAnalysisClock;
+  forbiddenPorts?: FreeTrainingForbiddenPorts;
 }>;
 
 /**
@@ -57,6 +92,8 @@ export function createFreeTrainingAnalysisProcessor(
   const provider = input.provider;
   const scheduler = input.scheduler;
   const now = input.clock.now;
+  const forbiddenPorts =
+    input.forbiddenPorts ?? defaultFreeTrainingForbiddenPorts;
 
   return async ({ job, claim }) => {
     assertFreeClaim(claim);
@@ -69,6 +106,7 @@ export function createFreeTrainingAnalysisProcessor(
       throw new Error("Free processing claim is no longer active.");
     if (persisted.upload.mode !== "free")
       throw new Error("Free processor received non-Free durable context.");
+    if (persisted.upload.verified !== null) forbiddenPorts.forbidCalibration();
     const manifest = await reconstruct({
       context: persisted.processing,
       authority: authorityFor(persisted),
@@ -102,8 +140,17 @@ export function createFreeTrainingAnalysisProcessor(
     }
     if (result.attemptId !== job.attemptId)
       throw new Error("Free insight attempt binding mismatch.");
+    if (!isFreeInsight(result)) forbiddenPorts.forbidIntegrityScoring();
     return Object.freeze({ state: "valid" as const, result });
   };
+}
+
+function isFreeInsight(value: unknown): value is FreeInsight {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Readonly<{ kind?: unknown }>).kind === "free-insight"
+  );
 }
 
 /** Free's equivalent explicit C6 transport/deadline retry signal. */

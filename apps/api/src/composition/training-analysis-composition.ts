@@ -115,6 +115,7 @@ function snapshotTrainingAttemptApiInput(
   const freeProvider = rawFreeTraining.provider;
   const freeScheduler = rawFreeTraining.scheduler;
   const freeClock = rawFreeTraining.clock;
+  const freeForbiddenPorts = rawFreeTraining.forbiddenPorts;
   const rawVerifiedTraining = input.verifiedTraining;
   const verifiedProvider = rawVerifiedTraining.provider;
   const verifiedScheduler = rawVerifiedTraining.scheduler;
@@ -139,6 +140,7 @@ function snapshotTrainingAttemptApiInput(
       provider: freeProvider,
       scheduler: freeScheduler,
       clock: freeClock,
+      forbiddenPorts: freeForbiddenPorts,
     }),
     verifiedTraining: Object.freeze({
       provider: verifiedProvider,
