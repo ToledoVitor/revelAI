@@ -131,6 +131,7 @@ export class InMemoryAnalysisQueue implements AnalysisQueue {
       if (!(await isAvailable())) throw new QueueUnavailableError();
       const accepted = Object.freeze({ ...job });
       await state.beforeEnqueue(accepted);
+      if (state.closed) throw new QueueUnavailableError();
       state.pending.push(accepted);
       scheduleDrain();
     };
