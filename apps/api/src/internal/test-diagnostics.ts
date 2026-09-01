@@ -2,7 +2,7 @@
  * Test-only diagnostics are intentionally absent from every production
  * composition input and package entry point. A WeakMap keeps them attached to
  * already-created internal objects, so their absence is a synchronous,
- * allocation-free production path.
+ * callback-free production path.
  */
 export type TestDiagnosticEvent =
   | Readonly<{ kind: "c4-calibration" }>
