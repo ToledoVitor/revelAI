@@ -76,6 +76,7 @@ export type VerifiedTrainingAnalysisDependencies = Readonly<{
   issueRankedPolicyFinalization?(
     activation: CompetitivePolicyActivation,
   ): TransactionalRankedPolicyFinalizationAuthority | undefined;
+  integrityScoringObserver?: Readonly<{ beforeIntegrityScoring(): void }>;
   clock: VerifiedTrainingAnalysisClock;
 }>;
 
@@ -93,6 +94,7 @@ export function createVerifiedTrainingAnalysisProcessor(
   const scheduler = input.scheduler;
   const policy = input.policy;
   const issueRankedPolicy = input.issueRankedPolicyFinalization;
+  const integrityScoringObserver = input.integrityScoringObserver;
   const now = input.clock.now;
 
   return async ({ job, claim }) => {
@@ -129,6 +131,7 @@ export function createVerifiedTrainingAnalysisProcessor(
         throw configurationFailure(job.attemptId);
       }
 
+      integrityScoringObserver?.beforeIntegrityScoring();
       const integrity = evaluateVerifiedIntegrity({
         expected: {
           attemptId: job.attemptId,

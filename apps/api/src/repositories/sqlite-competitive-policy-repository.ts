@@ -29,6 +29,7 @@ import {
 } from "./competitive-policy-repository.js";
 
 export type PolicyClock = Readonly<{ now(): string }>;
+export type PolicyLookupObserver = Readonly<{ beforeLookup(): void }>;
 
 export type ProductionSQLiteCompetitivePolicyLookupPort = Readonly<{
   token: SqliteDatabaseCompositionToken;
@@ -145,9 +146,14 @@ export class SQLiteCompetitivePolicyRepository
       tuple: CompetitivePolicyTuple;
     }>,
   ) => CompetitivePolicyActivation | null;
+  readonly #lookupObserver: PolicyLookupObserver | undefined;
 
   public constructor(
-    input: Readonly<{ database: SqliteDatabase; clock: PolicyClock }>,
+    input: Readonly<{
+      database: SqliteDatabase;
+      clock: PolicyClock;
+      lookupObserver?: PolicyLookupObserver;
+    }>,
   ) {
     const database = input.database;
     if (!isFactoryIssuedSqliteDatabase(database))
@@ -162,6 +168,7 @@ export class SQLiteCompetitivePolicyRepository
       );
     this.#raw = raw;
     this.#clock = input.clock;
+    this.#lookupObserver = input.lookupObserver;
     this.#lookupActivePolicy = createActivePolicyLookup(raw);
     registerProductionSQLiteCompetitivePolicyLookupPort(
       this,
@@ -462,6 +469,7 @@ export class SQLiteCompetitivePolicyRepository
   public async getActiveCompetitivePolicy(
     tuple: CompetitivePolicyTuple,
   ): Promise<CompetitivePolicyActivation | null> {
+    this.#lookupObserver?.beforeLookup();
     try {
       return this.#lookupActivePolicy({ now: this.#clock.now(), tuple });
     } catch (error) {

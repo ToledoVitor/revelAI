@@ -121,6 +121,8 @@ function snapshotTrainingAttemptApiInput(
   const verifiedScheduler = rawVerifiedTraining.scheduler;
   const verifiedClock = rawVerifiedTraining.clock;
   const verifiedPolicy = rawVerifiedTraining.policy;
+  const verifiedIntegrityScoringObserver =
+    rawVerifiedTraining.integrityScoringObserver;
   return Object.freeze({
     repository,
     retention,
@@ -147,6 +149,7 @@ function snapshotTrainingAttemptApiInput(
       scheduler: verifiedScheduler,
       clock: verifiedClock,
       policy: verifiedPolicy,
+      integrityScoringObserver: verifiedIntegrityScoringObserver,
     }),
   });
 }

@@ -267,12 +267,20 @@ export type C4TransactionEntryObserver = Readonly<{
   }>): Promise<void>;
 }>;
 
+/** Narrow production-operation observer for mode-isolation diagnostics. */
+export type C4OperationObserver = Readonly<{
+  onCalibration(): void;
+  onRankedFinalization(): void;
+  onLeaderboardWrite(): void;
+}>;
+
 type SQLiteAttemptRepositoryInput = Readonly<{
   database: SqliteDatabase;
   clock: Clock;
   ids: IdGenerator;
   handoffVerifier: AcceptedMediaHandoffVerifier;
   transactionBoundary?: C4TransactionEntryObserver;
+  operationObserver?: C4OperationObserver;
   attemptCursor?: AttemptCursorCodec;
   attemptCursorCrypto?: AttemptCursorCrypto;
   liveLeaderboardCursor?: LiveLeaderboardCursorCodec;
@@ -342,6 +350,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
   readonly #handoffVerifier: AcceptedMediaHandoffVerifier;
   readonly #compositionToken: SqliteDatabaseCompositionToken | undefined;
   readonly #transactionBoundary: C4TransactionEntryObserver | undefined;
+  readonly #operationObserver: C4OperationObserver | undefined;
 
   /**
    * Test/migration reads never attach C5 media. Keep that explicitly
@@ -366,6 +375,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     this.#clock = input.clock;
     this.ids = input.ids;
     this.#transactionBoundary = input.transactionBoundary;
+    this.#operationObserver = input.operationObserver;
     this.attemptCursor =
       input.attemptCursor ??
       createAttemptCursorCodec(
@@ -420,6 +430,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       challengeVersion: 1;
     }>,
   ): Promise<CalibrationSessionRecord> {
+    this.#operationObserver?.onCalibration();
     return this.#transaction(() => {
       const issuedAt = this.#clock.now();
       const expiresAt = addMilliseconds(issuedAt, 15 * 60_000);
@@ -450,6 +461,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
   public async getCalibrationSession(
     input: Readonly<{ id: string; athleteId: string }>,
   ): Promise<CalibrationSessionRecord | null> {
+    this.#operationObserver?.onCalibration();
     return this.#transaction(() => {
       const row = this.#raw
         .prepare(
@@ -490,6 +502,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       ];
     }>,
   ): Promise<void> {
+    this.#operationObserver?.onCalibration();
     await this.#transaction(() => {
       const row = this.#raw
         .prepare(
@@ -1498,6 +1511,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       ) {
         outcome = experimentalOutcome(candidate, row);
       } else if (isRankedCandidate(candidate)) {
+        this.#operationObserver?.onRankedFinalization();
         const entryId = this.ids.next();
         const cohort = this.currentCohort();
         const rankable: DomainWallPassRankableResult = {
@@ -1563,6 +1577,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
           input.leaseId,
         );
       if (leaderboard) {
+        this.#operationObserver?.onLeaderboardWrite();
         const commitSequence = this.nextLeaderboardCommitSequence();
         this.#raw
           .prepare(
