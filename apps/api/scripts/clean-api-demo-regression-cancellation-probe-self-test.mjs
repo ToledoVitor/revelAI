@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdtemp, readdir, rm } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +20,9 @@ const probe = fileURLToPath(
 const failure = "Clean API executable cancellation probe self-test failed.";
 const fixtureRoot = "revelai-clean-api-demo-";
 const probeTimeoutMs = 90_000;
+const terminationGraceMs = 500;
+const closeAfterKillMs = 5_000;
+const processAuditMaxOutputBytes = 128 * 1024;
 const foreignSession = sessionToken();
 const foreignFixture = await mkdtemp(
   join(tmpdir(), `${fixtureRoot}${foreignSession}-`),
@@ -31,14 +34,24 @@ const foreign = spawn(
     "-e",
     `process.on("SIGTERM", () => { require("node:fs").writeFileSync(${JSON.stringify(
       terminationMarker,
-    )}, "terminated"); process.exit(0); }); setInterval(() => {}, 1_000);`,
+    )}, "terminated"); }); setInterval(() => {}, 1_000);`,
     "--",
     `--revelai-clean-api-session=${foreignSession}`,
   ],
   { detached: true, stdio: "ignore" },
 );
+const foreignClose = observeClose(foreign);
 
 try {
+  await assertOrderedCleanupFault({
+    scenario: "collector-after-inner-ready",
+    marker: "REVELAI_EXECUTABLE_PROBE_READY collector-after-inner-ready",
+  });
+  await assertOrderedCleanupFault({
+    scenario: "uncooperative-close-false",
+    marker: "REVELAI_EXECUTABLE_PROBE_CLEANUP_CLOSE_FALSE",
+  });
+
   for (const psMode of ["spawn-error", "nonzero", "hang"]) {
     const session = sessionToken();
     const result = await runProbe({
@@ -48,6 +61,7 @@ try {
     });
 
     assertGenericFailure(result);
+    if (psMode === "hang") await assertProcessTableKillReceipt(session);
     await assertNoSessionFixtures(session);
     await assertNoSessionProcesses(session);
     assertActive(foreign.pid);
@@ -68,14 +82,75 @@ try {
   assertActive(foreign.pid);
   await assertExists(foreignFixture);
   await assertMissing(terminationMarker);
+
+  await assertProcessAuditRejectsTruncation();
 } finally {
-  terminate(foreign.pid);
-  await rm(foreignFixture, { recursive: true, force: true });
+  try {
+    await terminateAndWait(foreign, foreignClose, { requireKill: true });
+    await assertExists(terminationMarker);
+  } finally {
+    await rm(foreignFixture, { recursive: true, force: true });
+  }
 }
 
 console.log(
   "Clean API executable cancellation probe fault regressions passed.",
 );
+
+async function assertOrderedCleanupFault({ scenario, marker }) {
+  const session = sessionToken();
+  const result = await runProbe({
+    CLEAN_API_EXECUTABLE_TEST_PROBE_SCENARIO: scenario,
+    CLEAN_API_EXECUTABLE_TEST_SESSION: session,
+  });
+
+  assertGenericFailure(result);
+  if (!result.output.includes(marker)) throw new Error(failure);
+  await assertNoSessionFixtures(session);
+  await assertNoSessionProcesses(session);
+  assertActive(foreign.pid);
+  await assertExists(foreignFixture);
+}
+
+async function assertProcessTableKillReceipt(session) {
+  const receipt = join(
+    tmpdir(),
+    `revelai-clean-api-probe-process-table-${session}`,
+  );
+  try {
+    if ((await readFile(receipt, "utf8")) !== "term\nkilled-close\n") {
+      throw new Error(failure);
+    }
+  } finally {
+    await rm(receipt, { force: true });
+  }
+}
+
+async function assertProcessAuditRejectsTruncation() {
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      "process.on('SIGTERM', () => {}); setInterval(() => {}, 1_000)",
+      "--",
+      "x".repeat(processAuditMaxOutputBytes + 4 * 1024),
+    ],
+    { detached: true, stdio: "ignore" },
+  );
+  const close = observeClose(child);
+
+  try {
+    let rejected = false;
+    try {
+      await assertNoSessionProcesses(sessionToken());
+    } catch (error) {
+      rejected = error instanceof Error && error.message === failure;
+    }
+    if (!rejected) throw new Error(failure);
+  } finally {
+    await terminateAndWait(child, close, { requireKill: true });
+  }
+}
 
 function runProbe(environment) {
   return new Promise((resolve) => {
@@ -89,7 +164,7 @@ function runProbe(environment) {
     });
     const timeout = setTimeout(() => {
       terminate(child.pid);
-      killTimer = setTimeout(() => kill(child.pid), 500);
+      killTimer = setTimeout(() => kill(child.pid), terminationGraceMs);
     }, probeTimeoutMs);
     const settle = (result) => {
       if (settled) return;
@@ -109,8 +184,28 @@ function runProbe(environment) {
     child.stdout.on("data", append);
     child.stderr.on("data", append);
     child.once("error", () => settle({ kind: "error" }));
-    child.once("close", (exitCode) => settle({ kind: "close", exitCode }));
+    child.once("close", (exitCode, signal) =>
+      settle({ kind: "close", exitCode, signal }),
+    );
   });
+}
+
+function observeClose(child) {
+  let resolved = false;
+  let resolveClose;
+  const closed = new Promise((resolve) => {
+    resolveClose = resolve;
+  });
+  const settle = (result) => {
+    if (resolved) return;
+    resolved = true;
+    resolveClose(result);
+  };
+  child.once("error", () => settle({ kind: "error" }));
+  child.once("close", (exitCode, signal) =>
+    settle({ kind: "close", exitCode, signal }),
+  );
+  return Object.freeze({ closed });
 }
 
 function assertGenericFailure(result) {
@@ -140,36 +235,73 @@ async function assertNoSessionProcesses(session) {
 
 function readProcessTable() {
   return new Promise((resolve, reject) => {
-    let output = "";
+    let output = Buffer.alloc(0);
+    let outputExceeded = false;
     let settled = false;
-    const child = spawn("ps", ["-axo", "command="], {
+    let killTimer;
+    const child = spawn("ps", ["-ww", "-axo", "command="], {
+      detached: true,
       stdio: ["ignore", "pipe", "ignore"],
     });
-    const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      settle(() => reject(new Error(failure)));
-    }, 5_000);
+    const close = observeClose(child);
+    const timeout = setTimeout(() => terminate(child.pid), 5_000);
     const settle = (callback) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      clearTimeout(killTimer);
       callback();
+    };
+    const terminateAudit = () => {
+      terminate(child.pid);
+      killTimer = setTimeout(() => kill(child.pid), terminationGraceMs);
     };
 
     child.stdout.on("data", (chunk) => {
-      if (output.length < 128 * 1024) {
-        output += Buffer.from(chunk)
-          .toString("utf8")
-          .slice(0, 128 * 1024 - output.length);
+      const bytes = Buffer.from(chunk);
+      const remaining = processAuditMaxOutputBytes - output.length;
+      if (remaining > 0) {
+        output = Buffer.concat([output, bytes.subarray(0, remaining)]);
+      }
+      if (bytes.length > remaining) {
+        outputExceeded = true;
+        terminateAudit();
       }
     });
     child.once("error", () => settle(() => reject(new Error(failure))));
     child.once("close", (exitCode) => {
-      if (exitCode !== 0) {
+      if (exitCode !== 0 || outputExceeded) {
         settle(() => reject(new Error(failure)));
         return;
       }
-      settle(() => resolve(output));
+      settle(() => resolve(output.toString("utf8")));
+    });
+
+    void close.closed.catch(() => undefined);
+  });
+}
+
+async function terminateAndWait(child, close, { requireKill }) {
+  terminate(child.pid);
+  let result = await closeWithin(close, terminationGraceMs);
+  if (result === undefined) {
+    kill(child.pid);
+    result = await closeWithin(close, closeAfterKillMs);
+    if (result === undefined || result.signal !== "SIGKILL") {
+      throw new Error(failure);
+    }
+  }
+  if (result.kind !== "close" || (requireKill && result.signal !== "SIGKILL")) {
+    throw new Error(failure);
+  }
+}
+
+async function closeWithin(close, timeoutMs) {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(undefined), timeoutMs);
+    void close.closed.then((result) => {
+      clearTimeout(timeout);
+      resolve(result);
     });
   });
 }
