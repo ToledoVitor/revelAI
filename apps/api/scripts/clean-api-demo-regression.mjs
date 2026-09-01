@@ -22,6 +22,7 @@ const executableCases = [
   { name: "demo", script: "demo:smoke" },
   { name: "operator", script: "operator:receipt-smoke" },
   { name: "openapi", script: "openapi:check" },
+  { name: "operability", script: "test:operability" },
 ];
 const activeChildren = new Set();
 const activeFixtures = new Set();

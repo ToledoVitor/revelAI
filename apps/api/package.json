@@ -10,6 +10,7 @@
     "lint": "eslint src",
     "typecheck": "tsc --project tsconfig.json",
     "test": "node scripts/assert-vitest-worker-config.mjs && vitest run --config vitest.config.mjs",
+    "test:operability": "pnpm run build:workspace && vitest run src/http/operability-routes.test.ts src/startup.test.ts",
     "openapi:generate": "pnpm run build:workspace && node scripts/generate-openapi.mjs",
     "openapi:check": "pnpm run build:workspace && node scripts/generate-openapi.mjs --check",
     "benchmark:roboflow": "pnpm run build:workspace && node scripts/benchmark-roboflow-wall-pass.mjs",
