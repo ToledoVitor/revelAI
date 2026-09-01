@@ -66,6 +66,16 @@ const mediaPipelineCapabilities = new WeakMap<
   object,
   Readonly<{ storage: LocalMediaStorage; extraction: LocalFrameExtraction }>
 >();
+type FactoryIssuedC5MediaPipelinePort = Readonly<{
+  handoffVerifier: AcceptedMediaHandoffVerifier;
+  acceptMultipart(
+    input: MediaPipelineMultipartAcceptanceInput,
+  ): Promise<AcceptedMedia>;
+}>;
+const factoryIssuedC5MediaPipelinePorts = new WeakMap<
+  object,
+  FactoryIssuedC5MediaPipelinePort
+>();
 
 /** Opaque factory-issued composition token for the production C5 stack. */
 export type MediaPipelineCapability = Readonly<Record<never, never>>;
@@ -89,6 +99,14 @@ export interface C5MediaPipeline {
   acceptMultipart(
     input: MediaPipelineMultipartAcceptanceInput,
   ): Promise<AcceptedMedia>;
+}
+
+/** Resolves only the frozen facade issued by this C5 factory. */
+export function resolveFactoryIssuedC5MediaPipelinePort(
+  value: unknown,
+): FactoryIssuedC5MediaPipelinePort | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  return factoryIssuedC5MediaPipelinePorts.get(value);
 }
 
 /**
@@ -148,12 +166,18 @@ class MediaPipeline implements C5MediaPipeline {
 
   /** A frozen closure facade prevents property/prototype method replacement. */
   public publicApi(): C5MediaPipeline {
-    return Object.freeze({
+    const accept = this.accept.bind(this);
+    const acceptMultipart = this.acceptMultipart.bind(this);
+    const publicApi: C5MediaPipeline = Object.freeze({
       handoffVerifier: () => this.handoffVerifier(),
-      accept: (input: MediaPipelineAcceptanceInput) => this.accept(input),
-      acceptMultipart: (input: MediaPipelineMultipartAcceptanceInput) =>
-        this.acceptMultipart(input),
+      accept,
+      acceptMultipart,
     });
+    factoryIssuedC5MediaPipelinePorts.set(
+      publicApi,
+      Object.freeze({ handoffVerifier: this.verifier, acceptMultipart }),
+    );
+    return publicApi;
   }
 
   /** Composition gives C4 this verifier; no caller receives an issuer. */

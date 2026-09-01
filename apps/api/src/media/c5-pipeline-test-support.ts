@@ -9,6 +9,7 @@ import { createLocalFrameExtraction } from "../storage/local-frame-extraction.js
 import {
   createLocalMediaStorage,
   type LocalMediaStorage,
+  type LocalMediaProber,
   type UploadRetentionRepository,
 } from "../storage/local-media-storage.js";
 import {
@@ -42,7 +43,7 @@ export type C5PipelineTestSupport = Readonly<{
  * issuance remain the production implementations.
  */
 export function createC5PipelineTestSupport(
-  input: Readonly<{ root: string }>,
+  input: Readonly<{ root: string; prober?: LocalMediaProber }>,
 ): C5PipelineTestSupport {
   let nextMediaId: string | undefined;
   let directPipelineMediaSequence = 0;
@@ -62,17 +63,7 @@ export function createC5PipelineTestSupport(
         return id;
       },
     },
-    prober: {
-      probe: async () => ({
-        container: "mp4",
-        durationSeconds: 64,
-        displayWidth: 1280,
-        displayHeight: 720,
-        nominalFps: 30,
-        codec: "h264",
-        sourceRotationDegrees: 0,
-      }),
-    },
+    prober: input.prober ?? defaultProber,
   });
   const extraction = createLocalFrameExtraction({
     root: input.root,
@@ -158,6 +149,19 @@ export function createC5PipelineTestSupport(
     },
   });
 }
+
+const defaultProber: LocalMediaProber = Object.freeze({
+  probe: async () =>
+    Object.freeze({
+      container: "mp4" as const,
+      durationSeconds: 64,
+      displayWidth: 1280,
+      displayHeight: 720,
+      nominalFps: 30,
+      codec: "h264",
+      sourceRotationDegrees: 0 as const,
+    }),
+});
 
 async function* source(): AsyncIterable<Uint8Array> {
   yield sourceBytes;

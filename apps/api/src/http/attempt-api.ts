@@ -30,14 +30,15 @@ import {
   type AnalysisQueue,
 } from "../queue/analysis-queue.js";
 import { MediaPipelineError } from "../media/probe.js";
-import type { C5MediaPipeline } from "../media/media-pipeline.js";
-import type { UploadRetentionRepository } from "../storage/local-media-storage.js";
 import { RepositoryError } from "../repositories/attempt-repository.js";
 import type {
   AttemptRecord,
   AttemptRepository,
-  MediaUploadContext,
 } from "../repositories/attempt-repository.js";
+import {
+  createUnavailableProductionMediaUploadService,
+  isProductionMediaUploadServiceForHost,
+} from "../composition/sqlite-media-upload-composition.js";
 import {
   createC8RecoveryRuntime,
   type C8RecoveryRuntimeHandle,
@@ -47,17 +48,12 @@ import {
   type MediaDeliveryRedeliveryRepository,
   type OpaqueAcceptedMediaCleaner,
 } from "../services/media-attachment-recovery.js";
+import { MultipartParserError } from "./streamed-multipart.js";
 import {
-  createStreamingMultipartIntake,
-  drainMediaUploadRequest,
-  MultipartParserError,
-  prepareMediaMultipartRequest,
-  wrapMediaMultipartPayload,
-} from "./streamed-multipart.js";
-import {
-  MediaUploadService,
   MediaUploadServiceUnavailableError,
-} from "./media-upload-service.js";
+  type MediaUploadService,
+} from "../services/media-upload-service.js";
+import { registerAttemptMediaUploadPlugin } from "./attempt-media-upload-plugin.js";
 
 type AttemptHttpRepository = AttemptRepository &
   MediaAttachmentRecoveryRepository &
@@ -98,8 +94,7 @@ export function createAttemptApi(
     repository: AttemptHttpRepository;
     queue: AttemptUploadQueue;
     cleaner: OpaqueAcceptedMediaCleaner;
-    mediaPipeline?: C5MediaPipeline;
-    uploadRetention: UploadRetentionRepository;
+    mediaUpload?: MediaUploadService;
     maxUploadBytes?: number;
     scheduler?: HourlyRecoveryScheduler;
     recoveryBatchLimit?: number;
@@ -125,25 +120,26 @@ export function createAttemptApi(
     },
   });
   const athleteIds = new WeakMap<FastifyRequest, string>();
-  const mediaUploads = new WeakMap<FastifyRequest, MediaUploadContext>();
   const clock = input.clock ?? { now: () => new Date().toISOString() };
   const ids = input.ids ?? { next: randomUUID };
   const nonce = input.nonce ?? (() => randomBytes(32).toString("base64url"));
   let recovery: C8RecoveryRuntimeHandle | undefined;
-  const mediaUploadService = new MediaUploadService({
-    repository: input.repository,
-    retention: input.uploadRetention,
-    queue: input.queue,
-    ...(input.mediaPipeline ? { mediaPipeline: input.mediaPipeline } : {}),
-  });
+  if (
+    input.mediaUpload &&
+    !isProductionMediaUploadServiceForHost(input.mediaUpload, {
+      repository: input.repository,
+      queue: input.queue,
+    })
+  )
+    throw new Error("C8 requires a factory-issued media upload composition.");
+  const mediaUploadService =
+    input.mediaUpload ??
+    createUnavailableProductionMediaUploadService({
+      repository: input.repository,
+      queue: input.queue,
+    });
 
   try {
-    app.addContentTypeParser(
-      "multipart/form-data",
-      (_request, _payload, done) => {
-        done(null, undefined);
-      },
-    );
     recovery = createC8RecoveryRuntime({
       repository: input.repository,
       queue: input.queue,
@@ -162,9 +158,17 @@ export function createAttemptApi(
       if (!athleteId) throw new AttemptRouteError("invalid_athlete_identity");
       athleteIds.set(request, athleteId);
     });
-    app.addHook("onResponse", async (request) => {
-      if (isMediaUploadRoute(request))
-        drainMediaUploadRequest(request, maxMultipartBytes);
+    registerAttemptMediaUploadPlugin(app, {
+      mediaUpload: mediaUploadService,
+      repository: input.repository,
+      queue: input.queue,
+      maxUploadBytes,
+      maxMultipartBytes,
+      requiredAthleteId: (request) => requiredAthleteId(athleteIds, request),
+      attemptId: (request) =>
+        parseRequest(AttemptIdPathParamsSchema, request.params).id,
+      sendAccepted: (reply, value) =>
+        sendResponse(reply, 202, MediaUploadAcceptedSchema, value),
     });
 
     app.get("/v1/challenges", async (request, reply) => {
@@ -253,39 +257,6 @@ export function createAttemptApi(
       });
     });
 
-    app.route({
-      method: "POST",
-      url: "/v1/attempts/:id/media",
-      onRequest: async (request) => {
-        const params = parseRequest(AttemptIdPathParamsSchema, request.params);
-        const upload = await mediaUploadService.preflight({
-          attemptId: params.id,
-          athleteId: requiredAthleteId(athleteIds, request),
-        });
-        prepareMediaMultipartRequest(request, {
-          maxUploadBytes,
-          maxMultipartBytes,
-        });
-        mediaUploads.set(request, upload);
-      },
-      preParsing: (request, _reply, payload, done) => {
-        try {
-          done(null, wrapMediaMultipartPayload(request, payload));
-        } catch (error) {
-          done(error instanceof Error ? error : new MultipartParserError());
-        }
-      },
-      handler: async (request, reply) => {
-        const upload = mediaUploads.get(request);
-        if (!upload) throw new MediaUploadServiceUnavailableError();
-        const accepted = await mediaUploadService.accept({
-          context: upload,
-          multipart: createStreamingMultipartIntake(request),
-        });
-        return sendResponse(reply, 202, MediaUploadAcceptedSchema, accepted);
-      },
-    });
-
     app.setNotFoundHandler((_request, reply) =>
       sendRouteError(reply, "invalid_request"),
     );
@@ -356,10 +327,6 @@ function sendRouteError(
 
 function isPublicChallengeRequest(request: FastifyRequest): boolean {
   return request.routeOptions.url === "/v1/challenges";
-}
-
-function isMediaUploadRoute(request: FastifyRequest): boolean {
-  return request.routeOptions.url === "/v1/attempts/:id/media";
 }
 
 function parseAthleteIdentity(request: FastifyRequest): string | undefined {

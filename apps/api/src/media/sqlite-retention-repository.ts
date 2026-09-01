@@ -19,17 +19,24 @@ type RetentionRow = Readonly<{
   cleanup_requested_at: string | null;
 }>;
 
-const sqliteRetentionRepositoryTokens = new WeakMap<
+type ProductionSQLiteRetentionUploadPort = Readonly<{
+  token: SqliteDatabaseCompositionToken;
+  isCurrent(): boolean;
+  schedule: SQLiteRetentionRepository["schedule"];
+  acknowledge: SQLiteRetentionRepository["acknowledge"];
+}>;
+
+const productionSQLiteRetentionUploadPorts = new WeakMap<
   object,
-  SqliteDatabaseCompositionToken
+  ProductionSQLiteRetentionUploadPort
 >();
 
-/** Opaque co-location marker for C8's media-upload composition. */
-export function resolveFactoryIssuedSQLiteRetentionRepositoryToken(
+/** Resolves only the immutable production upload facade for this exact C5 adapter. */
+export function resolveProductionSQLiteRetentionUploadPort(
   repository: unknown,
-): SqliteDatabaseCompositionToken | undefined {
+): ProductionSQLiteRetentionUploadPort | undefined {
   if (typeof repository !== "object" || repository === null) return undefined;
-  return sqliteRetentionRepositoryTokens.get(repository);
+  return productionSQLiteRetentionUploadPorts.get(repository);
 }
 
 /** SQLite adapter contains only opaque retention identifiers, never local paths. */
@@ -49,7 +56,7 @@ export class SQLiteRetentionRepository implements RetentionRepository {
       throw new Error(
         "Retention factory database composition token is required.",
       );
-    sqliteRetentionRepositoryTokens.set(this, token);
+    registerProductionSQLiteRetentionUploadPort(this, token);
   }
 
   public async schedule(
@@ -191,6 +198,37 @@ export class SQLiteRetentionRepository implements RetentionRepository {
       throw error;
     }
   }
+}
+
+const exactSchedule = SQLiteRetentionRepository.prototype.schedule;
+const exactAcknowledge = SQLiteRetentionRepository.prototype.acknowledge;
+
+function registerProductionSQLiteRetentionUploadPort(
+  repository: SQLiteRetentionRepository,
+  token: SqliteDatabaseCompositionToken,
+): void {
+  if (!isCurrentProductionSQLiteRetentionRepository(repository)) return;
+  productionSQLiteRetentionUploadPorts.set(
+    repository,
+    Object.freeze({
+      token,
+      isCurrent: () => isCurrentProductionSQLiteRetentionRepository(repository),
+      schedule: (input) => exactSchedule.call(repository, input),
+      acknowledge: (record) => exactAcknowledge.call(repository, record),
+    }),
+  );
+}
+
+function isCurrentProductionSQLiteRetentionRepository(
+  repository: SQLiteRetentionRepository,
+): boolean {
+  return (
+    Object.getPrototypeOf(repository) === SQLiteRetentionRepository.prototype &&
+    !Object.hasOwn(repository, "schedule") &&
+    !Object.hasOwn(repository, "acknowledge") &&
+    SQLiteRetentionRepository.prototype.schedule === exactSchedule &&
+    SQLiteRetentionRepository.prototype.acknowledge === exactAcknowledge
+  );
 }
 
 function parseRetentionRow(value: unknown): RetentionRecord {

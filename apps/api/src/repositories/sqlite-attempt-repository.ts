@@ -70,9 +70,44 @@ const c4AcceptedMediaCleanupAuthorities = new WeakMap<
   object,
   C4AcceptedMediaCleanupAuthority
 >();
-const sqliteAttemptRepositoryTokens = new WeakMap<
+type ProductionSQLiteAttemptUploadPort = Readonly<{
+  token: SqliteDatabaseCompositionToken;
+  isCurrent(): boolean;
+  handoffVerifier: AcceptedMediaHandoffVerifier;
+  prepareMediaUpload(
+    input: Readonly<{ attemptId: string; athleteId: string }>,
+  ): Promise<MediaUploadContext>;
+  attachment: Readonly<{
+    attachPreparedMedia(
+      input: Readonly<{ accepted: AcceptedMediaHandoff }>,
+    ): Promise<AnalysisJob>;
+    rollbackMediaAttachment(
+      input: Readonly<{ attemptId: string; generation: number }>,
+    ): Promise<void>;
+    beginMediaAttachmentRecovery(
+      input: Readonly<{
+        attemptId: string;
+        generation: number;
+        mediaId: string;
+        frameBatchId: string;
+      }>,
+    ): Promise<void>;
+    acknowledgeMediaAttachmentCleanup(
+      input: Readonly<{
+        attemptId: string;
+        generation: number;
+        mediaId: string;
+      }>,
+    ): Promise<void>;
+    markMediaDeliveryQueued(
+      input: Readonly<{ attemptId: string; generation: number }>,
+    ): Promise<void>;
+  }>;
+}>;
+
+const productionSQLiteAttemptUploadPorts = new WeakMap<
   object,
-  SqliteDatabaseCompositionToken
+  ProductionSQLiteAttemptUploadPort
 >();
 
 /**
@@ -87,12 +122,12 @@ export function resolveC4AcceptedMediaCleanupAuthority(
   return c4AcceptedMediaCleanupAuthorities.get(repository);
 }
 
-/** Opaque co-location marker for C8's separate SQLite retention adapter. */
-export function resolveFactoryIssuedSQLiteAttemptRepositoryToken(
+/** Resolves only the immutable production upload facade for this exact C4 instance. */
+export function resolveProductionSQLiteAttemptUploadPort(
   repository: unknown,
-): SqliteDatabaseCompositionToken | undefined {
+): ProductionSQLiteAttemptUploadPort | undefined {
   if (typeof repository !== "object" || repository === null) return undefined;
-  return sqliteAttemptRepositoryTokens.get(repository);
+  return productionSQLiteAttemptUploadPorts.get(repository);
 }
 
 const MAX_RECOVERY_ATTEMPTS = Number.MAX_SAFE_INTEGER;
@@ -267,12 +302,6 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         "C4 requires a factory-issued SQLite database capability.",
       );
     this.#raw = input.database.raw;
-    const token = resolveFactoryIssuedSqliteDatabaseCompositionToken(
-      input.database,
-    );
-    if (!token)
-      throw new Error("C4 factory database composition token is required.");
-    sqliteAttemptRepositoryTokens.set(this, token);
     this.clock = input.clock;
     this.ids = input.ids;
     this.attemptCursor =
@@ -299,6 +328,16 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       if (!cleanupAuthority)
         throw new Error("C4 factory cleanup authority is required.");
       c4AcceptedMediaCleanupAuthorities.set(this, cleanupAuthority);
+      const token = resolveFactoryIssuedSqliteDatabaseCompositionToken(
+        input.database,
+      );
+      if (!token)
+        throw new Error("C4 factory database composition token is required.");
+      registerProductionSQLiteAttemptUploadPort(
+        this,
+        token,
+        input.handoffVerifier,
+      );
     }
   }
 
@@ -1752,6 +1791,91 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       | undefined;
     return row ?? null;
   }
+}
+
+const exactPrepareMediaUpload =
+  SQLiteAttemptRepository.prototype.prepareMediaUpload;
+const exactAttachPreparedMedia =
+  SQLiteAttemptRepository.prototype.attachPreparedMedia;
+const exactRollbackMediaAttachment =
+  SQLiteAttemptRepository.prototype.rollbackMediaAttachment;
+const exactBeginMediaAttachmentRecovery =
+  SQLiteAttemptRepository.prototype.beginMediaAttachmentRecovery;
+const exactAcknowledgeMediaAttachmentCleanup =
+  SQLiteAttemptRepository.prototype.acknowledgeMediaAttachmentCleanup;
+const exactMarkMediaDeliveryQueued =
+  SQLiteAttemptRepository.prototype.markMediaDeliveryQueued;
+
+function registerProductionSQLiteAttemptUploadPort(
+  repository: SQLiteAttemptRepository,
+  token: SqliteDatabaseCompositionToken,
+  handoffVerifier: AcceptedMediaHandoffVerifier,
+): void {
+  if (!isCurrentProductionSQLiteAttemptRepository(repository)) return;
+  const attachment = Object.freeze({
+    attachPreparedMedia: (
+      input: Readonly<{ accepted: AcceptedMediaHandoff }>,
+    ) => exactAttachPreparedMedia.call(repository, input),
+    rollbackMediaAttachment: (
+      input: Readonly<{ attemptId: string; generation: number }>,
+    ) => exactRollbackMediaAttachment.call(repository, input),
+    beginMediaAttachmentRecovery: (
+      input: Readonly<{
+        attemptId: string;
+        generation: number;
+        mediaId: string;
+        frameBatchId: string;
+      }>,
+    ) => exactBeginMediaAttachmentRecovery.call(repository, input),
+    acknowledgeMediaAttachmentCleanup: (
+      input: Readonly<{
+        attemptId: string;
+        generation: number;
+        mediaId: string;
+      }>,
+    ) => exactAcknowledgeMediaAttachmentCleanup.call(repository, input),
+    markMediaDeliveryQueued: (
+      input: Readonly<{ attemptId: string; generation: number }>,
+    ) => exactMarkMediaDeliveryQueued.call(repository, input),
+  });
+  productionSQLiteAttemptUploadPorts.set(
+    repository,
+    Object.freeze({
+      token,
+      isCurrent: () => isCurrentProductionSQLiteAttemptRepository(repository),
+      handoffVerifier,
+      prepareMediaUpload: (
+        input: Readonly<{ attemptId: string; athleteId: string }>,
+      ) => exactPrepareMediaUpload.call(repository, input),
+      attachment,
+    }),
+  );
+}
+
+function isCurrentProductionSQLiteAttemptRepository(
+  repository: SQLiteAttemptRepository,
+): boolean {
+  return (
+    Object.getPrototypeOf(repository) === SQLiteAttemptRepository.prototype &&
+    !Object.hasOwn(repository, "prepareMediaUpload") &&
+    !Object.hasOwn(repository, "attachPreparedMedia") &&
+    !Object.hasOwn(repository, "rollbackMediaAttachment") &&
+    !Object.hasOwn(repository, "beginMediaAttachmentRecovery") &&
+    !Object.hasOwn(repository, "acknowledgeMediaAttachmentCleanup") &&
+    !Object.hasOwn(repository, "markMediaDeliveryQueued") &&
+    SQLiteAttemptRepository.prototype.prepareMediaUpload ===
+      exactPrepareMediaUpload &&
+    SQLiteAttemptRepository.prototype.attachPreparedMedia ===
+      exactAttachPreparedMedia &&
+    SQLiteAttemptRepository.prototype.rollbackMediaAttachment ===
+      exactRollbackMediaAttachment &&
+    SQLiteAttemptRepository.prototype.beginMediaAttachmentRecovery ===
+      exactBeginMediaAttachmentRecovery &&
+    SQLiteAttemptRepository.prototype.acknowledgeMediaAttachmentCleanup ===
+      exactAcknowledgeMediaAttachmentCleanup &&
+    SQLiteAttemptRepository.prototype.markMediaDeliveryQueued ===
+      exactMarkMediaDeliveryQueued
+  );
 }
 
 function parseAttemptRow(row: unknown): AttemptRecord {

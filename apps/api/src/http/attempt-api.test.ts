@@ -12,20 +12,19 @@ import {
   routeErrorFixtures,
   RouteErrorSchema,
 } from "@revelai/contracts";
-import type { FastifyInstance, InjectOptions } from "fastify";
+import Fastify, { type FastifyInstance, type InjectOptions } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openSqliteDatabase } from "../database/sqlite-database.js";
-import {
-  resolveFactoryIssuedSQLiteAttemptRepositoryToken,
-  SQLiteAttemptRepository,
-} from "../repositories/sqlite-attempt-repository.js";
-import type { AcceptedMediaHandoff } from "../media/accepted-media-handoff.js";
+import { SQLiteAttemptRepository } from "../repositories/sqlite-attempt-repository.js";
 import { createC5PipelineTestSupport } from "../media/c5-pipeline-test-support.js";
-import type { C5MediaPipeline } from "../media/media-pipeline.js";
-import { MediaPipelineError, type MediaFailureCode } from "../media/probe.js";
+import { MediaPipelineError } from "../media/probe.js";
 import { SQLiteRetentionRepository } from "../media/sqlite-retention-repository.js";
+import type { LocalMediaProber } from "../storage/local-media-storage.js";
 import { createLocalC8AcceptedMediaCleaner } from "../services/local-c8-accepted-media-cleaner.js";
+import type { MediaUploadService } from "../services/media-upload-service.js";
+import { createProductionMediaUploadService } from "../composition/sqlite-media-upload-composition.js";
 import { createAttemptApi } from "./attempt-api.js";
+import { registerAttemptMediaUploadPlugin } from "./attempt-media-upload-plugin.js";
 
 const ATHLETE_A = "11111111-1111-4111-8111-111111111111";
 const ATHLETE_B = "22222222-2222-4222-8222-222222222222";
@@ -40,8 +39,292 @@ afterEach(async () => {
 });
 
 describe("attempt HTTP foundation", () => {
+  it("refuses to compose read-only SQLite with a C5 media pipeline", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "revelai-read-only-media-"));
+    directories.push(directory);
+    const database = openSqliteDatabase(join(directory, "api.sqlite"));
+    const c5 = createC5PipelineTestSupport({ root: join(directory, "c5") });
+    const repository = SQLiteAttemptRepository.forReadOnlyTest({
+      database,
+      clock: { now: () => "2030-01-15T12:00:00.000Z" },
+      ids: { next: () => "ffffffff-ffff-4fff-8fff-ffffffffffff" },
+    });
+
+    expect(() =>
+      createProductionMediaUploadService({
+        repository,
+        queue: {
+          isAvailable: async () => true,
+          enqueue: async () => undefined,
+        },
+        retention: new SQLiteRetentionRepository({ database }),
+        mediaPipeline: c5.pipeline,
+      }),
+    ).toThrow("factory-issued media upload composition");
+
+    database.close();
+  });
+
+  it("issues media upload capability only to exact C4/C5 factory instances", async () => {
+    const fixture = await makeMediaApi();
+    const issue = (repository: SQLiteAttemptRepository) =>
+      createProductionMediaUploadService({
+        repository,
+        retention: fixture.retention,
+        queue: fixture.queue,
+        mediaPipeline: fixture.c5.pipeline,
+      });
+    class DerivedAttemptRepository extends SQLiteAttemptRepository {}
+    const derived = new DerivedAttemptRepository({
+      database: fixture.database,
+      clock: { now: () => "2030-01-15T12:00:00.000Z" },
+      ids: { next: () => "abababab-abab-4bab-8bab-abababababab" },
+      handoffVerifier: fixture.c5.handoffVerifier,
+    });
+    const proxy = new Proxy(fixture.repository, {});
+    const clone = Object.assign(
+      Object.create(SQLiteAttemptRepository.prototype),
+      fixture.repository,
+    );
+    class DerivedRetentionRepository extends SQLiteRetentionRepository {}
+    const derivedRetention = new DerivedRetentionRepository({
+      database: fixture.database,
+    });
+    const retentionProxy = new Proxy(fixture.retention, {});
+    const retentionClone = Object.assign(
+      Object.create(SQLiteRetentionRepository.prototype),
+      fixture.retention,
+    );
+
+    expect(() => issue(derived)).toThrow(
+      "factory-issued media upload composition",
+    );
+    expect(() => issue(proxy)).toThrow(
+      "factory-issued media upload composition",
+    );
+    expect(() => issue(clone)).toThrow(
+      "factory-issued media upload composition",
+    );
+    expect(() =>
+      createProductionMediaUploadService({
+        repository: fixture.repository,
+        retention: derivedRetention,
+        queue: fixture.queue,
+        mediaPipeline: fixture.c5.pipeline,
+      }),
+    ).toThrow("factory-issued media upload composition");
+    expect(() =>
+      createProductionMediaUploadService({
+        repository: fixture.repository,
+        retention: retentionProxy,
+        queue: fixture.queue,
+        mediaPipeline: fixture.c5.pipeline,
+      }),
+    ).toThrow("factory-issued media upload composition");
+    expect(() =>
+      createProductionMediaUploadService({
+        repository: fixture.repository,
+        retention: retentionClone,
+        queue: fixture.queue,
+        mediaPipeline: fixture.c5.pipeline,
+      }),
+    ).toThrow("factory-issued media upload composition");
+
+    const ownPrepare = fixture.repository.prepareMediaUpload;
+    Object.defineProperty(fixture.repository, "prepareMediaUpload", {
+      configurable: true,
+      value: ownPrepare,
+    });
+    expect(() => issue(fixture.repository)).toThrow(
+      "factory-issued media upload composition",
+    );
+    Reflect.deleteProperty(fixture.repository, "prepareMediaUpload");
+
+    const prototypePrepare =
+      SQLiteAttemptRepository.prototype.prepareMediaUpload;
+    try {
+      Object.defineProperty(
+        SQLiteAttemptRepository.prototype,
+        "prepareMediaUpload",
+        {
+          configurable: true,
+          value: () => {
+            throw new Error("mutated prototype");
+          },
+        },
+      );
+      expect(() => issue(fixture.repository)).toThrow(
+        "factory-issued media upload composition",
+      );
+    } finally {
+      Object.defineProperty(
+        SQLiteAttemptRepository.prototype,
+        "prepareMediaUpload",
+        {
+          configurable: true,
+          value: prototypePrepare,
+        },
+      );
+    }
+
+    const ownSchedule = fixture.retention.schedule;
+    Object.defineProperty(fixture.retention, "schedule", {
+      configurable: true,
+      value: ownSchedule,
+    });
+    expect(() => issue(fixture.repository)).toThrow(
+      "factory-issued media upload composition",
+    );
+    Reflect.deleteProperty(fixture.retention, "schedule");
+
+    const prototypeSchedule = SQLiteRetentionRepository.prototype.schedule;
+    try {
+      Object.defineProperty(SQLiteRetentionRepository.prototype, "schedule", {
+        configurable: true,
+        value: () => {
+          throw new Error("mutated prototype");
+        },
+      });
+      expect(() => issue(fixture.repository)).toThrow(
+        "factory-issued media upload composition",
+      );
+    } finally {
+      Object.defineProperty(SQLiteRetentionRepository.prototype, "schedule", {
+        configurable: true,
+        value: prototypeSchedule,
+      });
+    }
+
+    await fixture.close();
+  });
+
+  it("rejects an issued capability when its C4 host is changed before preflight", async () => {
+    const fixture = await makeMediaApi();
+    const attempt = await fixture.repository.createAttempt({
+      id: "abababab-abab-4bab-8bab-ababababababab",
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const prepare = fixture.repository.prepareMediaUpload;
+    Object.defineProperty(fixture.repository, "prepareMediaUpload", {
+      configurable: true,
+      value: prepare,
+    });
+    try {
+      await expect(
+        fixture.mediaUpload.preflight({
+          attemptId: attempt.id,
+          athleteId: ATHLETE_A,
+        }),
+      ).rejects.toThrow("factory-issued media upload composition");
+      expect(
+        await fixture.repository.getAttempt({
+          attemptId: attempt.id,
+          athleteId: ATHLETE_A,
+        }),
+      ).toMatchObject({ status: "awaiting-upload", media: null });
+    } finally {
+      Reflect.deleteProperty(fixture.repository, "prepareMediaUpload");
+    }
+    await fixture.close();
+  });
+
+  it("rejects structural or cross-C5 upload capabilities before runtime startup", async () => {
+    const fixture = await makeMediaApi();
+    const unissued: MediaUploadService = Object.freeze({
+      preflight: async () => {
+        throw new Error("unissued");
+      },
+      accept: async () => {
+        throw new Error("unissued");
+      },
+    });
+    expect(() =>
+      createAttemptApi({
+        repository: fixture.repository,
+        queue: fixture.queue,
+        cleaner: { cleanup: async () => undefined },
+        mediaUpload: unissued,
+        scheduler: { everyHour: () => 1, cancel: () => undefined },
+      }),
+    ).toThrow("factory-issued media upload composition");
+    const foreignRoot = await mkdtemp(join(tmpdir(), "revelai-foreign-c5-"));
+    directories.push(foreignRoot);
+    const foreignC5 = createC5PipelineTestSupport({ root: foreignRoot });
+    expect(() =>
+      createProductionMediaUploadService({
+        repository: fixture.repository,
+        retention: fixture.retention,
+        queue: fixture.queue,
+        mediaPipeline: foreignC5.pipeline,
+      }),
+    ).toThrow("does not match C4 authority");
+    const structuralPipeline = Object.freeze({
+      handoffVerifier: () => fixture.c5.handoffVerifier,
+      accept: async () => {
+        throw new Error("structural C5 pipeline");
+      },
+      acceptMultipart: async () => {
+        throw new Error("structural C5 pipeline");
+      },
+    });
+    expect(() =>
+      createProductionMediaUploadService({
+        repository: fixture.repository,
+        retention: fixture.retention,
+        queue: fixture.queue,
+        mediaPipeline: structuralPipeline,
+      }),
+    ).toThrow("factory-issued media upload composition");
+    expect(() =>
+      createProductionMediaUploadService({
+        repository: fixture.repository,
+        retention: fixture.retention,
+        queue: fixture.queue,
+        mediaPipeline: new Proxy(fixture.c5.pipeline, {}),
+      }),
+    ).toThrow("factory-issued media upload composition");
+    expect(() =>
+      createProductionMediaUploadService({
+        repository: fixture.repository,
+        retention: fixture.retention,
+        queue: fixture.queue,
+        mediaPipeline: Object.assign({}, fixture.c5.pipeline),
+      }),
+    ).toThrow("factory-issued media upload composition");
+    await fixture.close();
+  });
+
+  it("rejects direct structural plugin registration outside the issued host", async () => {
+    const fixture = await makeMediaApi();
+    const app = Fastify({ logger: false });
+    const structuralService: MediaUploadService = Object.freeze({
+      preflight: async () => {
+        throw new Error("structural upload service");
+      },
+      accept: async () => {
+        throw new Error("structural upload service");
+      },
+    });
+    expect(() =>
+      registerAttemptMediaUploadPlugin(app, {
+        mediaUpload: structuralService,
+        repository: fixture.repository,
+        queue: fixture.queue,
+        maxUploadBytes: 1,
+        maxMultipartBytes: 1,
+        requiredAthleteId: () => ATHLETE_A,
+        attemptId: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        sendAccepted: () => undefined,
+      }),
+    ).toThrow("factory-issued media upload composition");
+    await app.close();
+    await fixture.close();
+  });
+
   it("accepts one raw multipart media upload through the real C5 pipeline", async () => {
     const fixture = await makeMediaApi();
+    expect(Object.isFrozen(fixture.mediaUpload)).toBe(true);
     const attempt = await fixture.repository.createAttempt({
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       athleteId: ATHLETE_A,
@@ -114,10 +397,10 @@ describe("attempt HTTP foundation", () => {
       bytes: validMp4Bytes(),
     });
     let bodyReads = 0;
-    fixture.queue.isAvailable = async () => {
+    fixture.setQueueAvailability(() => {
       expect(bodyReads).toBe(0);
       return false;
-    };
+    });
     const reply = await fixture.app.inject({
       method: "POST",
       url: `/v1/attempts/${attempt.id}/media`,
@@ -207,6 +490,58 @@ describe("attempt HTTP foundation", () => {
       expect(reply.statusCode).toBe(400);
       expect(RouteErrorSchema.parse(reply.json()).code).toBe("invalid_request");
     }
+    await fixture.close();
+  });
+
+  it("keeps multipart parser and drain state inside the media route child scope", async () => {
+    const fixture = await makeMediaApi();
+    const body = rawMultipartBody({
+      name: "media",
+      filename: "attempt.mp4",
+      contentType: "video/mp4",
+      bytes: validMp4Bytes(),
+    });
+    let createRouteRead = false;
+    const createReply = await injectWithin(fixture.app, {
+      method: "POST",
+      url: "/v1/attempts",
+      headers: {
+        ...athleteHeader(ATHLETE_A),
+        "content-type": "multipart/form-data; boundary=revelai-test-boundary",
+      },
+      payload: Readable.from(
+        (async function* () {
+          yield body;
+          createRouteRead = true;
+        })(),
+      ),
+    });
+    expect(createReply.statusCode).toBe(400);
+    expect(RouteErrorSchema.parse(createReply.json()).code).toBe(
+      "invalid_request",
+    );
+    expect(createRouteRead).toBe(false);
+
+    let missingRouteRead = false;
+    const missingReply = await injectWithin(fixture.app, {
+      method: "POST",
+      url: "/v1/not-an-upload-route",
+      headers: {
+        ...athleteHeader(ATHLETE_A),
+        "content-type": "multipart/form-data; boundary=revelai-test-boundary",
+      },
+      payload: Readable.from(
+        (async function* () {
+          yield body;
+          missingRouteRead = true;
+        })(),
+      ),
+    });
+    expect(missingReply.statusCode).toBe(400);
+    expect(RouteErrorSchema.parse(missingReply.json()).code).toBe(
+      "invalid_request",
+    );
+    expect(missingRouteRead).toBe(false);
     await fixture.close();
   });
 
@@ -306,12 +641,6 @@ describe("attempt HTTP foundation", () => {
     const fixture = await makeMediaApi();
     expect(Reflect.get(fixture.repository, "raw")).toBeUndefined();
     expect(Reflect.get(fixture.repository, "database")).toBeUndefined();
-    const compositionToken = resolveFactoryIssuedSQLiteAttemptRepositoryToken(
-      fixture.repository,
-    );
-    expect(compositionToken).toBeDefined();
-    expect(Reflect.get(compositionToken!, "raw")).toBeUndefined();
-    expect(Reflect.get(compositionToken!, "database")).toBeUndefined();
     const attempt = await fixture.repository.createAttempt({
       id: "dededede-dede-4ede-8ede-dededededede",
       athleteId: ATHLETE_A,
@@ -329,18 +658,13 @@ describe("attempt HTTP foundation", () => {
     });
 
     expect(() =>
-      createAttemptApi({
+      createProductionMediaUploadService({
         repository: fixture.repository,
         queue: fixture.queue,
-        cleaner: createLocalC8AcceptedMediaCleaner({
-          repository: fixture.repository,
-          storage: fixture.c5.storage,
-        }),
-        uploadRetention: foreignRetention,
+        retention: foreignRetention,
         mediaPipeline: fixture.c5.pipeline,
-        scheduler: { everyHour: () => 1, cancel: () => undefined },
       }),
-    ).toThrow("matching factory-issued SQLite repositories");
+    ).toThrow("factory-issued media upload composition");
     expect(
       foreignDatabase.raw
         .prepare("SELECT COUNT(*) AS count FROM media_retention_records")
@@ -443,22 +767,49 @@ describe("attempt HTTP foundation", () => {
     await fixture.close();
   });
 
-  it("maps every C5 failure code to its shared route-error fixture before attachment", async () => {
-    const codes: readonly MediaFailureCode[] = [
-      "media_container_not_allowed",
-      "media_probe_failed",
-      "media_requirements_not_met",
-      "media_empty",
-      "media_too_large",
-      "multipart_body_too_large",
-      "media_part_missing",
-      "media_part_count_invalid",
-      "multipart_extra_part_forbidden",
-      "media_filename_mime_mismatch",
+  it("maps real C5 storage failures to their shared route-error fixtures before attachment", async () => {
+    const cases: readonly Readonly<{
+      code:
+        | "media_container_not_allowed"
+        | "media_probe_failed"
+        | "media_requirements_not_met";
+      bytes: Uint8Array;
+      prober?: LocalMediaProber;
+    }>[] = [
+      {
+        code: "media_container_not_allowed",
+        bytes: Uint8Array.from([1, 2, 3, 4]),
+      },
+      {
+        code: "media_probe_failed",
+        bytes: validMp4Bytes(),
+        prober: Object.freeze({
+          probe: async () => {
+            throw new MediaPipelineError("media_probe_failed");
+          },
+        }),
+      },
+      {
+        code: "media_requirements_not_met",
+        bytes: validMp4Bytes(),
+        prober: Object.freeze({
+          probe: async () =>
+            Object.freeze({
+              container: "mp4" as const,
+              durationSeconds: 1,
+              displayWidth: 1280,
+              displayHeight: 720,
+              nominalFps: 30,
+              codec: "h264",
+              sourceRotationDegrees: 0 as const,
+            }),
+        }),
+      },
     ];
-    for (const [index, code] of codes.entries()) {
+    for (const [index, entry] of cases.entries()) {
+      const { code } = entry;
       const fixture = await makeMediaApi({
-        mediaPipeline: throwingMediaPipeline(code),
+        ...(entry.prober ? { prober: entry.prober } : {}),
       });
       const attempt = await fixture.repository.createAttempt({
         id: `beefbeef-beef-4eef-8eef-${String(index + 1).padStart(12, "0")}`,
@@ -476,7 +827,7 @@ describe("attempt HTTP foundation", () => {
           name: "media",
           filename: "attempt.mp4",
           contentType: "video/mp4",
-          bytes: validMp4Bytes(),
+          bytes: entry.bytes,
         }),
       });
       const expected = routeErrorFixtures.find(
@@ -663,9 +1014,9 @@ describe("attempt HTTP foundation", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    fixture.queue.enqueue = async () => {
+    fixture.setQueueEnqueue(() => {
       throw new Error("queue down");
-    };
+    });
     const reply = await fixture.app.inject({
       method: "POST",
       url: `/v1/attempts/${attempt.id}/media`,
@@ -1047,9 +1398,6 @@ describe("attempt HTTP foundation", () => {
           enqueue: async () => undefined,
         },
         cleaner: { cleanup: async () => undefined },
-        uploadRetention: new SQLiteRetentionRepository({
-          database: fixture.database,
-        }),
         scheduler: secondScheduler,
         recoveryBatchLimit: 10,
       }),
@@ -1063,9 +1411,6 @@ describe("attempt HTTP foundation", () => {
       repository: fixture.repository,
       queue: { isAvailable: async () => true, enqueue: async () => undefined },
       cleaner: { cleanup: async () => undefined },
-      uploadRetention: new SQLiteRetentionRepository({
-        database: fixture.database,
-      }),
       scheduler: secondScheduler,
       recoveryBatchLimit: 10,
     });
@@ -1294,7 +1639,6 @@ async function makeApi(
     repository,
     queue: { isAvailable: async () => true, enqueue: async () => undefined },
     cleaner: { cleanup: async () => undefined },
-    uploadRetention: new SQLiteRetentionRepository({ database }),
     ...(scheduler ? { scheduler } : {}),
     recoveryBatchLimit: 10,
     clock,
@@ -1326,24 +1670,36 @@ async function makeApi(
 async function makeMediaApi(
   input?: Readonly<{
     maxUploadBytes?: number;
-    mediaPipeline?: C5MediaPipeline;
+    prober?: LocalMediaProber;
   }>,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "revelai-attempt-media-api-"));
   directories.push(directory);
   const database = openSqliteDatabase(join(directory, "api.sqlite"));
-  const c5 = createC5PipelineTestSupport({ root: join(directory, "c5") });
+  const c5 = createC5PipelineTestSupport({
+    root: join(directory, "c5"),
+    ...(input?.prober ? { prober: input.prober } : {}),
+  });
   const repository = new SQLiteAttemptRepository({
     database,
     clock: { now: () => "2030-01-15T12:00:00.000Z" },
     ids: { next: () => "ffffffff-ffff-4fff-8fff-ffffffffffff" },
     handoffVerifier: c5.handoffVerifier,
   });
+  let availability = (): boolean => true;
+  let enqueue = async (): Promise<void> => undefined;
   const queue = {
-    isAvailable: async () => true,
-    enqueue: async () => undefined,
+    isAvailable: async () => availability(),
+    enqueue: async () => enqueue(),
     subscribe: () => () => undefined,
   };
+  const retention = new SQLiteRetentionRepository({ database });
+  const mediaUpload = createProductionMediaUploadService({
+    repository,
+    retention,
+    queue,
+    mediaPipeline: c5.pipeline,
+  });
   const app = createAttemptApi({
     repository,
     queue,
@@ -1351,8 +1707,7 @@ async function makeMediaApi(
       repository,
       storage: c5.storage,
     }),
-    uploadRetention: new SQLiteRetentionRepository({ database }),
-    mediaPipeline: input?.mediaPipeline ?? c5.pipeline,
+    mediaUpload,
     ...(input?.maxUploadBytes === undefined
       ? {}
       : { maxUploadBytes: input.maxUploadBytes }),
@@ -1367,26 +1722,19 @@ async function makeMediaApi(
     repository,
     queue,
     c5,
+    retention,
+    mediaUpload,
+    setQueueAvailability(value: () => boolean) {
+      availability = value;
+    },
+    setQueueEnqueue(value: () => Promise<void>) {
+      enqueue = value;
+    },
     async close() {
       await app.close();
       database.close();
     },
   };
-}
-
-const nonIssuingVerifier = Object.freeze({
-  accepts: (_value: unknown): _value is AcceptedMediaHandoff => false,
-});
-
-function throwingMediaPipeline(code: MediaFailureCode): C5MediaPipeline {
-  const reject = async (): Promise<never> => {
-    throw new MediaPipelineError(code);
-  };
-  return Object.freeze({
-    handoffVerifier: () => nonIssuingVerifier,
-    accept: reject,
-    acceptMultipart: reject,
-  });
 }
 
 function rawMultipartBody(
