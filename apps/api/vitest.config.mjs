@@ -1,10 +1,12 @@
 import { defineConfig } from "vitest/config";
 
-const isCi = process.env.CI !== undefined;
+// Only case-insensitive, surrounding-whitespace-normalized true/1 mean hosted CI.
+const ciSignal = process.env.CI?.trim().toLowerCase();
+const isHostedCi = ciSignal === "true" || ciSignal === "1";
 
 export default defineConfig({
   test: {
     minWorkers: 1,
-    maxWorkers: isCi ? 1 : 4,
+    maxWorkers: isHostedCi ? 1 : 4,
   },
 });

@@ -12,7 +12,7 @@
     "format:check": "prettier --check .",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
-    "test": "turbo run test --concurrency=1",
+    "test": "node apps/api/scripts/assert-vitest-worker-config.mjs && turbo run test --concurrency=1",
     "build": "turbo run build",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "ci:clean-api-executables": "node apps/api/scripts/clean-api-demo-regression.mjs",

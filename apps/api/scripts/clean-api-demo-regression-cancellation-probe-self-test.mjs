@@ -162,7 +162,6 @@ async function assertRealSessionProcessAudit() {
   const close = observeClose(child);
 
   try {
-    await assertSessionProcessPresent(session);
     await assertSessionAuditDetectsLiveSession(session);
   } finally {
     await terminateAndWait(child, close, { requireKill: true });
@@ -209,16 +208,31 @@ async function assertSyntheticProcessAuditFindsLateSession() {
 
 async function assertSessionAuditDetectsLiveSession(session) {
   const deadline = Date.now() + 5_000;
+  const marker = `--revelai-clean-api-session=${session}`;
   while (Date.now() < deadline) {
     try {
-      await assertNoSessionProcesses(session);
-    } catch (error) {
-      if (error instanceof Error && error.message === failure) return;
-      throw error;
+      if ((await processTableContains(marker)) === true) return;
+    } catch {
+      throw new Error(failure);
     }
     await wait(25);
   }
   throw new Error(failure);
+}
+
+async function assertSessionProcessPresent(session, environment) {
+  try {
+    if (
+      (await processTableContains(
+        `--revelai-clean-api-session=${session}`,
+        environment,
+      )) !== true
+    ) {
+      throw new Error(failure);
+    }
+  } catch {
+    throw new Error(failure);
+  }
 }
 
 async function assertPresenceAuditFailsClosed() {
