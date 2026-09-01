@@ -17,8 +17,16 @@ pnpm --filter @revelai/api run operator:receipt-smoke
 
 Start the executable local-only profile in one terminal. It parses the actual
 environment before binding, defaults to loopback `127.0.0.1:3000`, composes
-SQLite/local storage/an in-process queue, and prints only redacted startup
-messages. It needs no Roboflow key, receipt, or network connection.
+SQLite/local storage/an in-process queue, both Free and Verified workers, and
+the empty local competitive-policy lookup. It prints only redacted startup
+messages. Demo mode needs no Roboflow key, receipt, or network connection.
+
+Normal `demo:start` uses real local FFprobe and FFmpeg. Install both before
+starting; FFprobe must be executable, and FFmpeg must provide the `showinfo`
+and `metadata` filters plus the MJPEG encoder used by local extraction. The
+executable checks those capabilities before binding and, when they are absent,
+exits with one operator-safe message without printing command output, paths,
+or partial-resource details.
 
 ```sh
 pnpm --filter @revelai/api run demo:start
@@ -26,8 +34,8 @@ pnpm --filter @revelai/api run demo:start
 
 In a second terminal, run this complete verified demo path. It uses only a
 locally generated athlete identifier; replace `./demo.mp4` with a local,
-eligible MP4/MOV/WebM. The local profile validates upload/retention and leaves
-the attempt pending because it does not claim a real provider result.
+eligible MP4/MOV/WebM. The local demo provider completes a deterministic,
+terminal **demo / not ranked** result; it is not live inference or codec proof.
 
 ```sh
 api_base_url=http://127.0.0.1:3000
@@ -51,10 +59,21 @@ attempt_id=$(node -e 'console.log(JSON.parse(process.argv[1]).id)' "$attempt_jso
 curl --fail-with-body -X POST -H "X-RevelAI-Athlete-Id: $athlete_id" \
   -F 'media=@./demo.mp4;type=video/mp4' \
   "$api_base_url/v1/attempts/$attempt_id/media"
-curl --fail-with-body -H "X-RevelAI-Athlete-Id: $athlete_id" \
-  "$api_base_url/v1/attempts/$attempt_id/result"
+while :; do
+  result_json=$(curl --fail-with-body -H "X-RevelAI-Athlete-Id: $athlete_id" \
+    "$api_base_url/v1/attempts/$attempt_id/result")
+  result_state=$(node -e 'console.log(JSON.parse(process.argv[1]).state)' "$result_json")
+  [ "$result_state" != pending ] && break
+  sleep 1
+done
+node -e 'const result = JSON.parse(process.argv[1]); if (result.state !== "valid" || result.result?.kind !== "verified-result" || result.result?.competitiveStatus !== "demo" || result.result?.competitiveEligible !== false) process.exit(1); console.log("terminal demo / not ranked result")' "$result_json"
 curl --fail-with-body "$api_base_url/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1"
 ```
+
+`demo:smoke` runs the same Fastify/C4–C7/worker composition through that HTTP
+trace, including the `202` upload and terminal result. To keep CI portable, its
+`--check` mode narrowly injects deterministic FFprobe/FFmpeg-edge fixtures;
+it does **not** claim that the host has proved a live codec path.
 
 `GET /health` answers process liveness only. `GET /ready` checks SQLite
 `SELECT 1`, a private restrictive write/delete sentinel, and the queue under
