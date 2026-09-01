@@ -9,16 +9,20 @@
     "lint": "eslint src",
     "typecheck": "tsc --project tsconfig.json",
     "test": "vitest run",
+    "openapi:generate": "pnpm run build && node scripts/generate-openapi.mjs",
+    "openapi:check": "pnpm run build && node scripts/generate-openapi.mjs --check",
     "benchmark:roboflow": "pnpm run build && node scripts/benchmark-roboflow-wall-pass.mjs"
   },
   "dependencies": {
     "@fastify/busboy": "3.2.2",
+    "@revelai/config": "workspace:*",
     "@revelai/contracts": "workspace:*",
     "@revelai/domain": "workspace:*",
     "@revelai/vision": "workspace:*",
     "better-sqlite3": "13.0.3",
     "fastify": "5.12.1",
-    "jpeg-js": "0.4.4"
+    "jpeg-js": "0.4.4",
+    "zod": "4.1.12"
   },
   "devDependencies": {
     "@types/better-sqlite3": "9.6.0",

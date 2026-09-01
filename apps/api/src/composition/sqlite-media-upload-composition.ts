@@ -14,6 +14,7 @@ import {
   resolveFactoryIssuedAnalysisQueuePort,
 } from "../queue/in-memory-analysis-queue.js";
 import {
+  resolveProductionSQLiteAttemptReadinessPort,
   resolveProductionSQLiteAttemptUploadPort,
   resolveProductionSQLiteAttemptProcessingPort,
   type SQLiteAttemptRepository,
@@ -31,7 +32,12 @@ import { createInternallyComposedAttemptApi } from "../http/attempt-api.js";
 type ProductionAttemptApiInput = Readonly<
   Omit<
     Parameters<typeof createInternallyComposedAttemptApi>[0],
-    "repository" | "queue" | "leaderboard" | "tombstone" | "retentionRuntime"
+    | "repository"
+    | "queue"
+    | "leaderboard"
+    | "tombstone"
+    | "retentionRuntime"
+    | "readiness"
   > & {
     repository: SQLiteAttemptRepository;
     retention: SQLiteRetentionRepository;
@@ -42,7 +48,12 @@ type ProductionAttemptApiInput = Readonly<
 type ResolvedProductionAttemptApiInput = Readonly<
   Omit<
     Parameters<typeof createInternallyComposedAttemptApi>[0],
-    "repository" | "queue" | "leaderboard" | "tombstone" | "retentionRuntime"
+    | "repository"
+    | "queue"
+    | "leaderboard"
+    | "tombstone"
+    | "retentionRuntime"
+    | "readiness"
   > & {
     repository: SQLiteAttemptRepository;
     retention: SQLiteRetentionRepository;
@@ -252,8 +263,14 @@ export function createProductionAttemptApiFromResolvedQueue(
   const processing = resolveProductionSQLiteAttemptProcessingPort(
     snapshot.repository,
   );
+  const readiness = resolveProductionSQLiteAttemptReadinessPort(
+    snapshot.repository,
+  );
+  const c5 = resolveFactoryIssuedC5MediaPipelinePort(snapshot.mediaPipeline);
   if (!processing || !processing.isCurrent())
     throw new Error("C8 requires a factory-issued leaderboard composition.");
+  if (!readiness || !c5)
+    throw new Error("C9 requires a factory-issued readiness composition.");
   const mediaUpload = createFactoryIssuedMediaUploadService({
     repository: snapshot.repository,
     retention: snapshot.retention,
@@ -292,6 +309,11 @@ export function createProductionAttemptApiFromResolvedQueue(
       nonce: snapshot.nonce,
       log: snapshot.log,
       retentionRuntime,
+      readiness: Object.freeze({
+        database: readiness.probeDatabase,
+        storage: c5.probeStorage,
+        queue: snapshot.queue.isAvailable,
+      }),
       leaderboard: Object.freeze({
         listLiveLeaderboard: (
           input: Parameters<typeof listLiveLeaderboard>[0],

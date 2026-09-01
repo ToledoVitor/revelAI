@@ -27,6 +27,14 @@ export interface OpaqueMediaIdGenerator {
 }
 
 const localMediaStorageCapabilities = new WeakSet<object>();
+const localMediaStorageReadinessProbes = new WeakMap<
+  object,
+  () => Promise<void>
+>();
+
+export type LocalMediaStorageReadinessProbe = Readonly<{
+  probe(): Promise<void>;
+}>;
 
 export type LocalMediaStorage = Readonly<{
   initialize(): Promise<void>;
@@ -66,6 +74,15 @@ export function isLocalMediaStorageCapability(
     value !== null &&
     localMediaStorageCapabilities.has(value)
   );
+}
+
+/** Resolves the storage-owned sentinel check without exposing a filesystem path. */
+export function resolveLocalMediaStorageReadinessProbe(
+  value: unknown,
+): LocalMediaStorageReadinessProbe | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const probe = localMediaStorageReadinessProbes.get(value);
+  return probe ? Object.freeze({ probe }) : undefined;
 }
 
 /** Process-backed probing stays injected so tests never require host FFprobe. */
@@ -177,6 +194,10 @@ export function createLocalMediaStorage(
       implementation.discoverReservedOrphans(limit),
   });
   localMediaStorageCapabilities.add(capability);
+  localMediaStorageReadinessProbes.set(
+    capability,
+    implementation.probeReadiness.bind(implementation),
+  );
   return capability;
 }
 
@@ -211,6 +232,37 @@ class LocalMediaStorageImplementation {
     } catch {
       throw new MediaPipelineError("media_probe_failed");
     }
+  }
+
+  public async probeReadiness(): Promise<void> {
+    await this.initialize();
+    const sentinel = this.safePath(this.temporary, randomUUID());
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let failure: unknown;
+    try {
+      handle = await open(
+        sentinel,
+        constants.O_WRONLY |
+          constants.O_CREAT |
+          constants.O_EXCL |
+          (constants.O_NOFOLLOW ?? 0),
+        0o600,
+      );
+      await handle.chmod(0o600);
+    } catch (error) {
+      failure = error;
+    } finally {
+      await handle?.close().catch((error: unknown) => {
+        if (failure === undefined) failure = error;
+      });
+    }
+
+    try {
+      await rm(sentinel, { force: false });
+    } catch (error) {
+      if (failure === undefined) failure = error;
+    }
+    if (failure !== undefined) throw failure;
   }
 
   public async createUploadSession(

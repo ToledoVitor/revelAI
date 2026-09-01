@@ -37,6 +37,9 @@ importers:
       "@fastify/busboy":
         specifier: 3.2.2
         version: 3.2.2
+      "@revelai/config":
+        specifier: workspace:*
+        version: link:../../packages/config
       "@revelai/contracts":
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -55,6 +58,9 @@ importers:
       jpeg-js:
         specifier: 0.4.4
         version: 0.4.4
+      zod:
+        specifier: 4.1.12
+        version: 4.1.12
     devDependencies:
       "@types/better-sqlite3":
         specifier: 9.6.0

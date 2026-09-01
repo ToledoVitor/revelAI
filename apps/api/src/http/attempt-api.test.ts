@@ -73,6 +73,24 @@ afterEach(async () => {
 });
 
 describe("attempt HTTP foundation", () => {
+  it("exposes liveness and offline demo readiness from the official composition", async () => {
+    const fixture = await makeMediaApi();
+    try {
+      const health = await fixture.app.inject({
+        method: "GET",
+        url: "/health",
+      });
+      const ready = await fixture.app.inject({ method: "GET", url: "/ready" });
+
+      expect(health.statusCode).toBe(200);
+      expect(health.json()).toEqual({ status: "ok" });
+      expect(ready.statusCode).toBe(200);
+      expect(ready.json()).toEqual({ status: "ready" });
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it("starts the official recovery and retention owners atomically when scheduler registration fails", async () => {
     const fixture = await makeMediaApi();
     let healthyApp: FastifyInstance | undefined;

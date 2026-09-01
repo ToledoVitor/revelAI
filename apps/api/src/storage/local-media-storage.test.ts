@@ -18,7 +18,10 @@ import {
   type RetentionRecord,
 } from "../media/retention-scavenger.js";
 import { LocalRetentionObjectStore } from "./local-retention-object-store.js";
-import { createLocalMediaStorage } from "./local-media-storage.js";
+import {
+  createLocalMediaStorage,
+  resolveLocalMediaStorageReadinessProbe,
+} from "./local-media-storage.js";
 
 const MEDIA_ID = "11111111-1111-4111-8111-111111111111";
 const validMp4 = Buffer.from([
@@ -52,6 +55,22 @@ describe("LocalMediaStorage", () => {
         .splice(0)
         .map((directory) => rm(directory, { recursive: true, force: true })),
     );
+  });
+
+  it("creates and removes an opaque restrictive readiness sentinel", async () => {
+    const root = await temporaryRoot(directories);
+    const storage = createLocalMediaStorage({
+      root,
+      ids: { next: () => MEDIA_ID },
+      prober: { probe: async () => probe },
+    });
+    const readiness = resolveLocalMediaStorageReadinessProbe(storage);
+
+    if (!readiness)
+      throw new Error("Expected a factory-issued readiness probe");
+    await expect(readiness.probe()).resolves.toBeUndefined();
+    expect(await readdir(join(root, "temporary"))).toEqual([]);
+    expect((await lstat(join(root, "temporary"))).mode & 0o777).toBe(0o700);
   });
 
   it("writes only an opaque 0600 final after streaming, sniffing, and probing", async () => {

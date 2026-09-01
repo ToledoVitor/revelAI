@@ -44,6 +44,9 @@ The default configuration and CI are demo-only: they do not require a Roboflow
 key, video service, or any real-provider network access. Verified demo output
 is never competitive and must not be presented as ranked output.
 
+The full local-demo, readiness, Workflow, benchmark-receipt, retention, and
+exposure guide is [docs/operators/local-demo.md](docs/operators/local-demo.md).
+
 ## Workspace layout
 
 ```text

@@ -22,6 +22,7 @@ import { originalOrFrameDeleteAt } from "./retention-deadlines.js";
 import { temporaryDeleteAt } from "./retention-deadlines.js";
 import {
   isLocalMediaStorageCapability,
+  resolveLocalMediaStorageReadinessProbe,
   type LocalMediaStorage,
   type LocalMediaUploadSession,
   type StoredLocalMedia,
@@ -94,6 +95,7 @@ type FactoryIssuedC5MediaPipelinePort = Readonly<{
    * storage method.
    */
   deleteRetentionRecord(record: RetentionRecord): Promise<void>;
+  probeStorage(): Promise<void>;
 }>;
 const factoryIssuedC5MediaPipelinePorts = new WeakMap<
   object,
@@ -198,6 +200,11 @@ class MediaPipeline implements C5MediaPipeline {
     const deleteOriginal = this.storage.delete;
     const deleteFrame = this.storage.deleteFrame;
     const deleteTemporary = this.storage.deleteTemporary;
+    const storageReadiness = resolveLocalMediaStorageReadinessProbe(
+      this.storage,
+    );
+    if (!storageReadiness)
+      throw new Error("C5 media pipeline requires a storage readiness probe.");
     const reconstruct = (
       input: Readonly<{
         context: unknown;
@@ -230,6 +237,7 @@ class MediaPipeline implements C5MediaPipeline {
           // by the retention repository after this intentionally empty C5
           // physical-delete step.
         },
+        probeStorage: () => storageReadiness.probe(),
       }),
     );
     return publicApi;

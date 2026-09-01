@@ -122,6 +122,9 @@ type ProductionSQLiteAttemptProcessingPort = Readonly<{
     | "tombstoneAttempt"
   >;
 }>;
+type ProductionSQLiteAttemptReadinessPort = Readonly<{
+  probeDatabase(): Promise<void>;
+}>;
 
 const productionSQLiteAttemptUploadPorts = new WeakMap<
   object,
@@ -130,6 +133,10 @@ const productionSQLiteAttemptUploadPorts = new WeakMap<
 const productionSQLiteAttemptProcessingPorts = new WeakMap<
   object,
   ProductionSQLiteAttemptProcessingPort
+>();
+const productionSQLiteAttemptReadinessPorts = new WeakMap<
+  object,
+  ProductionSQLiteAttemptReadinessPort
 >();
 
 /**
@@ -158,6 +165,14 @@ export function resolveProductionSQLiteAttemptProcessingPort(
 ): ProductionSQLiteAttemptProcessingPort | undefined {
   if (typeof repository !== "object" || repository === null) return undefined;
   return productionSQLiteAttemptProcessingPorts.get(repository);
+}
+
+/** Resolves the sealed SQLite liveness query for the exact C4 host. */
+export function resolveProductionSQLiteAttemptReadinessPort(
+  repository: unknown,
+): ProductionSQLiteAttemptReadinessPort | undefined {
+  if (typeof repository !== "object" || repository === null) return undefined;
+  return productionSQLiteAttemptReadinessPorts.get(repository);
 }
 
 const MAX_RECOVERY_ATTEMPTS = Number.MAX_SAFE_INTEGER;
@@ -377,6 +392,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         token,
         input.handoffVerifier,
       );
+      registerProductionSQLiteAttemptReadinessPort(this, this.#raw);
     }
     this.#compositionToken = token;
   }
@@ -1974,6 +1990,25 @@ function registerProductionSQLiteAttemptProcessingPort(
           input: Parameters<AttemptRepository["tombstoneAttempt"]>[0],
         ) => exactTombstoneAttempt.call(repository, input),
       }),
+    }),
+  );
+}
+
+function registerProductionSQLiteAttemptReadinessPort(
+  repository: SQLiteAttemptRepository,
+  raw: Readonly<{
+    prepare(sql: string): Readonly<{ get(): unknown }>;
+  }>,
+): void {
+  if (!isCurrentProductionSQLiteAttemptRepository(repository)) return;
+  productionSQLiteAttemptReadinessPorts.set(
+    repository,
+    Object.freeze({
+      probeDatabase: async () => {
+        if (!isCurrentProductionSQLiteAttemptRepository(repository))
+          throw new Error("C9 readiness composition is no longer current.");
+        raw.prepare("SELECT 1").get();
+      },
     }),
   );
 }

@@ -56,6 +56,10 @@ import { createAttemptReadService } from "../services/attempt-read-service.js";
 import { MultipartParserError } from "./streamed-multipart.js";
 import { type MediaUploadService } from "../services/media-upload-service.js";
 import { registerAttemptMediaUploadPlugin } from "./attempt-media-upload-plugin.js";
+import {
+  registerOperabilityRoutes,
+  type ReadinessProbes,
+} from "./operability-routes.js";
 
 type AttemptHttpRepository = AttemptRepository &
   MediaAttachmentRecoveryRepository &
@@ -77,6 +81,7 @@ type AttemptApiInput = Readonly<{
   nonce?: () => string;
   log?: MediaAttachmentRecoveryLog;
   retentionLog?: RetentionLog;
+  readiness?: ReadinessProbes;
   /** Outer production composition supplies the sealed C4/C5 retention join. */
   retentionRuntime?: RetentionRuntimeFactory;
 }>;
@@ -87,6 +92,15 @@ const LEADERBOARD_NAMESPACE_PATH = "/v1/leaderboards";
 const LIVE_LEADERBOARD_PATH = "/v1/leaderboards/wall-pass";
 const silentRecoveryLog: MediaAttachmentRecoveryLog = Object.freeze({
   event: () => undefined,
+});
+const unavailableReadiness: ReadinessProbes = Object.freeze({
+  database: async () => {
+    throw new Error("database readiness is not composed");
+  },
+  storage: async () => {
+    throw new Error("storage readiness is not composed");
+  },
+  queue: async () => false,
 });
 const badUrlBody = JSON.stringify(
   RouteErrorSchema.parse({
@@ -170,6 +184,9 @@ function createAttemptApiInternal(
   let retention: ReturnType<RetentionRuntimeFactory["prepare"]> | undefined;
   let runtimeSupervisor: C8RuntimeSupervisorHandle | undefined;
   try {
+    registerOperabilityRoutes(app, {
+      readiness: input.readiness ?? unavailableReadiness,
+    });
     app.addHook("onRequest", async (request) => {
       if (isPublicRouteRequest(request)) return;
       const athleteId = parseAthleteIdentity(request);
@@ -441,6 +458,8 @@ function sendRouteError(
 
 function isPublicRouteRequest(request: FastifyRequest): boolean {
   return (
+    request.routeOptions.url === "/health" ||
+    request.routeOptions.url === "/ready" ||
     request.routeOptions.url === "/v1/challenges" ||
     request.routeOptions.url === LIVE_LEADERBOARD_PATH ||
     isPublicLeaderboardPathCandidate(publicRoutePath(request))

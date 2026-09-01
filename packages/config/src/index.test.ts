@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseApiEnv } from "./index.js";
 
@@ -9,12 +10,32 @@ describe("parseApiEnv", () => {
       port: 3000,
       publicBaseUrl: "http://127.0.0.1:3000",
       paths: {
-        dataDir: ".revelai/data",
-        mediaDir: ".revelai/media",
-        databasePath: ".revelai/data/revelai.sqlite",
+        dataDir: resolve(".revelai/data"),
+        mediaDir: resolve(".revelai/media"),
+        databasePath: resolve(".revelai/data/revelai.sqlite"),
       },
       visionProvider: { kind: "demo" },
       startupWarnings: [],
+    });
+  });
+
+  it("rejects an unrecognized environment variable before startup can bind", () => {
+    expect(() =>
+      parseApiEnv({ REVELAI_UNEXPECTED_SETTING: "enabled" }),
+    ).toThrow("Unrecognized key");
+  });
+
+  it("normalizes local storage and database locations before composition", () => {
+    expect(
+      parseApiEnv({
+        DATA_DIR: "./var/../demo-data",
+        MEDIA_DIR: "./var/../demo-media",
+        DATABASE_PATH: "./var/../demo-data/../demo.sqlite",
+      }).paths,
+    ).toEqual({
+      dataDir: resolve("demo-data"),
+      mediaDir: resolve("demo-media"),
+      databasePath: resolve("demo.sqlite"),
     });
   });
 
@@ -24,14 +45,44 @@ describe("parseApiEnv", () => {
     );
   });
 
+  it("accepts a keyless loopback Workflow configuration only when both exact model tuples are complete", () => {
+    expect(
+      parseApiEnv({
+        ROBOFLOW_API_URL: "http://127.0.0.1:9001/",
+        ROBOFLOW_WORKSPACE_ID: "revelai",
+        ROBOFLOW_WORKFLOW_VERSION: "1.0.0",
+        ROBOFLOW_WALL_PASS_WORKFLOW_ID: "revelai-wall-pass-geometry-v1",
+        ROBOFLOW_WALL_PASS_MODEL_BUNDLE_ID: "wall-pass-bundle-v1",
+        ROBOFLOW_FREE_WORKFLOW_ID: "revelai-free-training-v1",
+        ROBOFLOW_FREE_MODEL_BUNDLE_ID: "free-training-bundle-v1",
+      }).visionProvider,
+    ).toEqual({
+      kind: "roboflow",
+      apiUrl: "http://127.0.0.1:9001",
+      workspaceId: "revelai",
+      workflowVersion: "1.0.0",
+      wallPass: {
+        workflowId: "revelai-wall-pass-geometry-v1",
+        modelBundleId: "wall-pass-bundle-v1",
+      },
+      freeTraining: {
+        workflowId: "revelai-free-training-v1",
+        modelBundleId: "free-training-bundle-v1",
+      },
+    });
+  });
+
   it("rejects an external HTTP provider URL that carries an API key", () => {
     expect(() =>
       parseApiEnv({
         ROBOFLOW_API_KEY: "test-key",
-        ROBOFLOW_BASE_URL: "http://inference.example.test",
+        ROBOFLOW_API_URL: "http://inference.example.test",
         ROBOFLOW_WORKSPACE_ID: "workspace",
-        ROBOFLOW_WORKFLOW_ID: "workflow",
-        ROBOFLOW_WORKFLOW_VERSION: "1",
+        ROBOFLOW_WORKFLOW_VERSION: "1.0.0",
+        ROBOFLOW_WALL_PASS_WORKFLOW_ID: "revelai-wall-pass-geometry-v1",
+        ROBOFLOW_WALL_PASS_MODEL_BUNDLE_ID: "wall-pass-bundle-v1",
+        ROBOFLOW_FREE_WORKFLOW_ID: "revelai-free-training-v1",
+        ROBOFLOW_FREE_MODEL_BUNDLE_ID: "free-training-bundle-v1",
       }),
     ).toThrow("HTTPS");
   });
@@ -40,10 +91,13 @@ describe("parseApiEnv", () => {
     expect(() =>
       parseApiEnv({
         ROBOFLOW_API_KEY: "test-key",
-        ROBOFLOW_BASE_URL: "http://127.attacker.test",
+        ROBOFLOW_API_URL: "http://127.attacker.test",
         ROBOFLOW_WORKSPACE_ID: "workspace",
-        ROBOFLOW_WORKFLOW_ID: "workflow",
-        ROBOFLOW_WORKFLOW_VERSION: "1",
+        ROBOFLOW_WORKFLOW_VERSION: "1.0.0",
+        ROBOFLOW_WALL_PASS_WORKFLOW_ID: "revelai-wall-pass-geometry-v1",
+        ROBOFLOW_WALL_PASS_MODEL_BUNDLE_ID: "wall-pass-bundle-v1",
+        ROBOFLOW_FREE_WORKFLOW_ID: "revelai-free-training-v1",
+        ROBOFLOW_FREE_MODEL_BUNDLE_ID: "free-training-bundle-v1",
       }),
     ).toThrow("HTTPS");
   });
