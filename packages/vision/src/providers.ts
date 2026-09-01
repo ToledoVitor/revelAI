@@ -1002,6 +1002,8 @@ function validateRoboflowConfig(
     apiUrl.hostname === "::1";
   if (
     (apiUrl.protocol !== "https:" && (!loopback || config.apiKey)) ||
+    apiUrl.username ||
+    apiUrl.password ||
     apiUrl.search ||
     apiUrl.hash
   )

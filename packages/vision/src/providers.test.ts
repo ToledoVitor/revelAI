@@ -780,6 +780,19 @@ describe("vision providers", () => {
     expect(() =>
       createRoboflowVisionProvider({
         config: {
+          apiUrl: "https://user:password@roboflow.example",
+          workspaceId: "revelai",
+          freeModelBundleId: "free-bundle-v1",
+          verifiedModelBundleId: "verified-bundle-v1",
+          freeProviderVersion: "provider-v1",
+          verifiedProviderVersion: "provider-v1",
+        },
+        fetch: async () => ({ status: 500, json: async () => ({}) }),
+      }),
+    ).toThrow("provider_configuration_invalid");
+    expect(() =>
+      createRoboflowVisionProvider({
+        config: {
           apiUrl: "http://localhost:9001",
           apiKey: "secret",
           workspaceId: "revelai",
