@@ -46,6 +46,7 @@ type CheckFrameProcessGate = Readonly<{
   wait(): Promise<void>;
   waitUntilBlocked(): Promise<void>;
   release(): void;
+  close(): void;
 }>;
 
 /**
@@ -65,12 +66,13 @@ export async function createLocalDemoRuntime(
   let app: ReturnType<typeof createProductionTrainingAttemptApi> | undefined;
   let database: SqliteDatabase | undefined;
   let queue: InMemoryAnalysisQueue | undefined;
+  let checkFrameProcessGate: CheckFrameProcessGate | undefined;
   let resourcesClosed = false;
   try {
     await mkdir(config.paths.dataDir, { recursive: true, mode: 0o700 });
     database = openSqliteDatabase(config.paths.databasePath);
     const retention = new SQLiteRetentionRepository({ database });
-    const checkFrameProcessGate = input.check
+    checkFrameProcessGate = input.check
       ? createCheckFrameProcessGate()
       : undefined;
     const adapters = input.check
@@ -116,6 +118,7 @@ export async function createLocalDemoRuntime(
     const closeResources = async (): Promise<void> => {
       if (resourcesClosed) return;
       resourcesClosed = true;
+      checkFrameProcessGate?.close();
       queue!.close();
       database!.close();
     };
@@ -124,6 +127,9 @@ export async function createLocalDemoRuntime(
       queue,
       database,
       close: async () => {
+        // A blocked check-only frame adapter must settle while C4/C5 can still
+        // unwind its staged upload. It is never allowed to resume after close.
+        checkFrameProcessGate?.close();
         try {
           await app!.close();
         } finally {
@@ -143,6 +149,7 @@ export async function createLocalDemoRuntime(
       },
     });
   } catch (error) {
+    checkFrameProcessGate?.close();
     await app?.close().catch(() => undefined);
     queue?.close();
     database?.close();
@@ -205,22 +212,27 @@ export async function runLocalDemoCheckTrace(
     payload: multipartFixture(boundary),
   });
 
-  await waitForCheckFrameProcess(runtime);
+  let upload: Awaited<typeof uploading> | undefined;
+  try {
+    await waitForCheckFrameProcess(runtime);
 
-  const pending = await runtime.app.inject({
-    method: "GET",
-    url: `/v1/attempts/${attemptId}/result`,
-    headers: athleteHeaders,
-  });
-  assertStatus(pending.statusCode, 202);
-  const parsedPending = AttemptResultResponseSchema.safeParse(pending.json());
-  if (!parsedPending.success || parsedPending.data.state !== "pending")
-    throw new Error(
-      "Local demo check did not observe the pending upload state.",
-    );
-
-  runtime.releaseCheckFrameProcess();
-  const upload = await uploading;
+    const pending = await runtime.app.inject({
+      method: "GET",
+      url: `/v1/attempts/${attemptId}/result`,
+      headers: athleteHeaders,
+    });
+    assertStatus(pending.statusCode, 202);
+    const parsedPending = AttemptResultResponseSchema.safeParse(pending.json());
+    if (!parsedPending.success || parsedPending.data.state !== "pending")
+      throw new Error(
+        "Local demo check did not observe the pending upload state.",
+      );
+  } finally {
+    runtime.releaseCheckFrameProcess();
+    upload = await uploading.catch(() => undefined);
+  }
+  if (!upload)
+    throw new Error("Local demo check upload did not settle successfully.");
   assertStatus(upload.statusCode, 202);
   let terminal: AttemptOutcome | undefined;
   const deadline = Date.now() + 5_000;
@@ -332,10 +344,12 @@ function createCheckMediaAdapters(gate: CheckFrameProcessGate) {
 }
 
 function createCheckFrameProcessGate(): CheckFrameProcessGate {
-  let release: () => void = () => undefined;
+  let resume: () => void = () => undefined;
   let blocked: () => void = () => undefined;
+  let released = false;
+  let closed = false;
   const releasePromise = new Promise<void>((resolve) => {
-    release = resolve;
+    resume = resolve;
   });
   const blockedPromise = new Promise<void>((resolve) => {
     blocked = resolve;
@@ -344,9 +358,19 @@ function createCheckFrameProcessGate(): CheckFrameProcessGate {
     wait: async () => {
       blocked();
       await releasePromise;
+      if (closed) throw new Error("Local demo check frame process was closed.");
     },
     waitUntilBlocked: () => blockedPromise,
-    release,
+    release: () => {
+      if (closed || released) return;
+      released = true;
+      resume();
+    },
+    close: () => {
+      if (closed) return;
+      closed = true;
+      resume();
+    },
   });
 }
 

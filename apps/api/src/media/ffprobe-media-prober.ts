@@ -13,7 +13,14 @@ export interface MediaProcessRunner {
       timeoutMilliseconds: number;
       maxOutputBytes: number;
     }>,
-  ): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>>;
+  ): Promise<
+    Readonly<{
+      exitCode: number;
+      termination: "completed" | "timed_out" | "terminated";
+      stdout: string;
+      stderr: string;
+    }>
+  >;
 }
 
 /** FFprobe adapter: argv only, bounded output, and no process output leaks. */
@@ -45,7 +52,12 @@ export class FfprobeMediaProber implements LocalMediaProber {
       magicContainer: "mp4" | "mov" | "webm";
     }>,
   ): Promise<MediaProbe> {
-    let result: Readonly<{ exitCode: number; stdout: string; stderr: string }>;
+    let result: Readonly<{
+      exitCode: number;
+      termination: "completed" | "timed_out" | "terminated";
+      stdout: string;
+      stderr: string;
+    }>;
     try {
       result = await this.runner.run({
         executable: this.executable,
@@ -64,7 +76,7 @@ export class FfprobeMediaProber implements LocalMediaProber {
     } catch {
       throw new MediaPipelineError("media_probe_failed");
     }
-    if (result.exitCode !== 0)
+    if (result.exitCode !== 0 || result.termination !== "completed")
       throw new MediaPipelineError("media_probe_failed");
     const probe = parseFfprobePayload(result.stdout);
     const isoBmffAgreement =
