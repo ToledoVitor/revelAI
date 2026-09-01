@@ -20,6 +20,9 @@ export type SqliteDatabase = Readonly<{
   close(): void;
 }>;
 
+/** Opaque same-wrapper marker; it carries no database methods or raw handle. */
+export type SqliteDatabaseCompositionToken = Readonly<Record<never, never>>;
+
 export type C4AcceptedMediaCleanupAuthority = Readonly<{
   ownsExactAcceptedMediaCleanupPair(
     input: Readonly<{
@@ -32,6 +35,10 @@ export type C4AcceptedMediaCleanupAuthority = Readonly<{
 
 /** Only this module can issue a database wrapper accepted by C4 composition. */
 const sqliteDatabaseCapabilities = new WeakSet<object>();
+const sqliteDatabaseCompositionTokens = new WeakMap<
+  object,
+  SqliteDatabaseCompositionToken
+>();
 const c4AcceptedMediaCleanupAuthorities = new WeakMap<
   object,
   C4AcceptedMediaCleanupAuthority
@@ -45,6 +52,17 @@ export function isFactoryIssuedSqliteDatabase(
     value !== null &&
     sqliteDatabaseCapabilities.has(value)
   );
+}
+
+/**
+ * Allows adjacent factory-issued adapters to prove co-location without ever
+ * exposing the database wrapper (and therefore its mutable raw driver).
+ */
+export function resolveFactoryIssuedSqliteDatabaseCompositionToken(
+  value: unknown,
+): SqliteDatabaseCompositionToken | undefined {
+  if (!isFactoryIssuedSqliteDatabase(value)) return undefined;
+  return sqliteDatabaseCompositionTokens.get(value);
 }
 
 /**
@@ -825,6 +843,7 @@ function openSqliteDatabaseInternal(
     close: () => raw.close(),
   });
   sqliteDatabaseCapabilities.add(database);
+  sqliteDatabaseCompositionTokens.set(database, Object.freeze({}));
   if (cleanupAuthority)
     c4AcceptedMediaCleanupAuthorities.set(database, cleanupAuthority);
   return database;

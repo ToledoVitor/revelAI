@@ -1,21 +1,23 @@
-import { Transform, type Readable } from "node:stream";
-import type { FastifyRequest } from "fastify";
+import { Busboy, type BusboyInstance } from "@fastify/busboy";
+import { Transform } from "node:stream";
+import type { FastifyRequest, RequestPayload } from "fastify";
 import type { MultipartPart } from "../media/multipart-intake.js";
 import { RawMultipartByteCounter } from "../media/multipart-intake.js";
 import { MediaPipelineError } from "../media/probe.js";
 
-type PreparedRawMultipart = Readonly<{
-  source: Readable;
-  monitored: Transform;
-  rawBody: RawMultipartByteCounter;
-  maxUploadBytes: number;
-  maxMultipartBytes: number;
-}>;
+type PreparedMultipart = {
+  readonly contentType: string;
+  readonly rawBody: RawMultipartByteCounter;
+  readonly maxUploadBytes: number;
+  readonly maxMultipartBytes: number;
+  readonly close: (error: Error) => void;
+  source: NodeJS.ReadableStream | undefined;
+  payload: Transform | undefined;
+  failure: Error | undefined;
+  complete: boolean;
+};
 
-const preparedRawMultiparts = new WeakMap<
-  FastifyRequest,
-  PreparedRawMultipart
->();
+const preparedMultiparts = new WeakMap<FastifyRequest, PreparedMultipart>();
 const drainingSources = new WeakSet<object>();
 
 /** Parser syntax is public `invalid_request`, never a Busboy diagnostic. */
@@ -27,67 +29,69 @@ export class MultipartParserError extends Error {
 }
 
 /**
- * Replaces Fastify's raw request with an inert monitored stream. The original
- * source is deliberately not piped until the route has completed ownership
- * and queue preflight, so those branches cannot consume a body byte.
+ * Registers a preflight-approved media request without reading it. The route's
+ * typed preParsing hook later supplies the only stream consumed by the parser.
  */
-export function prepareRawMultipartRequest(
+export function prepareMediaMultipartRequest(
   request: FastifyRequest,
   input: Readonly<{ maxUploadBytes: number; maxMultipartBytes: number }>,
 ): void {
-  if (preparedRawMultiparts.has(request)) return;
-  const source = request.raw as unknown as Readable & {
-    headers: Record<string, string | string[] | undefined>;
-    rawHeaders: string[];
-    url?: string;
-    method?: string;
-    aborted?: boolean;
-    socket?: unknown;
-  };
-  const rawBody = new RawMultipartByteCounter(input.maxMultipartBytes);
+  if (preparedMultiparts.has(request)) return;
+  preparedMultiparts.set(request, {
+    contentType: requiredMultipartContentType(request.headers["content-type"]),
+    rawBody: new RawMultipartByteCounter(input.maxMultipartBytes),
+    maxUploadBytes: input.maxUploadBytes,
+    maxMultipartBytes: input.maxMultipartBytes,
+    close: (error) => request.raw.destroy(error),
+    source: undefined,
+    payload: undefined,
+    failure: undefined,
+    complete: false,
+  });
+}
+
+/**
+ * Fastify calls this after route onRequest preflight and before parsing. It
+ * measures live source bytes without replacing or casting `request.raw`.
+ */
+export function wrapMediaMultipartPayload(
+  request: FastifyRequest,
+  payload: RequestPayload,
+): Transform {
+  const prepared = requiredPreparedMultipart(request);
+  if (prepared.payload) throw new MultipartParserError();
+  let receivedEncodedLength = 0;
   const monitored = new Transform({
     autoDestroy: false,
     transform(chunk: unknown, _encoding, done) {
       try {
-        if (!(chunk instanceof Uint8Array))
-          throw new TypeError("Multipart stream emitted a non-byte chunk.");
-        rawBody.observe(chunk);
+        if (!(chunk instanceof Uint8Array)) throw new MultipartParserError();
+        prepared.rawBody.observe(chunk);
+        receivedEncodedLength += chunk.byteLength;
         done(null, chunk);
       } catch (error) {
-        done(error as Error);
+        done(error instanceof Error ? error : new MultipartParserError());
       }
     },
   });
-  Object.defineProperties(monitored, {
-    headers: { value: source.headers },
-    rawHeaders: { value: source.rawHeaders },
-    url: { get: () => source.url },
-    method: { get: () => source.method },
-    aborted: { get: () => source.aborted ?? false },
-    socket: { get: () => source.socket },
+  Object.defineProperty(monitored, "receivedEncodedLength", {
+    get: () => receivedEncodedLength,
   });
-  const abortParser = (): void => {
-    // An IncomingMessage can end because its peer disappeared without an
-    // `error` event. Surface that to Busboy so C5 abandons its reservation
-    // instead of waiting for an unterminated multipart body.
-    if (!source.readableEnded && !monitored.destroyed)
-      monitored.destroy(new MultipartParserError());
-  };
-  source.once("error", (error) => monitored.destroy(error));
-  source.once("aborted", abortParser);
-  source.once("close", abortParser);
-  (request as unknown as { raw: Transform }).raw = monitored;
-  preparedRawMultiparts.set(
-    request,
-    Object.freeze({ ...input, source, monitored, rawBody }),
-  );
+  monitored.once("error", (error) => {
+    prepared.failure = normalizedParserError(error);
+  });
+  payload.once("error", (error) => monitored.destroy(error));
+  payload.once("close", () => {
+    if (!monitored.writableEnded) monitored.destroy(new MultipartParserError());
+  });
+  prepared.source = payload;
+  prepared.payload = monitored;
+  return monitored;
 }
 
 /**
- * Adapts @fastify/multipart's parser output to C5's parser-neutral intake
- * seam without collecting file bytes. The parser sees only the counter's
- * live output. Parser exits stop the parser and then drain the original
- * request when possible, preserving keep-alive response semantics.
+ * Adapts the typed preParsing stream to C5's parser-neutral intake seam. No
+ * file body is collected: Busboy pauses on each file until C5 consumes it.
  */
 export function createStreamingMultipartIntake(
   request: FastifyRequest,
@@ -96,120 +100,255 @@ export function createStreamingMultipartIntake(
   maxUploadBytes: number;
   maxMultipartBytes: number;
   rawBody: RawMultipartByteCounter;
-  declaredContentLength?: number;
 }> {
-  const prepared = preparedRawMultiparts.get(request);
-  if (!prepared) throw new Error("Multipart request was not prepared.");
-  let started = false;
-  let complete = false;
-  const start = (): void => {
-    if (started) return;
-    started = true;
-    prepared.source.pipe(prepared.monitored);
-  };
-  const abort = (): void => {
-    if (complete) return;
-    prepared.source.unpipe(prepared.monitored);
-    if (!prepared.monitored.destroyed) prepared.monitored.destroy();
-    drainSource(prepared);
-  };
-  const length = declaredContentLength(request);
+  const prepared = requiredPreparedMultipart(request);
+  if (prepared.failure) throw prepared.failure;
+  if (!prepared.payload || !prepared.source) throw new MultipartParserError();
   return Object.freeze({
-    parts: multipartParts(request, start, abort, () => {
-      complete = true;
+    parts: multipartParts(prepared, () => {
+      prepared.complete = true;
     }),
     maxUploadBytes: prepared.maxUploadBytes,
     maxMultipartBytes: prepared.maxMultipartBytes,
     rawBody: prepared.rawBody,
-    ...(length === undefined ? {} : { declaredContentLength: length }),
   });
 }
 
 /**
- * After a preflight rejection, defer disposal until the response lifecycle so
- * the handler never reads before ownership/queue checks yet a keep-alive
- * connection is not stranded behind an unread request body.
+ * Rejections happen before Fastify parsing, so explicitly discard the original
+ * stream after the response. The discard is streaming and capped; it never
+ * buffers a rejected request body or exposes a transport error to the client.
  */
-export function drainPreparedMultipartRequest(request: FastifyRequest): void {
-  const prepared = preparedRawMultiparts.get(request);
-  if (!prepared || prepared.source.destroyed || prepared.source.readableEnded)
-    return;
-  drainSource(prepared);
+export function drainMediaUploadRequest(
+  request: FastifyRequest,
+  maxMultipartBytes: number,
+): void {
+  const prepared = preparedMultiparts.get(request);
+  if (prepared?.complete) return;
+  const source = prepared?.source ?? request.raw;
+  const counter =
+    prepared?.rawBody ?? new RawMultipartByteCounter(maxMultipartBytes);
+  drainSource(
+    source,
+    counter,
+    prepared?.close ?? ((error) => request.raw.destroy(error)),
+  );
+}
+
+function requiredPreparedMultipart(request: FastifyRequest): PreparedMultipart {
+  const prepared = preparedMultiparts.get(request);
+  if (!prepared) throw new MultipartParserError();
+  return prepared;
+}
+
+function requiredMultipartContentType(value: unknown): string {
+  if (typeof value !== "string") throw new MultipartParserError();
+  const [mediaType, ...parameters] = value.split(";");
+  if (mediaType?.trim().toLowerCase() !== "multipart/form-data")
+    throw new MultipartParserError();
+  const boundaryParameters = parameters.filter((parameter) =>
+    /^\s*boundary\s*=/i.test(parameter),
+  );
+  if (boundaryParameters.length !== 1) throw new MultipartParserError();
+  const boundaryValue = boundaryParameters[0]!.replace(
+    /^\s*boundary\s*=\s*/i,
+    "",
+  );
+  const boundary =
+    boundaryValue.startsWith('"') && boundaryValue.endsWith('"')
+      ? boundaryValue.slice(1, -1)
+      : boundaryValue;
+  if (
+    boundary.length < 1 ||
+    boundary.length > 70 ||
+    /[\r\n"]/.test(boundary) ||
+    (!boundaryValue.startsWith('"') &&
+      !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(boundary))
+  )
+    throw new MultipartParserError();
+  return value;
 }
 
 async function* multipartParts(
-  request: FastifyRequest,
-  start: () => void,
-  abort: () => void,
+  prepared: PreparedMultipart,
   markComplete: () => void,
 ): AsyncIterable<MultipartPart> {
+  const payload = prepared.payload;
+  const source = prepared.source;
+  if (!payload || !source) throw new MultipartParserError();
+  const queue = new MultipartPartQueue();
+  let parser: BusboyInstance;
+  try {
+    parser = new Busboy({
+      headers: { "content-type": prepared.contentType },
+      limits: {
+        fileSize: prepared.maxUploadBytes + 1,
+        files: 16,
+        fields: 16,
+        parts: 32,
+        fieldSize: 1,
+      },
+    });
+  } catch {
+    throw new MultipartParserError();
+  }
+  const fail = (error: unknown): void => {
+    queue.fail(normalizedParserError(error));
+  };
+  let activeFile:
+    | Readonly<{
+        destroy(error: Error): void;
+        once(event: "end" | "error", listener: () => void): unknown;
+      }>
+    | undefined;
+  parser.on("file", (name, body, filename, _encoding, contentType) => {
+    activeFile = body;
+    body.once("limit", () => fail(new MediaPipelineError("media_too_large")));
+    body.once("error", () => fail(new MultipartParserError()));
+    body.once("end", () => {
+      activeFile = undefined;
+    });
+    queue.push(
+      Object.freeze({
+        kind: "file" as const,
+        name,
+        filename,
+        contentType,
+        body,
+      }),
+    );
+  });
+  parser.on("field", (name, value) => {
+    queue.push(
+      Object.freeze({
+        kind: "field" as const,
+        name,
+        body: bytes(value),
+      }),
+    );
+  });
+  parser.once("finish", () => {
+    prepared.complete = true;
+    markComplete();
+    queue.complete();
+  });
+  parser.once("error", fail);
+  parser.once("partsLimit", () => fail(new MultipartParserError()));
+  parser.once("filesLimit", () => fail(new MultipartParserError()));
+  parser.once("fieldsLimit", () => fail(new MultipartParserError()));
+  payload.once("error", (error) => {
+    const terminal = normalizedParserError(error);
+    activeFile?.destroy(terminal);
+    fail(terminal);
+  });
+  payload.pipe(parser);
+  source.pipe(payload);
   let exhausted = false;
   try {
-    const parts = request.parts({
-      limits: { files: 16, fields: 16, parts: 32 },
-    });
-    // @fastify/multipart attaches Busboy to the monitored stream eagerly.
-    // Only then may the original request start flowing.
-    start();
-    for await (const part of parts) {
-      if (part.type === "file") {
-        yield Object.freeze({
-          kind: "file" as const,
-          name: part.fieldname,
-          filename: part.filename,
-          contentType: part.mimetype,
-          body: part.file,
-        });
-      } else {
-        yield Object.freeze({
-          kind: "field" as const,
-          name: part.fieldname,
-          body: utf8Bytes(part.value),
-        });
-      }
-    }
+    for await (const part of queue) yield part;
     exhausted = true;
-    markComplete();
-  } catch (error) {
-    if (error instanceof MediaPipelineError) throw error;
-    throw new MultipartParserError();
   } finally {
-    if (!exhausted) abort();
+    if (!exhausted) {
+      // C5 can reject on file headers before it reads the body. Detach the
+      // parser wrapper first: leaving source→payload live while starting the
+      // raw discard would double-count bytes and backpressure its unread side.
+      source.unpipe(payload);
+      payload.unpipe(parser);
+      parser.destroy();
+      payload.destroy();
+      drainSource(source, prepared.rawBody, prepared.close);
+    }
   }
 }
 
-async function* utf8Bytes(value: unknown): AsyncIterable<Uint8Array> {
-  yield Buffer.from(typeof value === "string" ? value : "", "utf8");
+function normalizedParserError(error: unknown): Error {
+  return error instanceof MediaPipelineError
+    ? error
+    : new MultipartParserError();
 }
 
-function declaredContentLength(request: FastifyRequest): number | undefined {
-  const value = request.headers["content-length"];
-  if (typeof value !== "string" || !/^[0-9]+$/.test(value)) return undefined;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) ? parsed : undefined;
+async function* bytes(value: string): AsyncIterable<Uint8Array> {
+  yield Buffer.from(value, "utf8");
 }
 
-function drainSource(prepared: PreparedRawMultipart): void {
-  if (
-    prepared.source.destroyed ||
-    prepared.source.readableEnded ||
-    drainingSources.has(prepared.source)
-  )
-    return;
-  drainingSources.add(prepared.source);
+function drainSource(
+  source: NodeJS.ReadableStream,
+  counter: RawMultipartByteCounter,
+  close: (error: Error) => void,
+): void {
+  if (drainingSources.has(source)) return;
+  drainingSources.add(source);
   const discard = new Transform({
     transform(chunk: unknown, _encoding, done) {
       try {
-        if (!(chunk instanceof Uint8Array))
-          throw new TypeError("Multipart stream emitted a non-byte chunk.");
-        prepared.rawBody.observe(chunk);
+        if (!(chunk instanceof Uint8Array)) throw new MultipartParserError();
+        counter.observe(chunk);
         done();
       } catch (error) {
-        done(error as Error);
+        done(error instanceof Error ? error : new MultipartParserError());
       }
     },
   });
-  discard.once("error", (error) => prepared.source.destroy(error));
-  prepared.source.pipe(discard);
-  prepared.source.resume();
+  source.once("error", () => discard.destroy());
+  discard.once("error", (error) => {
+    source.unpipe(discard);
+    close(error);
+  });
+  discard.once("finish", () => drainingSources.delete(source));
+  source.pipe(discard);
+  source.resume();
+}
+
+class MultipartPartQueue implements AsyncIterable<MultipartPart> {
+  private readonly pending: MultipartPart[] = [];
+  private waiting:
+    | Readonly<{
+        resolve: (value: IteratorResult<MultipartPart>) => void;
+        reject: (reason: Error) => void;
+      }>
+    | undefined;
+  private failure: Error | undefined;
+  private ended = false;
+
+  public push(part: MultipartPart): void {
+    if (this.ended || this.failure) return;
+    const waiting = this.waiting;
+    this.waiting = undefined;
+    if (waiting) waiting.resolve({ value: part, done: false });
+    else this.pending.push(part);
+  }
+
+  public complete(): void {
+    if (this.ended || this.failure) return;
+    this.ended = true;
+    this.resolveDone();
+  }
+
+  public fail(error: Error): void {
+    if (this.ended || this.failure) return;
+    this.failure = error;
+    const waiting = this.waiting;
+    this.waiting = undefined;
+    waiting?.reject(error);
+  }
+
+  public [Symbol.asyncIterator](): AsyncIterator<MultipartPart> {
+    return { next: () => this.next() };
+  }
+
+  private next(): Promise<IteratorResult<MultipartPart>> {
+    if (this.failure) return Promise.reject(this.failure);
+    const part = this.pending.shift();
+    if (part) return Promise.resolve({ value: part, done: false });
+    if (this.ended) return Promise.resolve({ value: undefined, done: true });
+    return new Promise<IteratorResult<MultipartPart>>((resolve, reject) => {
+      this.waiting = Object.freeze({ resolve, reject });
+    });
+  }
+
+  private resolveDone(): void {
+    const waiting = this.waiting;
+    this.waiting = undefined;
+    if (waiting) waiting.resolve({ value: undefined, done: true });
+  }
 }

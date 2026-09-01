@@ -1,4 +1,9 @@
-import type { SqliteDatabase } from "../database/sqlite-database.js";
+import {
+  isFactoryIssuedSqliteDatabase,
+  resolveFactoryIssuedSqliteDatabaseCompositionToken,
+  type SqliteDatabase,
+  type SqliteDatabaseCompositionToken,
+} from "../database/sqlite-database.js";
 import { reconcileMediaDeliveryCleanup } from "../repositories/media-delivery-recovery-sql.js";
 import type {
   RetentionRecord,
@@ -14,12 +19,37 @@ type RetentionRow = Readonly<{
   cleanup_requested_at: string | null;
 }>;
 
+const sqliteRetentionRepositoryTokens = new WeakMap<
+  object,
+  SqliteDatabaseCompositionToken
+>();
+
+/** Opaque co-location marker for C8's media-upload composition. */
+export function resolveFactoryIssuedSQLiteRetentionRepositoryToken(
+  repository: unknown,
+): SqliteDatabaseCompositionToken | undefined {
+  if (typeof repository !== "object" || repository === null) return undefined;
+  return sqliteRetentionRepositoryTokens.get(repository);
+}
+
 /** SQLite adapter contains only opaque retention identifiers, never local paths. */
 export class SQLiteRetentionRepository implements RetentionRepository {
-  private readonly raw;
+  readonly #raw;
 
   public constructor(input: Readonly<{ database: SqliteDatabase }>) {
-    this.raw = input.database.raw;
+    if (!isFactoryIssuedSqliteDatabase(input.database))
+      throw new Error(
+        "Retention requires a factory-issued SQLite database capability.",
+      );
+    this.#raw = input.database.raw;
+    const token = resolveFactoryIssuedSqliteDatabaseCompositionToken(
+      input.database,
+    );
+    if (!token)
+      throw new Error(
+        "Retention factory database composition token is required.",
+      );
+    sqliteRetentionRepositoryTokens.set(this, token);
   }
 
   public async schedule(
@@ -34,7 +64,7 @@ export class SQLiteRetentionRepository implements RetentionRepository {
     assertIdentifier(input.attemptId);
     assertTimestamp(input.deleteAt);
     return this.transaction(() => {
-      const existing = this.raw
+      const existing = this.#raw
         .prepare(
           "SELECT attempt_id, resource_kind, delete_at FROM retention_cleanup_records WHERE resource_id = ?",
         )
@@ -55,7 +85,7 @@ export class SQLiteRetentionRepository implements RetentionRepository {
               : "conflict",
         });
       }
-      this.raw
+      this.#raw
         .prepare(
           "INSERT INTO retention_cleanup_records (resource_id, attempt_id, resource_kind, delete_at, created_at) VALUES (?, ?, ?, ?, ?)",
         )
@@ -76,12 +106,12 @@ export class SQLiteRetentionRepository implements RetentionRepository {
     assertIdentifier(input.attemptId);
     assertTimestamp(input.requestedAt);
     this.transaction(() => {
-      this.raw
+      this.#raw
         .prepare(
           "UPDATE media_retention_records SET cleanup_requested_at = ? WHERE attempt_id = ?",
         )
         .run(input.requestedAt, input.attemptId);
-      this.raw
+      this.#raw
         .prepare(
           "UPDATE retention_cleanup_records SET cleanup_requested_at = ? WHERE attempt_id = ?",
         )
@@ -95,7 +125,7 @@ export class SQLiteRetentionRepository implements RetentionRepository {
     assertTimestamp(input.now);
     if (!Number.isSafeInteger(input.limit) || input.limit < 1)
       throw new Error("Invalid retention batch limit.");
-    const rows = this.raw
+    const rows = this.#raw
       .prepare(
         `SELECT id, attempt_id, kind, delete_at, cleanup_requested_at
            FROM (
@@ -117,12 +147,12 @@ export class SQLiteRetentionRepository implements RetentionRepository {
   public async acknowledge(record: RetentionRecord): Promise<void> {
     this.transaction(() => {
       if (record.kind === "original") {
-        this.raw
+        this.#raw
           .prepare(
             "DELETE FROM media_retention_records WHERE media_id = ? AND attempt_id = ?",
           )
           .run(record.id, record.attemptId);
-        reconcileMediaDeliveryCleanup(this.raw, {
+        reconcileMediaDeliveryCleanup(this.#raw, {
           attemptId: record.attemptId,
           now: new Date().toISOString(),
         });
@@ -132,18 +162,18 @@ export class SQLiteRetentionRepository implements RetentionRepository {
         // The observation is canonical database data, so physical deletion and
         // acknowledgement share one transaction: a cleanup fact can never be
         // removed while its observation still exists.
-        this.raw
+        this.#raw
           .prepare(
             "DELETE FROM canonical_observations WHERE id = ? AND attempt_id = ?",
           )
           .run(record.id, record.attemptId);
       }
-      this.raw
+      this.#raw
         .prepare(
           "DELETE FROM retention_cleanup_records WHERE resource_id = ? AND attempt_id = ?",
         )
         .run(record.id, record.attemptId);
-      reconcileMediaDeliveryCleanup(this.raw, {
+      reconcileMediaDeliveryCleanup(this.#raw, {
         attemptId: record.attemptId,
         now: new Date().toISOString(),
       });
@@ -151,13 +181,13 @@ export class SQLiteRetentionRepository implements RetentionRepository {
   }
 
   private transaction<T>(operation: () => T): T {
-    this.raw.exec("BEGIN IMMEDIATE");
+    this.#raw.exec("BEGIN IMMEDIATE");
     try {
       const result = operation();
-      this.raw.exec("COMMIT");
+      this.#raw.exec("COMMIT");
       return result;
     } catch (error) {
-      this.raw.exec("ROLLBACK");
+      this.#raw.exec("ROLLBACK");
       throw error;
     }
   }

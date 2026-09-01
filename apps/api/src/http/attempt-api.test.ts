@@ -12,13 +12,18 @@ import {
   routeErrorFixtures,
   RouteErrorSchema,
 } from "@revelai/contracts";
+import type { FastifyInstance, InjectOptions } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openSqliteDatabase } from "../database/sqlite-database.js";
-import { SQLiteAttemptRepository } from "../repositories/sqlite-attempt-repository.js";
+import {
+  resolveFactoryIssuedSQLiteAttemptRepositoryToken,
+  SQLiteAttemptRepository,
+} from "../repositories/sqlite-attempt-repository.js";
 import type { AcceptedMediaHandoff } from "../media/accepted-media-handoff.js";
 import { createC5PipelineTestSupport } from "../media/c5-pipeline-test-support.js";
 import type { C5MediaPipeline } from "../media/media-pipeline.js";
 import { MediaPipelineError, type MediaFailureCode } from "../media/probe.js";
+import { SQLiteRetentionRepository } from "../media/sqlite-retention-repository.js";
 import { createLocalC8AcceptedMediaCleaner } from "../services/local-c8-accepted-media-cleaner.js";
 import { createAttemptApi } from "./attempt-api.js";
 
@@ -131,6 +136,7 @@ describe("attempt HTTP foundation", () => {
     expect(RouteErrorSchema.parse(reply.json()).code).toBe(
       uploadFixtureError("queue-unavailable-before-body"),
     );
+    expect(bodyReads).toBe(1);
     expect(
       await fixture.repository.getAttempt({
         attemptId: attempt.id,
@@ -164,6 +170,190 @@ describe("attempt HTTP foundation", () => {
     expect(RouteErrorSchema.parse(unknown.json()).code).toBe(
       uploadFixtureError("attempt-not-found"),
     );
+    await fixture.close();
+  });
+
+  it("returns finite invalid_request responses for non-multipart and malformed multipart bodies", async () => {
+    const fixture = await makeMediaApi();
+    const attempt = await fixture.repository.createAttempt({
+      id: "babababa-baba-4aba-8aba-babababababa",
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    for (const request of [
+      {
+        headers: { "content-type": "application/json" },
+        payload: '{"media":"not-a-multipart-upload"}',
+      },
+      {
+        headers: { "content-type": "text/plain" },
+        payload: "not-a-multipart-upload",
+      },
+      {
+        headers: {},
+        payload: "missing-content-type",
+      },
+      {
+        headers: { "content-type": "multipart/form-data; boundary=" },
+        payload: "malformed-boundary",
+      },
+    ]) {
+      const reply = await injectWithin(fixture.app, {
+        method: "POST",
+        url: `/v1/attempts/${attempt.id}/media`,
+        headers: { ...athleteHeader(ATHLETE_A), ...request.headers },
+        payload: request.payload,
+      });
+      expect(reply.statusCode).toBe(400);
+      expect(RouteErrorSchema.parse(reply.json()).code).toBe("invalid_request");
+    }
+    await fixture.close();
+  });
+
+  it("leaves all bytes untouched until preflight, then drains rejected requests without leaking stream errors", async () => {
+    const fixture = await makeMediaApi();
+    let reads = 0;
+    let fullyRead = false;
+    const payload = Readable.from(
+      (async function* () {
+        reads += 1;
+        yield Buffer.from("not-", "utf8");
+        reads += 1;
+        yield Buffer.from("multipart", "utf8");
+        fullyRead = true;
+      })(),
+    );
+    const reply = await fixture.app.inject({
+      method: "POST",
+      url: "/v1/attempts/bcbcbcbc-bcbc-4cbc-8cbc-bcbcbcbcbcbc/media",
+      headers: {
+        "x-revelai-athlete-id": "not-a-uuid",
+        "content-type": "text/plain",
+      },
+      payload,
+    });
+    expect(reply.statusCode).toBe(400);
+    expect(RouteErrorSchema.parse(reply.json()).code).toBe(
+      "invalid_athlete_identity",
+    );
+    await resolvesSoon(() => fullyRead);
+    expect(reads).toBe(2);
+
+    const streamError = await fixture.app.inject({
+      method: "POST",
+      url: "/v1/attempts/cacacaca-caca-4aca-8aca-cacacacacaca/media",
+      headers: {
+        "x-revelai-athlete-id": "not-a-uuid",
+        "content-type": "text/plain",
+      },
+      payload: Readable.from(
+        (async function* () {
+          yield Buffer.from("partial", "utf8");
+          throw new Error("private body failure");
+        })(),
+      ),
+    });
+    expect(streamError.statusCode).toBe(400);
+    expect(streamError.body).not.toContain("private body failure");
+    await fixture.close();
+  });
+
+  it("detaches the parser wrapper before draining a large early C5 rejection", async () => {
+    const fixture = await makeMediaApi();
+    const attempt = await fixture.repository.createAttempt({
+      id: "cececece-cece-4ece-8ece-cececececece",
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const body = rawMultipartBody({
+      name: "media",
+      filename: "invalid.txt",
+      contentType: "video/mp4",
+      bytes: Buffer.alloc(48 * 1_024, 0),
+    });
+    let chunksRead = 0;
+    let fullyRead = false;
+    const payload = Readable.from(
+      (async function* () {
+        for (const chunk of chunked(body, [512])) {
+          chunksRead += 1;
+          yield chunk;
+        }
+        fullyRead = true;
+      })(),
+    );
+
+    const reply = await injectWithin(fixture.app, {
+      method: "POST",
+      url: `/v1/attempts/${attempt.id}/media`,
+      headers: {
+        ...athleteHeader(ATHLETE_A),
+        "content-type": "multipart/form-data; boundary=revelai-test-boundary",
+      },
+      payload,
+    });
+
+    expect(reply.statusCode).toBe(400);
+    expect(RouteErrorSchema.parse(reply.json()).code).toBe(
+      "media_filename_mime_mismatch",
+    );
+    await resolvesSoon(() => fullyRead);
+    expect(chunksRead).toBeGreaterThan(32);
+    await fixture.close();
+  });
+
+  it("rejects a mixed SQLite retention composition before it can create an orphan", async () => {
+    const fixture = await makeMediaApi();
+    expect(Reflect.get(fixture.repository, "raw")).toBeUndefined();
+    expect(Reflect.get(fixture.repository, "database")).toBeUndefined();
+    const compositionToken = resolveFactoryIssuedSQLiteAttemptRepositoryToken(
+      fixture.repository,
+    );
+    expect(compositionToken).toBeDefined();
+    expect(Reflect.get(compositionToken!, "raw")).toBeUndefined();
+    expect(Reflect.get(compositionToken!, "database")).toBeUndefined();
+    const attempt = await fixture.repository.createAttempt({
+      id: "dededede-dede-4ede-8ede-dededededede",
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const foreignDirectory = await mkdtemp(
+      join(tmpdir(), "revelai-attempt-media-foreign-retention-"),
+    );
+    directories.push(foreignDirectory);
+    const foreignDatabase = openSqliteDatabase(
+      join(foreignDirectory, "foreign.sqlite"),
+    );
+    const foreignRetention = new SQLiteRetentionRepository({
+      database: foreignDatabase,
+    });
+
+    expect(() =>
+      createAttemptApi({
+        repository: fixture.repository,
+        queue: fixture.queue,
+        cleaner: createLocalC8AcceptedMediaCleaner({
+          repository: fixture.repository,
+          storage: fixture.c5.storage,
+        }),
+        uploadRetention: foreignRetention,
+        mediaPipeline: fixture.c5.pipeline,
+        scheduler: { everyHour: () => 1, cancel: () => undefined },
+      }),
+    ).toThrow("matching factory-issued SQLite repositories");
+    expect(
+      foreignDatabase.raw
+        .prepare("SELECT COUNT(*) AS count FROM media_retention_records")
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: attempt.id,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({ status: "awaiting-upload", media: null });
+
+    foreignDatabase.close();
     await fixture.close();
   });
 
@@ -857,6 +1047,9 @@ describe("attempt HTTP foundation", () => {
           enqueue: async () => undefined,
         },
         cleaner: { cleanup: async () => undefined },
+        uploadRetention: new SQLiteRetentionRepository({
+          database: fixture.database,
+        }),
         scheduler: secondScheduler,
         recoveryBatchLimit: 10,
       }),
@@ -870,6 +1063,9 @@ describe("attempt HTTP foundation", () => {
       repository: fixture.repository,
       queue: { isAvailable: async () => true, enqueue: async () => undefined },
       cleaner: { cleanup: async () => undefined },
+      uploadRetention: new SQLiteRetentionRepository({
+        database: fixture.database,
+      }),
       scheduler: secondScheduler,
       recoveryBatchLimit: 10,
     });
@@ -1031,6 +1227,27 @@ function uploadFixtureError(name: string) {
   return expected.body.code;
 }
 
+async function injectWithin(app: FastifyInstance, input: InjectOptions) {
+  return Promise.race([
+    app.inject(input),
+    new Promise<never>((_resolve, reject) => {
+      setTimeout(
+        () => reject(new Error("Fastify injection did not settle.")),
+        500,
+      );
+    }),
+  ]);
+}
+
+async function resolvesSoon(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 500;
+  while (!predicate()) {
+    if (Date.now() >= deadline)
+      throw new Error("Expected rejected request body to drain.");
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  }
+}
+
 function athleteHeader(athleteId: string): Readonly<Record<string, string>> {
   return { "x-revelai-athlete-id": athleteId };
 }
@@ -1077,6 +1294,7 @@ async function makeApi(
     repository,
     queue: { isAvailable: async () => true, enqueue: async () => undefined },
     cleaner: { cleanup: async () => undefined },
+    uploadRetention: new SQLiteRetentionRepository({ database }),
     ...(scheduler ? { scheduler } : {}),
     recoveryBatchLimit: 10,
     clock,
@@ -1133,6 +1351,7 @@ async function makeMediaApi(
       repository,
       storage: c5.storage,
     }),
+    uploadRetention: new SQLiteRetentionRepository({ database }),
     mediaPipeline: input?.mediaPipeline ?? c5.pipeline,
     ...(input?.maxUploadBytes === undefined
       ? {}
@@ -1141,7 +1360,7 @@ async function makeMediaApi(
       everyHour: () => 1,
       cancel: () => undefined,
     },
-  } as Parameters<typeof createAttemptApi>[0]);
+  });
   return {
     app,
     database,

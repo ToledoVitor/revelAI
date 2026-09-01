@@ -11,7 +11,7 @@
     "benchmark:roboflow": "pnpm run build && node scripts/benchmark-roboflow-wall-pass.mjs"
   },
   "dependencies": {
-    "@fastify/multipart": "10.1.1",
+    "@fastify/busboy": "3.2.2",
     "@revelai/contracts": "workspace:*",
     "@revelai/domain": "workspace:*",
     "@revelai/vision": "workspace:*",

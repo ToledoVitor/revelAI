@@ -28,8 +28,10 @@ import { isC5AcceptedMediaHandoffVerifier } from "../media/media-pipeline.js";
 import {
   isFactoryIssuedSqliteDatabase,
   resolveFactoryIssuedC4AcceptedMediaCleanupAuthority,
+  resolveFactoryIssuedSqliteDatabaseCompositionToken,
   type C4AcceptedMediaCleanupAuthority,
   type SqliteDatabase,
+  type SqliteDatabaseCompositionToken,
 } from "../database/sqlite-database.js";
 import {
   isStoredMediaAttachment,
@@ -41,8 +43,6 @@ export {
   type RepositoryErrorCode,
 } from "./attempt-repository.js";
 import { reconcileMediaDeliveryCleanup } from "./media-delivery-recovery-sql.js";
-import { SQLiteRetentionRepository } from "../media/sqlite-retention-repository.js";
-import type { UploadRetentionRepository } from "../storage/local-media-storage.js";
 import type {
   AttemptRecord,
   AttemptRepository,
@@ -70,6 +70,10 @@ const c4AcceptedMediaCleanupAuthorities = new WeakMap<
   object,
   C4AcceptedMediaCleanupAuthority
 >();
+const sqliteAttemptRepositoryTokens = new WeakMap<
+  object,
+  SqliteDatabaseCompositionToken
+>();
 
 /**
  * Narrow C8 composition resolver. The WeakMap identity check is the only way
@@ -81,6 +85,14 @@ export function resolveC4AcceptedMediaCleanupAuthority(
 ): C4AcceptedMediaCleanupAuthority | undefined {
   if (typeof repository !== "object" || repository === null) return undefined;
   return c4AcceptedMediaCleanupAuthorities.get(repository);
+}
+
+/** Opaque co-location marker for C8's separate SQLite retention adapter. */
+export function resolveFactoryIssuedSQLiteAttemptRepositoryToken(
+  repository: unknown,
+): SqliteDatabaseCompositionToken | undefined {
+  if (typeof repository !== "object" || repository === null) return undefined;
+  return sqliteAttemptRepositoryTokens.get(repository);
 }
 
 const MAX_RECOVERY_ATTEMPTS = Number.MAX_SAFE_INTEGER;
@@ -224,20 +236,17 @@ export type LiveLeaderboardCursorPayload = Readonly<{
   attemptId: string;
 }>;
 
-export class SQLiteAttemptRepository
-  implements AttemptRepository, UploadRetentionRepository
-{
+export class SQLiteAttemptRepository implements AttemptRepository {
   private static readonly readOnlyTestVerifier: AcceptedMediaHandoffVerifier =
     Object.freeze({
       accepts: (_value: unknown): _value is AcceptedMediaHandoff => false,
     });
-  private readonly raw;
+  readonly #raw;
   private readonly clock: Clock;
   private readonly ids: IdGenerator;
   private readonly attemptCursor: AttemptCursorCodec;
   private readonly liveLeaderboardCursor: LiveLeaderboardCursorCodec;
   private readonly handoffVerifier: AcceptedMediaHandoffVerifier;
-  private readonly retention: SQLiteRetentionRepository;
 
   /**
    * Test/migration reads never attach C5 media. Keep that explicitly
@@ -257,10 +266,13 @@ export class SQLiteAttemptRepository
       throw new Error(
         "C4 requires a factory-issued SQLite database capability.",
       );
-    this.raw = input.database.raw;
-    this.retention = new SQLiteRetentionRepository({
-      database: input.database,
-    });
+    this.#raw = input.database.raw;
+    const token = resolveFactoryIssuedSqliteDatabaseCompositionToken(
+      input.database,
+    );
+    if (!token)
+      throw new Error("C4 factory database composition token is required.");
+    sqliteAttemptRepositoryTokens.set(this, token);
     this.clock = input.clock;
     this.ids = input.ids;
     this.attemptCursor =
@@ -303,7 +315,7 @@ export class SQLiteAttemptRepository
       const issuedAt = this.clock.now();
       const expiresAt = addMilliseconds(issuedAt, 15 * 60_000);
       this.ensureAthlete(input.athleteId, issuedAt);
-      this.raw
+      this.#raw
         .prepare(
           "INSERT INTO calibration_sessions (id, athlete_id, nonce, challenge_id, challenge_version, state, issued_at, expires_at) VALUES (?, ?, ?, ?, ?, 'issued', ?, ?)",
         )
@@ -330,7 +342,7 @@ export class SQLiteAttemptRepository
     input: Readonly<{ id: string; athleteId: string }>,
   ): Promise<CalibrationSessionRecord | null> {
     return this.transaction(() => {
-      const row = this.raw
+      const row = this.#raw
         .prepare(
           "SELECT id, athlete_id, nonce, challenge_id, challenge_version, state, issued_at, expires_at, ready_at, consumed_at FROM calibration_sessions WHERE id = ? AND athlete_id = ?",
         )
@@ -338,7 +350,7 @@ export class SQLiteAttemptRepository
       if (!row) return null;
       const session = parseCalibrationRow(row);
       if (session.expiresAt <= this.clock.now()) {
-        this.raw
+        this.#raw
           .prepare(
             "UPDATE calibration_sessions SET state = 'expired' WHERE id = ? AND state IN ('issued', 'ready')",
           )
@@ -370,7 +382,7 @@ export class SQLiteAttemptRepository
     }>,
   ): Promise<void> {
     await this.transaction(() => {
-      const row = this.raw
+      const row = this.#raw
         .prepare(
           "SELECT id, athlete_id, nonce, challenge_id, challenge_version, state, issued_at, expires_at, ready_at, consumed_at FROM calibration_sessions WHERE id = ?",
         )
@@ -380,7 +392,7 @@ export class SQLiteAttemptRepository
       if (session.athleteId !== input.athleteId)
         throw new RepositoryError("calibration_session_not_found");
       if (session.expiresAt <= this.clock.now()) {
-        this.raw
+        this.#raw
           .prepare(
             "UPDATE calibration_sessions SET state = 'expired' WHERE id = ? AND state IN ('issued', 'ready')",
           )
@@ -391,7 +403,7 @@ export class SQLiteAttemptRepository
         throw new RepositoryError("calibration_session_consumed");
       if (session.state !== "issued")
         throw new RepositoryError("calibration_session_not_ready");
-      this.raw
+      this.#raw
         .prepare(
           "UPDATE calibration_sessions SET state = 'ready', ready_at = ? WHERE id = ? AND state = 'issued'",
         )
@@ -411,7 +423,7 @@ export class SQLiteAttemptRepository
       this.ensureAthlete(input.athleteId, now);
       if (input.input.mode === "verified")
         this.consumeCalibrationSession(input.athleteId, input.input, now);
-      this.raw
+      this.#raw
         .prepare(
           "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'awaiting-upload', 'active', ?, ?)",
         )
@@ -457,7 +469,7 @@ export class SQLiteAttemptRepository
       : undefined;
     if (cursor && cursor.athleteId !== input.athleteId)
       throw new RepositoryError("invalid_input");
-    const rows = this.raw
+    const rows = this.#raw
       .prepare(
         `SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version, a.status, a.deletion_state, a.media_json, a.processing_generation, a.processing_lease_id, a.processing_lease_expires_at, a.created_at, tr.outcome_json
        FROM attempts a
@@ -496,7 +508,7 @@ export class SQLiteAttemptRepository
     input: Readonly<{ attemptId: string; athleteId: string }>,
   ): Promise<MediaUploadContext> {
     return this.transaction(() => {
-      const row = this.raw
+      const row = this.#raw
         .prepare(
           `SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version,
                   a.calibration_session_id, a.status, a.deletion_state,
@@ -511,18 +523,6 @@ export class SQLiteAttemptRepository
       if (!row) throw new RepositoryError("attempt_not_found");
       return uploadContextFromRow(row, this.clock.now());
     });
-  }
-
-  public schedule(
-    input: Parameters<UploadRetentionRepository["schedule"]>[0],
-  ): ReturnType<UploadRetentionRepository["schedule"]> {
-    return this.retention.schedule(input);
-  }
-
-  public acknowledge(
-    record: Parameters<UploadRetentionRepository["acknowledge"]>[0],
-  ): ReturnType<UploadRetentionRepository["acknowledge"]> {
-    return this.retention.acknowledge(record);
   }
 
   public async attachPreparedMedia(
@@ -552,7 +552,7 @@ export class SQLiteAttemptRepository
         throw new RepositoryError("invalid_input");
       if (processingContext.receipt.mediaId !== media.id)
         throw new RepositoryError("invalid_input");
-      const row = this.raw
+      const row = this.#raw
         .prepare(
           `SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version,
                   a.calibration_session_id, a.status, a.deletion_state,
@@ -580,7 +580,7 @@ export class SQLiteAttemptRepository
       if (row.status !== "awaiting-upload")
         throw new RepositoryError("invalid_attempt_transition");
       const now = this.clock.now();
-      const updated = this.raw
+      const updated = this.#raw
         .prepare(
           "UPDATE attempts SET media_json = ?, media_sha256 = ?, processing_context_json = ?, processing_receipt_id = ?, processing_receipt_sha256 = ?, status = 'uploaded', processing_generation = ?, updated_at = ? WHERE id = ? AND athlete_id = ? AND status = 'awaiting-upload' AND deletion_state = 'active' AND processing_generation = ?",
         )
@@ -602,7 +602,7 @@ export class SQLiteAttemptRepository
         );
       if (updated.changes !== 1)
         throw new RepositoryError("invalid_attempt_transition");
-      this.raw
+      this.#raw
         .prepare(
           "INSERT INTO media_retention_records (media_id, attempt_id, metadata_json, delete_at, created_at) VALUES (?, ?, ?, ?, ?)",
         )
@@ -613,7 +613,7 @@ export class SQLiteAttemptRepository
           media.deleteAt,
           now,
         );
-      const acknowledged = this.raw
+      const acknowledged = this.#raw
         .prepare(
           "DELETE FROM retention_cleanup_records WHERE resource_id = ? AND attempt_id = ? AND resource_kind = 'temporary' AND delete_at = ?",
         )
@@ -624,7 +624,7 @@ export class SQLiteAttemptRepository
         );
       if (acknowledged.changes !== 1)
         throw new RepositoryError("invalid_input");
-      this.raw
+      this.#raw
         .prepare(
           `INSERT INTO media_delivery_recovery_records
              (attempt_id, generation, media_id, frame_batch_id, state, requires_rollback, created_at, updated_at)
@@ -653,7 +653,7 @@ export class SQLiteAttemptRepository
     }>,
   ): Promise<void> {
     await this.transaction(() => {
-      const row = this.raw
+      const row = this.#raw
         .prepare(
           "SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version, a.status, a.deletion_state, a.media_json, a.processing_generation, a.processing_lease_id, a.processing_lease_expires_at, a.created_at, tr.outcome_json FROM attempts a LEFT JOIN terminal_results tr ON tr.attempt_id = a.id WHERE a.id = ? AND a.deletion_state = 'active'",
         )
@@ -673,19 +673,19 @@ export class SQLiteAttemptRepository
       )
         throw new RepositoryError("persisted_data_corrupt");
       const now = this.clock.now();
-      const rolledBack = this.raw
+      const rolledBack = this.#raw
         .prepare(
           `UPDATE attempts SET ${CLEAR_ATTACHED_MEDIA_COLUMNS}, status = 'awaiting-upload', updated_at = ? WHERE id = ? AND status = 'uploaded' AND processing_generation = ? AND deletion_state = 'active'`,
         )
         .run(now, input.attemptId, input.generation);
       if (rolledBack.changes !== 1)
         throw new RepositoryError("invalid_attempt_transition");
-      this.raw
+      this.#raw
         .prepare(
           "UPDATE media_retention_records SET cleanup_requested_at = ? WHERE attempt_id = ? AND media_id = ?",
         )
         .run(now, input.attemptId, delivery.media_id);
-      this.raw
+      this.#raw
         .prepare(
           `UPDATE media_delivery_recovery_records
               SET rollback_completed_at = ?,
@@ -730,7 +730,7 @@ export class SQLiteAttemptRepository
   ): Promise<void> {
     await this.transaction(() => {
       const now = this.clock.now();
-      const update = this.raw
+      const update = this.#raw
         .prepare(
           `UPDATE media_delivery_recovery_records
               SET state = 'queued', requires_rollback = 0,
@@ -755,7 +755,7 @@ export class SQLiteAttemptRepository
   ): Promise<void> {
     await this.transaction(() => {
       const now = this.clock.now();
-      const row = this.raw
+      const row = this.#raw
         .prepare(
           "SELECT id, status, deletion_state, processing_generation, media_json FROM attempts WHERE id = ?",
         )
@@ -785,7 +785,7 @@ export class SQLiteAttemptRepository
         if (!media || media.id !== input.mediaId)
           throw new RepositoryError("persisted_data_corrupt");
         if (!existing) throw new RepositoryError("persisted_data_corrupt");
-        this.raw
+        this.#raw
           .prepare(
             `UPDATE media_delivery_recovery_records
                 SET state = 'cleanup-recoverable',
@@ -800,7 +800,7 @@ export class SQLiteAttemptRepository
           (row.processing_generation === input.generation && existing !== null))
       ) {
         if (row.processing_generation === input.generation - 1) {
-          const retired = this.raw
+          const retired = this.#raw
             .prepare(
               "UPDATE attempts SET processing_generation = ?, updated_at = ? WHERE id = ? AND status = 'awaiting-upload' AND deletion_state = 'active' AND processing_generation = ?",
             )
@@ -813,7 +813,7 @@ export class SQLiteAttemptRepository
           if (retired.changes !== 1)
             throw new RepositoryError("invalid_attempt_transition");
         }
-        this.raw
+        this.#raw
           .prepare(
             `INSERT INTO media_delivery_recovery_records
               (attempt_id, generation, media_id, frame_batch_id, state, requires_rollback, created_at, updated_at)
@@ -833,7 +833,7 @@ export class SQLiteAttemptRepository
           );
         // No attachment references this generation, so retention may become
         // due immediately. Attached rows reach this only after rollback.
-        this.raw
+        this.#raw
           .prepare(
             "UPDATE retention_cleanup_records SET cleanup_requested_at = ? WHERE attempt_id = ?",
           )
@@ -864,17 +864,17 @@ export class SQLiteAttemptRepository
       )
         throw new RepositoryError("invalid_attempt_transition");
       const now = this.clock.now();
-      this.raw
+      this.#raw
         .prepare(
           "DELETE FROM media_retention_records WHERE attempt_id = ? AND media_id = ?",
         )
         .run(input.attemptId, input.mediaId);
-      this.raw
+      this.#raw
         .prepare(
           "DELETE FROM retention_cleanup_records WHERE attempt_id = ? AND resource_id = ? AND resource_kind = 'frame'",
         )
         .run(input.attemptId, delivery.frame_batch_id);
-      reconcileMediaDeliveryCleanup(this.raw, {
+      reconcileMediaDeliveryCleanup(this.#raw, {
         attemptId: input.attemptId,
         now,
       });
@@ -902,7 +902,7 @@ export class SQLiteAttemptRepository
     )
       throw new RepositoryError("invalid_input");
     return this.transaction(() => {
-      const candidates = this.raw
+      const candidates = this.#raw
         .prepare(
           `SELECT attempt_id, generation, media_id, state, requires_rollback,
                   frame_batch_id, queued_at, rollback_completed_at, cleanup_completed_at,
@@ -919,7 +919,7 @@ export class SQLiteAttemptRepository
       for (const candidate of candidates) {
         const recovery = projectMediaDeliveryRecovery(candidate);
         const leaseId = this.ids.next();
-        const update = this.raw
+        const update = this.#raw
           .prepare(
             `UPDATE media_delivery_recovery_records
                 SET recovery_lease_id = ?, recovery_lease_expires_at = ?, updated_at = ?
@@ -946,7 +946,7 @@ export class SQLiteAttemptRepository
   ): Promise<readonly MediaDeliveryRedeliveryClaim[]> {
     assertRecoveryClaimInput(input);
     return this.transaction(() => {
-      const candidates = this.raw
+      const candidates = this.#raw
         .prepare(
           `SELECT attempt_id, generation, media_id, state, requires_rollback,
                   frame_batch_id, queued_at, rollback_completed_at, cleanup_completed_at,
@@ -969,7 +969,7 @@ export class SQLiteAttemptRepository
           throw new RepositoryError("persisted_data_corrupt");
         }
         const leaseId = this.ids.next();
-        const update = this.raw
+        const update = this.#raw
           .prepare(
             `UPDATE media_delivery_recovery_records
                 SET recovery_lease_id = ?, recovery_lease_expires_at = ?, updated_at = ?
@@ -1003,7 +1003,7 @@ export class SQLiteAttemptRepository
   ): Promise<void> {
     await this.transaction(() => {
       const now = this.clock.now();
-      const update = this.raw
+      const update = this.#raw
         .prepare(
           `UPDATE media_delivery_recovery_records
               SET state = 'queued', requires_rollback = 0,
@@ -1023,7 +1023,7 @@ export class SQLiteAttemptRepository
     input: Readonly<{ attemptId: string; generation: number; leaseId: string }>,
   ): Promise<void> {
     await this.transaction(() => {
-      const update = this.raw
+      const update = this.#raw
         .prepare(
           `UPDATE media_delivery_recovery_records
               SET recovery_lease_id = NULL, recovery_lease_expires_at = NULL, updated_at = ?
@@ -1045,7 +1045,7 @@ export class SQLiteAttemptRepository
     input: Readonly<{ attemptId: string; generation: number; leaseId: string }>,
   ): Promise<void> {
     await this.transaction(() => {
-      const update = this.raw
+      const update = this.#raw
         .prepare(
           `UPDATE media_delivery_recovery_records
               SET recovery_lease_id = NULL, recovery_lease_expires_at = NULL, updated_at = ?
@@ -1066,7 +1066,7 @@ export class SQLiteAttemptRepository
     job: AnalysisJob,
   ): Promise<ProcessingClaim | null> {
     return this.transaction(() => {
-      const row = this.raw
+      const row = this.#raw
         .prepare(
           `SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version,
                   a.calibration_session_id, c.nonce AS calibration_nonce, a.media_json,
@@ -1086,7 +1086,7 @@ export class SQLiteAttemptRepository
             }>)
         | undefined;
       if (!row || row.deletion_state !== "active") return null;
-      const recovery = this.raw
+      const recovery = this.#raw
         .prepare(
           "SELECT state FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
         )
@@ -1104,7 +1104,7 @@ export class SQLiteAttemptRepository
       assertClaimableProcessingRow(row);
       const leaseId = this.ids.next();
       const expiresAt = addMilliseconds(now, 5 * 60_000);
-      const update = this.raw
+      const update = this.#raw
         .prepare(
           "UPDATE attempts SET status = 'processing', processing_lease_id = ?, processing_lease_expires_at = ?, updated_at = ? WHERE id = ? AND processing_generation = ? AND deletion_state = 'active' AND (status = 'uploaded' OR (status = 'processing' AND processing_lease_expires_at <= ?))",
         )
@@ -1127,7 +1127,7 @@ export class SQLiteAttemptRepository
     }>,
   ): Promise<PersistedProcessingContext | null> {
     return this.transaction(() => {
-      const row = this.raw
+      const row = this.#raw
         .prepare(
           `SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version,
                   a.calibration_session_id, c.nonce AS calibration_nonce, a.media_json,
@@ -1169,7 +1169,7 @@ export class SQLiteAttemptRepository
   ): Promise<boolean> {
     return this.transaction(() => {
       const now = this.clock.now();
-      const update = this.raw
+      const update = this.#raw
         .prepare(
           "UPDATE attempts SET status = 'uploaded', processing_lease_id = NULL, processing_lease_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'processing' AND deletion_state = 'active' AND processing_generation = ? AND processing_lease_id = ?",
         )
@@ -1188,7 +1188,7 @@ export class SQLiteAttemptRepository
     }>,
   ): Promise<ProcessingFailureRecordOutcome> {
     return this.transaction(() => {
-      const row = this.raw
+      const row = this.#raw
         .prepare(
           "SELECT deletion_state, status, processing_generation, processing_lease_id FROM attempts WHERE id = ?",
         )
@@ -1210,7 +1210,7 @@ export class SQLiteAttemptRepository
       )
         return Object.freeze({ kind: "lost-claim" });
       const now = this.clock.now();
-      const existingRecovery = this.raw
+      const existingRecovery = this.#raw
         .prepare(
           "SELECT retry_attempts FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
         )
@@ -1229,7 +1229,7 @@ export class SQLiteAttemptRepository
           retryAttempt: MAX_RECOVERY_ATTEMPTS,
         });
       }
-      this.raw
+      this.#raw
         .prepare(
           `INSERT INTO processing_recovery_records
              (attempt_id, generation, retry_attempts, state, created_at, updated_at)
@@ -1240,7 +1240,7 @@ export class SQLiteAttemptRepository
              updated_at = excluded.updated_at`,
         )
         .run(input.attemptId, input.generation, now, now);
-      const recovery = this.raw
+      const recovery = this.#raw
         .prepare(
           "SELECT retry_attempts FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
         )
@@ -1265,7 +1265,7 @@ export class SQLiteAttemptRepository
     }>,
   ): Promise<DeadLetterProcessingClaimOutcome> {
     return this.transaction(() => {
-      const row = this.raw
+      const row = this.#raw
         .prepare(
           "SELECT deletion_state, status, processing_generation, processing_lease_id FROM attempts WHERE id = ?",
         )
@@ -1287,7 +1287,7 @@ export class SQLiteAttemptRepository
       )
         return Object.freeze({ kind: "lost-claim" });
       const now = this.clock.now();
-      this.raw
+      this.#raw
         .prepare(
           `INSERT INTO processing_recovery_records
              (attempt_id, generation, retry_attempts, state, created_at, updated_at)
@@ -1297,7 +1297,7 @@ export class SQLiteAttemptRepository
              updated_at = excluded.updated_at`,
         )
         .run(input.attemptId, input.generation, now, now);
-      const release = this.raw
+      const release = this.#raw
         .prepare(
           "UPDATE attempts SET status = 'uploaded', processing_lease_id = NULL, processing_lease_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'processing' AND deletion_state = 'active' AND processing_generation = ? AND processing_lease_id = ?",
         )
@@ -1317,7 +1317,7 @@ export class SQLiteAttemptRepository
     input: FinalizeTerminalResultInput,
   ): Promise<FinalizeTerminalResultOutcome> {
     return this.transaction(() => {
-      const row = this.raw
+      const row = this.#raw
         .prepare(
           "SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version, a.status, a.deletion_state, a.media_json, a.processing_generation, a.processing_lease_id, a.processing_lease_expires_at, a.created_at, tr.outcome_json FROM attempts a LEFT JOIN terminal_results tr ON tr.attempt_id = a.id WHERE a.id = ?",
         )
@@ -1325,7 +1325,7 @@ export class SQLiteAttemptRepository
       if (!row) return Object.freeze({ kind: "lost-claim" });
       if (row.deletion_state !== "active")
         return Object.freeze({ kind: "tombstoned" });
-      const existing = this.raw
+      const existing = this.#raw
         .prepare(
           "SELECT id, lease_id, generation, outcome_json, candidate_json FROM terminal_results WHERE attempt_id = ?",
         )
@@ -1400,7 +1400,7 @@ export class SQLiteAttemptRepository
 
       const completedAt = terminalCompletedAt(outcome, committedAt);
       const terminalId = this.ids.next();
-      this.raw
+      this.#raw
         .prepare(
           "INSERT INTO terminal_results (id, attempt_id, lease_id, generation, terminal_state, outcome_json, candidate_json, completed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
@@ -1415,7 +1415,7 @@ export class SQLiteAttemptRepository
           completedAt,
           committedAt,
         );
-      this.raw
+      this.#raw
         .prepare(
           "UPDATE attempts SET status = ?, processing_context_json = NULL, processing_lease_id = NULL, processing_lease_expires_at = NULL, updated_at = ? WHERE id = ? AND deletion_state = 'active' AND status = 'processing' AND processing_generation = ? AND processing_lease_id = ?",
         )
@@ -1428,7 +1428,7 @@ export class SQLiteAttemptRepository
         );
       if (leaderboard) {
         const commitSequence = this.nextLeaderboardCommitSequence();
-        this.raw
+        this.#raw
           .prepare(
             "INSERT INTO leaderboard_entries (id, result_id, attempt_id, challenge_id, challenge_version, rule_version, score, completed_at, ranking_snapshot_json, created_at, commit_sequence) VALUES (?, ?, ?, 'wall-pass', 1, 'wall-pass-v1-score-1', ?, ?, ?, ?, ?)",
           )
@@ -1449,14 +1449,14 @@ export class SQLiteAttemptRepository
         "terminal-finalized",
         committedAt,
       );
-      this.raw
+      this.#raw
         .prepare(
           "DELETE FROM processing_recovery_records WHERE attempt_id = ? AND generation = ?",
         )
         .run(input.attemptId, input.generation);
       // A terminalized generation no longer needs queue-delivery recovery;
       // normal C5 retention remains independently durable.
-      this.raw
+      this.#raw
         .prepare(
           "DELETE FROM media_delivery_recovery_records WHERE attempt_id = ? AND generation = ? AND state IN ('pending-delivery', 'queued')",
         )
@@ -1475,7 +1475,7 @@ export class SQLiteAttemptRepository
     input: Readonly<{ attemptId: string; athleteId: string }>,
   ): Promise<void> {
     await this.transaction(() => {
-      const row = this.raw
+      const row = this.#raw
         .prepare(
           "SELECT id, processing_generation FROM attempts WHERE id = ? AND athlete_id = ? AND deletion_state = 'active'",
         )
@@ -1484,19 +1484,19 @@ export class SQLiteAttemptRepository
         | undefined;
       if (!row) throw new RepositoryError("attempt_not_found");
       const now = this.clock.now();
-      this.raw
+      this.#raw
         .prepare("DELETE FROM leaderboard_entries WHERE attempt_id = ?")
         .run(input.attemptId);
-      this.raw
+      this.#raw
         .prepare("DELETE FROM terminal_results WHERE attempt_id = ?")
         .run(input.attemptId);
-      this.raw
+      this.#raw
         .prepare("DELETE FROM canonical_observations WHERE attempt_id = ?")
         .run(input.attemptId);
-      this.raw
+      this.#raw
         .prepare("DELETE FROM processing_recovery_records WHERE attempt_id = ?")
         .run(input.attemptId);
-      this.raw
+      this.#raw
         .prepare(
           `UPDATE media_delivery_recovery_records
               SET state = 'cleanup-recoverable', requires_rollback = 0,
@@ -1506,12 +1506,12 @@ export class SQLiteAttemptRepository
             WHERE attempt_id = ? AND state <> 'resolved'`,
         )
         .run(now, input.attemptId);
-      this.raw
+      this.#raw
         .prepare(
           "UPDATE media_retention_records SET cleanup_requested_at = ? WHERE attempt_id = ?",
         )
         .run(now, input.attemptId);
-      this.raw
+      this.#raw
         .prepare(
           "UPDATE attempts SET deletion_state = 'tombstoned', processing_context_json = NULL, processing_generation = processing_generation + 1, processing_lease_id = NULL, processing_lease_expires_at = NULL, tombstoned_at = ?, updated_at = ? WHERE id = ? AND athlete_id = ? AND deletion_state = 'active'",
         )
@@ -1597,7 +1597,7 @@ export class SQLiteAttemptRepository
        INNER JOIN attempts a ON a.id = le.attempt_id
        WHERE a.deletion_state = 'active' AND a.status = 'valid'
          AND le.challenge_id = 'wall-pass' AND le.challenge_version = 1 AND le.rule_version = 'wall-pass-v1-score-1'`;
-    const statement = this.raw.prepare(sql);
+    const statement = this.#raw.prepare(sql);
     return (
       cutoff && snapshotSequence !== undefined
         ? statement.all(cutoff, snapshotSequence)
@@ -1606,7 +1606,7 @@ export class SQLiteAttemptRepository
   }
 
   private nextLeaderboardCommitSequence(): number {
-    const updated = this.raw
+    const updated = this.#raw
       .prepare(
         "UPDATE leaderboard_commit_clock SET sequence = sequence + 1 WHERE singleton = 1",
       )
@@ -1618,12 +1618,12 @@ export class SQLiteAttemptRepository
 
   private leaderboardCommitSequence(cutoff?: string): number {
     const row = cutoff
-      ? (this.raw
+      ? (this.#raw
           .prepare(
             "SELECT COALESCE(MAX(commit_sequence), 0) AS sequence FROM leaderboard_entries WHERE created_at <= ?",
           )
           .get(cutoff) as { sequence: number } | undefined)
-      : (this.raw
+      : (this.#raw
           .prepare(
             "SELECT sequence FROM leaderboard_commit_clock WHERE singleton = 1",
           )
@@ -1648,7 +1648,7 @@ export class SQLiteAttemptRepository
     attemptId: string,
     athleteId: string,
   ): AttemptRow | null {
-    const row = this.raw
+    const row = this.#raw
       .prepare(
         "SELECT a.id, a.athlete_id, a.mode, a.challenge_id, a.challenge_version, a.status, a.deletion_state, a.media_json, a.processing_generation, a.processing_lease_id, a.processing_lease_expires_at, a.created_at, tr.outcome_json FROM attempts a LEFT JOIN terminal_results tr ON tr.attempt_id = a.id WHERE a.id = ? AND a.athlete_id = ? AND a.deletion_state = 'active'",
       )
@@ -1666,7 +1666,7 @@ export class SQLiteAttemptRepository
   }
 
   private ensureAthlete(athleteId: string, createdAt: string): void {
-    this.raw
+    this.#raw
       .prepare(
         "INSERT INTO athletes (id, created_at) VALUES (?, ?) ON CONFLICT(id) DO NOTHING",
       )
@@ -1678,7 +1678,7 @@ export class SQLiteAttemptRepository
     input: Extract<CreateAttemptInput, { mode: "verified" }>,
     now: string,
   ): void {
-    const row = this.raw
+    const row = this.#raw
       .prepare(
         "SELECT id, athlete_id, nonce, challenge_id, challenge_version, state, issued_at, expires_at, ready_at, consumed_at FROM calibration_sessions WHERE id = ?",
       )
@@ -1688,7 +1688,7 @@ export class SQLiteAttemptRepository
     if (session.athleteId !== athleteId)
       throw new RepositoryError("calibration_session_not_found");
     if (session.expiresAt <= now) {
-      this.raw
+      this.#raw
         .prepare(
           "UPDATE calibration_sessions SET state = 'expired' WHERE id = ? AND state IN ('issued', 'ready')",
         )
@@ -1704,7 +1704,7 @@ export class SQLiteAttemptRepository
       throw new RepositoryError("calibration_session_challenge_mismatch");
     if (session.state !== "ready")
       throw new RepositoryError("calibration_session_not_ready");
-    this.raw
+    this.#raw
       .prepare(
         "UPDATE calibration_sessions SET state = 'consumed', consumed_at = ? WHERE id = ? AND state = 'ready'",
       )
@@ -1717,7 +1717,7 @@ export class SQLiteAttemptRepository
     eventType: string,
     createdAt: string,
   ): void {
-    this.raw
+    this.#raw
       .prepare(
         "INSERT INTO processing_events (attempt_id, generation, event_type, created_at) VALUES (?, ?, ?, ?)",
       )
@@ -1725,13 +1725,13 @@ export class SQLiteAttemptRepository
   }
 
   private transaction<T>(operation: () => T): T {
-    this.raw.exec("BEGIN IMMEDIATE");
+    this.#raw.exec("BEGIN IMMEDIATE");
     try {
       const result = operation();
-      this.raw.exec("COMMIT");
+      this.#raw.exec("COMMIT");
       return result;
     } catch (error) {
-      this.raw.exec("ROLLBACK");
+      this.#raw.exec("ROLLBACK");
       throw error;
     }
   }
@@ -1739,7 +1739,7 @@ export class SQLiteAttemptRepository
   private deliveryRecovery(
     input: Readonly<{ attemptId: string; generation: number }>,
   ): MediaDeliveryRecoveryRow | null {
-    const row = this.raw
+    const row = this.#raw
       .prepare(
         `SELECT attempt_id, generation, media_id, state, requires_rollback,
                 frame_batch_id, queued_at, rollback_completed_at, cleanup_completed_at,
