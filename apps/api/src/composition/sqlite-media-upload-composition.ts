@@ -22,6 +22,30 @@ import {
 } from "../services/media-upload-service.js";
 import { createInternallyComposedAttemptApi } from "../http/attempt-api.js";
 
+type ProductionAttemptApiInput = Readonly<
+  Omit<
+    Parameters<typeof createInternallyComposedAttemptApi>[0],
+    "repository" | "queue"
+  > & {
+    repository: SQLiteAttemptRepository;
+    retention: SQLiteRetentionRepository;
+    mediaPipeline: C5MediaPipeline;
+    queue: AnalysisQueue;
+  }
+>;
+type ResolvedProductionAttemptApiInput = Readonly<
+  Omit<
+    Parameters<typeof createInternallyComposedAttemptApi>[0],
+    "repository" | "queue"
+  > & {
+    repository: SQLiteAttemptRepository;
+    retention: SQLiteRetentionRepository;
+    mediaPipeline: C5MediaPipeline;
+    queue: ResolvedAnalysisQueuePort;
+    queueHost: AnalysisQueue;
+  }
+>;
+
 /**
  * The outer production composition root joins exact C4/C5 SQLite facades,
  * then supplies only captured closure ports to the storage-neutral service.
@@ -38,10 +62,13 @@ export function createFactoryIssuedMediaUploadService(
   const retention = input.retention;
   const queue = input.queue;
   const pipeline = input.mediaPipeline;
-  const attempt = resolveProductionSQLiteAttemptUploadPort(repository);
-  const retentionPort = resolveProductionSQLiteRetentionUploadPort(retention);
-  const c5 = resolveFactoryIssuedC5MediaPipelinePort(pipeline);
-  const queuePort = resolveFactoryIssuedAnalysisQueuePort(queue);
+  const snapshot = Object.freeze({ repository, retention, queue, pipeline });
+  const attempt = resolveProductionSQLiteAttemptUploadPort(snapshot.repository);
+  const retentionPort = resolveProductionSQLiteRetentionUploadPort(
+    snapshot.retention,
+  );
+  const c5 = resolveFactoryIssuedC5MediaPipelinePort(snapshot.pipeline);
+  const queuePort = resolveFactoryIssuedAnalysisQueuePort(snapshot.queue);
   if (
     !attempt ||
     !retentionPort ||
@@ -74,7 +101,10 @@ export function createFactoryIssuedMediaUploadService(
       acknowledge: retentionPort.acknowledge,
     }),
   });
-  const host = Object.freeze({ repository, queue });
+  const host = Object.freeze({
+    repository: snapshot.repository,
+    queue: snapshot.queue,
+  });
   return Object.freeze({
     forHost: (candidate) =>
       candidate.repository === host.repository && candidate.queue === host.queue
@@ -84,24 +114,23 @@ export function createFactoryIssuedMediaUploadService(
 }
 
 /** Official production root: verified adapters compose before HTTP wiring. */
-export function createProductionAttemptApi(
-  input: Readonly<
-    Omit<
-      Parameters<typeof createInternallyComposedAttemptApi>[0],
-      "repository" | "queue"
-    > & {
-      repository: SQLiteAttemptRepository;
-      retention: SQLiteRetentionRepository;
-      mediaPipeline: C5MediaPipeline;
-      queue: AnalysisQueue;
-    }
-  >,
-) {
-  const queue = resolveRequiredAnalysisQueuePort(input.queue);
+export function createProductionAttemptApi(input: ProductionAttemptApiInput) {
+  const snapshot = snapshotProductionAttemptApiInput(input);
+  const queue = resolveRequiredAnalysisQueuePort(snapshot.queue);
   return createProductionAttemptApiFromResolvedQueue({
-    ...input,
+    repository: snapshot.repository,
+    retention: snapshot.retention,
+    mediaPipeline: snapshot.mediaPipeline,
     queue,
-    queueHost: input.queue,
+    queueHost: snapshot.queue,
+    cleaner: snapshot.cleaner,
+    maxUploadBytes: snapshot.maxUploadBytes,
+    scheduler: snapshot.scheduler,
+    recoveryBatchLimit: snapshot.recoveryBatchLimit,
+    clock: snapshot.clock,
+    ids: snapshot.ids,
+    nonce: snapshot.nonce,
+    log: snapshot.log,
   });
 }
 
@@ -110,34 +139,106 @@ export function createProductionAttemptApi(
  * port. It validates port-to-host identity before HTTP or recovery can start.
  */
 export function createProductionAttemptApiFromResolvedQueue(
-  input: Readonly<
-    Omit<
-      Parameters<typeof createInternallyComposedAttemptApi>[0],
-      "repository" | "queue"
-    > & {
-      repository: SQLiteAttemptRepository;
-      retention: SQLiteRetentionRepository;
-      mediaPipeline: C5MediaPipeline;
-      queue: ResolvedAnalysisQueuePort;
-      queueHost: AnalysisQueue;
-    }
-  >,
+  input: ResolvedProductionAttemptApiInput,
 ) {
-  if (!isFactoryIssuedAnalysisQueuePortForHost(input.queue, input.queueHost))
+  const snapshot = snapshotResolvedProductionAttemptApiInput(input);
+  if (
+    !isFactoryIssuedAnalysisQueuePortForHost(snapshot.queue, snapshot.queueHost)
+  )
     throw new Error("C8 requires a factory-issued media upload composition.");
-  const { retention, mediaPipeline, queueHost, ...api } = input;
   const mediaUpload = createFactoryIssuedMediaUploadService({
-    repository: api.repository,
-    retention,
-    queue: queueHost,
-    mediaPipeline,
+    repository: snapshot.repository,
+    retention: snapshot.retention,
+    queue: snapshot.queueHost,
+    mediaPipeline: snapshot.mediaPipeline,
   });
   const service = mediaUpload.forHost(
-    Object.freeze({ repository: api.repository, queue: queueHost }),
+    Object.freeze({
+      repository: snapshot.repository,
+      queue: snapshot.queueHost,
+    }),
   );
   if (!service)
     throw new Error("C8 media upload does not match this attempt API host.");
-  return createInternallyComposedAttemptApi(api, service);
+  return createInternallyComposedAttemptApi(
+    Object.freeze({
+      repository: snapshot.repository,
+      queue: snapshot.queue,
+      cleaner: snapshot.cleaner,
+      maxUploadBytes: snapshot.maxUploadBytes,
+      scheduler: snapshot.scheduler,
+      recoveryBatchLimit: snapshot.recoveryBatchLimit,
+      clock: snapshot.clock,
+      ids: snapshot.ids,
+      nonce: snapshot.nonce,
+      log: snapshot.log,
+    }),
+    service,
+  );
+}
+
+function snapshotProductionAttemptApiInput(
+  input: ProductionAttemptApiInput,
+): ProductionAttemptApiInput {
+  const repository = input.repository;
+  const retention = input.retention;
+  const mediaPipeline = input.mediaPipeline;
+  const queue = input.queue;
+  const cleaner = input.cleaner;
+  const maxUploadBytes = input.maxUploadBytes;
+  const scheduler = input.scheduler;
+  const recoveryBatchLimit = input.recoveryBatchLimit;
+  const clock = input.clock;
+  const ids = input.ids;
+  const nonce = input.nonce;
+  const log = input.log;
+  return Object.freeze({
+    repository,
+    retention,
+    mediaPipeline,
+    queue,
+    cleaner,
+    maxUploadBytes,
+    scheduler,
+    recoveryBatchLimit,
+    clock,
+    ids,
+    nonce,
+    log,
+  });
+}
+
+function snapshotResolvedProductionAttemptApiInput(
+  input: ResolvedProductionAttemptApiInput,
+): ResolvedProductionAttemptApiInput {
+  const repository = input.repository;
+  const retention = input.retention;
+  const mediaPipeline = input.mediaPipeline;
+  const queue = input.queue;
+  const queueHost = input.queueHost;
+  const cleaner = input.cleaner;
+  const maxUploadBytes = input.maxUploadBytes;
+  const scheduler = input.scheduler;
+  const recoveryBatchLimit = input.recoveryBatchLimit;
+  const clock = input.clock;
+  const ids = input.ids;
+  const nonce = input.nonce;
+  const log = input.log;
+  return Object.freeze({
+    repository,
+    retention,
+    mediaPipeline,
+    queue,
+    queueHost,
+    cleaner,
+    maxUploadBytes,
+    scheduler,
+    recoveryBatchLimit,
+    clock,
+    ids,
+    nonce,
+    log,
+  });
 }
 
 function resolveRequiredAnalysisQueuePort(

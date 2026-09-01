@@ -154,6 +154,84 @@ describe("Free Training analysis", () => {
     database.close();
   });
 
+  it("snapshots direct Free runtime inputs and nested options before resolving ports", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "revelai-free-runtime-snapshot-"),
+    );
+    directories.push(root);
+    const database = openSqliteDatabase(join(root, "api.sqlite"));
+    const c5 = createC5PipelineTestSupport({ root: join(root, "c5") });
+    const repository = new SQLiteAttemptRepository({
+      database,
+      clock: { now: () => NOW },
+      ids: { next: ids() },
+      handoffVerifier: c5.handoffVerifier,
+    });
+    const queue = new InMemoryAnalysisQueue({
+      scheduler: new ManualScheduler(),
+    });
+    const demo = createDemoVisionProvider();
+    const reads = {
+      repository: 0,
+      queue: 0,
+      mediaPipeline: 0,
+      options: 0,
+      provider: 0,
+      scheduler: 0,
+      clock: 0,
+    };
+    const input = {
+      get repository() {
+        reads.repository += 1;
+        if (reads.repository > 1) throw new Error("repository re-read");
+        return repository;
+      },
+      get queue() {
+        reads.queue += 1;
+        if (reads.queue > 1) throw new Error("queue re-read");
+        return queue;
+      },
+      get mediaPipeline() {
+        reads.mediaPipeline += 1;
+        if (reads.mediaPipeline > 1) throw new Error("pipeline re-read");
+        return c5.pipeline;
+      },
+      get options() {
+        reads.options += 1;
+        if (reads.options > 1) throw new Error("options re-read");
+        return {
+          get provider() {
+            reads.provider += 1;
+            if (reads.provider > 1) throw new Error("provider re-read");
+            return demo;
+          },
+          get scheduler() {
+            reads.scheduler += 1;
+            if (reads.scheduler > 1) throw new Error("scheduler re-read");
+            return undefined;
+          },
+          get clock() {
+            reads.clock += 1;
+            if (reads.clock > 1) throw new Error("clock re-read");
+            return { now: () => NOW };
+          },
+        };
+      },
+    };
+    const runtime = createFactoryIssuedFreeTrainingRuntime(input);
+    expect(reads).toEqual({
+      repository: 1,
+      queue: 1,
+      mediaPipeline: 1,
+      options: 1,
+      provider: 1,
+      scheduler: 1,
+      clock: 1,
+    });
+    await runtime.stop();
+    database.close();
+  });
+
   it("keeps a non-Free job pending for its separate worker instead of crossing the Free branch", async () => {
     const scheduler = new ManualScheduler();
     const queue = new InMemoryAnalysisQueue({ scheduler });

@@ -726,6 +726,242 @@ describe("attempt HTTP foundation", () => {
     }
   });
 
+  it("snapshots each official queue composition input before validation", async () => {
+    const owner = await makeMediaApi();
+    const other = await makeMediaApi();
+    await owner.app.close();
+    await other.app.close();
+    const ownerPort = resolveFactoryIssuedAnalysisQueuePort(owner.queue);
+    if (!ownerPort)
+      throw new Error("Expected factory-issued queue ports for this test.");
+
+    const cleaner = createLocalC8AcceptedMediaCleaner({
+      repository: owner.repository,
+      storage: owner.c5.storage,
+    });
+    const scheduler = { everyHour: () => 1, cancel: () => undefined };
+    const clock = { now: () => "2030-01-15T12:00:00.000Z" };
+    const ids = { next: () => "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" };
+    const nonce = () => "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const log = { event: () => undefined };
+    const resolvedReads = {
+      repository: 0,
+      retention: 0,
+      mediaPipeline: 0,
+      queue: 0,
+      queueHost: 0,
+      cleaner: 0,
+      maxUploadBytes: 0,
+      scheduler: 0,
+      recoveryBatchLimit: 0,
+      clock: 0,
+      ids: 0,
+      nonce: 0,
+      log: 0,
+    };
+    const resolvedInput = {
+      get repository() {
+        resolvedReads.repository += 1;
+        return owner.repository;
+      },
+      get retention() {
+        resolvedReads.retention += 1;
+        return owner.retention;
+      },
+      get mediaPipeline() {
+        resolvedReads.mediaPipeline += 1;
+        return owner.c5.pipeline;
+      },
+      get queue() {
+        resolvedReads.queue += 1;
+        return ownerPort;
+      },
+      get queueHost() {
+        resolvedReads.queueHost += 1;
+        return resolvedReads.queueHost === 1 ? owner.queue : other.queue;
+      },
+      get cleaner() {
+        resolvedReads.cleaner += 1;
+        return cleaner;
+      },
+      get maxUploadBytes() {
+        resolvedReads.maxUploadBytes += 1;
+        return undefined;
+      },
+      get scheduler() {
+        resolvedReads.scheduler += 1;
+        return scheduler;
+      },
+      get recoveryBatchLimit() {
+        resolvedReads.recoveryBatchLimit += 1;
+        return 1;
+      },
+      get clock() {
+        resolvedReads.clock += 1;
+        return clock;
+      },
+      get ids() {
+        resolvedReads.ids += 1;
+        return ids;
+      },
+      get nonce() {
+        resolvedReads.nonce += 1;
+        return nonce;
+      },
+      get log() {
+        resolvedReads.log += 1;
+        return log;
+      },
+    };
+    const rawReads = {
+      repository: 0,
+      retention: 0,
+      mediaPipeline: 0,
+      queue: 0,
+      cleaner: 0,
+      maxUploadBytes: 0,
+      scheduler: 0,
+      recoveryBatchLimit: 0,
+      clock: 0,
+      ids: 0,
+      nonce: 0,
+      log: 0,
+    };
+    const rawInput = {
+      get repository() {
+        rawReads.repository += 1;
+        return owner.repository;
+      },
+      get retention() {
+        rawReads.retention += 1;
+        return owner.retention;
+      },
+      get mediaPipeline() {
+        rawReads.mediaPipeline += 1;
+        return owner.c5.pipeline;
+      },
+      get queue() {
+        rawReads.queue += 1;
+        return rawReads.queue === 1 ? owner.queue : other.queue;
+      },
+      get cleaner() {
+        rawReads.cleaner += 1;
+        return cleaner;
+      },
+      get maxUploadBytes() {
+        rawReads.maxUploadBytes += 1;
+        return undefined;
+      },
+      get scheduler() {
+        rawReads.scheduler += 1;
+        return scheduler;
+      },
+      get recoveryBatchLimit() {
+        rawReads.recoveryBatchLimit += 1;
+        return 1;
+      },
+      get clock() {
+        rawReads.clock += 1;
+        return clock;
+      },
+      get ids() {
+        rawReads.ids += 1;
+        return ids;
+      },
+      get nonce() {
+        rawReads.nonce += 1;
+        return nonce;
+      },
+      get log() {
+        rawReads.log += 1;
+        return log;
+      },
+    };
+
+    let resolvedApp:
+      | ReturnType<typeof createProductionAttemptApiFromResolvedQueue>
+      | undefined;
+    let rawApp: ReturnType<typeof createProductionAttemptApi> | undefined;
+    const ownerDeliveries = vi.fn();
+    const otherDeliveries = vi.fn();
+    const stopOwner = owner.queue.subscribe(ownerDeliveries);
+    const stopOther = other.queue.subscribe(otherDeliveries);
+    try {
+      resolvedApp = createProductionAttemptApiFromResolvedQueue(resolvedInput);
+      expect(resolvedReads).toEqual({
+        repository: 1,
+        retention: 1,
+        mediaPipeline: 1,
+        queue: 1,
+        queueHost: 1,
+        cleaner: 1,
+        maxUploadBytes: 1,
+        scheduler: 1,
+        recoveryBatchLimit: 1,
+        clock: 1,
+        ids: 1,
+        nonce: 1,
+        log: 1,
+      });
+      await expect(
+        resolvedApp.inject({ method: "GET", url: "/v1/challenges" }),
+      ).resolves.toMatchObject({ statusCode: 200 });
+      const attempt = await owner.repository.createAttempt({
+        id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        athleteId: ATHLETE_A,
+        input: { mode: "free" },
+      });
+      await expect(
+        resolvedApp.inject({
+          method: "POST",
+          url: `/v1/attempts/${attempt.id}/media`,
+          headers: {
+            ...athleteHeader(ATHLETE_A),
+            "content-type":
+              "multipart/form-data; boundary=revelai-test-boundary",
+          },
+          payload: rawMultipartBody({
+            name: "media",
+            filename: "attempt.mp4",
+            contentType: "video/mp4",
+            bytes: validMp4Bytes(),
+          }),
+        }),
+      ).resolves.toMatchObject({ statusCode: 202 });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(ownerDeliveries).toHaveBeenCalledTimes(1);
+      expect(otherDeliveries).not.toHaveBeenCalled();
+      await resolvedApp.close();
+      resolvedApp = undefined;
+
+      rawApp = createProductionAttemptApi(rawInput);
+      expect(rawReads).toEqual({
+        repository: 1,
+        retention: 1,
+        mediaPipeline: 1,
+        queue: 1,
+        cleaner: 1,
+        maxUploadBytes: 1,
+        scheduler: 1,
+        recoveryBatchLimit: 1,
+        clock: 1,
+        ids: 1,
+        nonce: 1,
+        log: 1,
+      });
+      await expect(
+        rawApp.inject({ method: "GET", url: "/v1/challenges" }),
+      ).resolves.toMatchObject({ statusCode: 200 });
+    } finally {
+      stopOwner();
+      stopOther();
+      await resolvedApp?.close();
+      await rawApp?.close();
+      await owner.close();
+      await other.close();
+    }
+  });
+
   it("accepts one raw multipart media upload through the real C5 pipeline", async () => {
     const fixture = await makeMediaApi();
     const attempt = await fixture.repository.createAttempt({

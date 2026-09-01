@@ -38,10 +38,25 @@ export function createFactoryIssuedFreeTrainingRuntime(
     options: FreeTrainingProductionOptions;
   }>,
 ): FreeTrainingRuntimeHandle {
-  const queue = resolveRequiredAnalysisQueuePort(input.queue);
+  const repository = input.repository;
+  const rawQueue = input.queue;
+  const mediaPipeline = input.mediaPipeline;
+  const rawOptions = input.options;
+  const provider = rawOptions.provider;
+  const scheduler = rawOptions.scheduler;
+  const clock = rawOptions.clock;
+  const snapshot = Object.freeze({
+    repository,
+    queue: rawQueue,
+    mediaPipeline,
+    options: Object.freeze({ provider, scheduler, clock }),
+  });
+  const queue = resolveRequiredAnalysisQueuePort(snapshot.queue);
   return createFactoryIssuedFreeTrainingRuntimeFromResolvedQueue({
-    ...input,
+    repository: snapshot.repository,
     queue,
+    mediaPipeline: snapshot.mediaPipeline,
+    options: snapshot.options,
   });
 }
 
