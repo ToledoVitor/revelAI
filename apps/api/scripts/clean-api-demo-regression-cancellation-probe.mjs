@@ -68,6 +68,7 @@ function scenariosFor(value) {
         name: value,
         boundary: "inner:after-fixture:demo",
         readiness: "inner:after-fixture:demo",
+        requiresFixture: true,
         failCollectorAfterReady: true,
       },
     ];
@@ -79,6 +80,7 @@ function scenariosFor(value) {
         name: value,
         boundary: "inner:after-fixture:demo",
         readiness: "inner:after-fixture:demo",
+        requiresFixture: true,
         failAfterReady: true,
         forceCloseFalseAfterKill: true,
         environment: {
@@ -152,9 +154,11 @@ async function runScenario(options) {
     const ready = await readiness.waitFor(options.readiness);
     await observeDetachedDescendant(child.pid, ready, processGroups);
     await recordDescendantProcessGroups(child.pid, processGroups);
-    await captureFixtures(ownedFixtures);
-    if (ownedFixtures.size === 0) throw new Error(failure);
-    announceProbeReadiness(options.name);
+    if (options.requiresFixture) {
+      await captureFixtures(ownedFixtures);
+      if (ownedFixtures.size === 0) throw new Error(failure);
+      announceProbeReadiness(options.name);
+    }
     if (options.failCollectorAfterReady) {
       collectorFailure.resolve();
       const collectionOutcome = await collection;
