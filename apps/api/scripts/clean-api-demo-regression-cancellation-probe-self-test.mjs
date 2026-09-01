@@ -36,6 +36,8 @@ const fixtureRoot = "revelai-clean-api-demo-";
 const probeTimeoutMs = 90_000;
 const terminationGraceMs = 500;
 const closeAfterKillMs = 5_000;
+const auditChildReadinessTimeoutMs = 1_000;
+const auditChildReadyMarker = "REVELAI_CLEAN_API_AUDIT_CHILD_READY";
 const processAuditNoiseBytes = 128 * 1024;
 const processAuditNoiseChunkBytes = 16 * 1024;
 const processAuditNoiseChunkCount = 9;
@@ -150,23 +152,59 @@ async function assertRealSessionProcessAudit() {
   const session = sessionToken();
   const childArguments = [
     "-e",
-    "process.on('SIGTERM', () => {}); setInterval(() => {}, 1_000)",
+    `process.on("SIGTERM", () => {}); process.stdout.write(${JSON.stringify(
+      `${auditChildReadyMarker}\n`,
+    )}); setInterval(() => {}, 1_000)`,
     "--",
     `--revelai-clean-api-session=${session}`,
   ];
   assertArgumentsWithinConservativeLinuxLimit(childArguments);
   const child = spawn(process.execPath, childArguments, {
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "ignore"],
   });
   const close = observeClose(child);
 
   try {
+    await waitForChildReadiness(child.stdout, close);
     await assertSessionAuditDetectsLiveSession(session);
   } finally {
     await terminateAndWait(child, close, { requireKill: true });
   }
   await assertNoSessionProcesses(session);
+}
+
+async function waitForChildReadiness(stdout, close) {
+  if (stdout === null) throw new Error(failure);
+
+  return new Promise((resolve, reject) => {
+    let output = "";
+    let settled = false;
+    const timeout = setTimeout(
+      () => settle(() => reject(new Error(failure))),
+      auditChildReadinessTimeoutMs,
+    );
+    const onData = (chunk) => {
+      output += Buffer.from(chunk).toString("utf8");
+      if (output.includes(auditChildReadyMarker)) settle(resolve);
+    };
+    const onError = () => settle(() => reject(new Error(failure)));
+    const onEnd = () => settle(() => reject(new Error(failure)));
+    const settle = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      stdout.off("data", onData);
+      stdout.off("error", onError);
+      stdout.off("end", onEnd);
+      callback();
+    };
+
+    stdout.on("data", onData);
+    stdout.once("error", onError);
+    stdout.once("end", onEnd);
+    void close.closed.then(() => settle(() => reject(new Error(failure))));
+  });
 }
 
 async function assertSyntheticProcessAuditFindsLateSession() {
