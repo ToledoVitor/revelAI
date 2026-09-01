@@ -5,6 +5,7 @@ import { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AttemptResultResponseSchema,
+  LeaderboardResponseSchema,
   WorkflowBenchmarkReceiptSchema,
   passingWorkflowBenchmarkReceiptFixture,
 } from "@revelai/contracts";
@@ -664,6 +665,47 @@ describe("Verified Training analysis", () => {
         },
       });
       expectPublicResultDoesNotLeakInternals(result.json());
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("projects its ranked Verified result through the public live leaderboard", async () => {
+    const fixture = await makeCombinedVerifiedHttpRoot({
+      provider: createVerifiedFixtureVisionProvider("roboflow"),
+      approvedPolicy: true,
+    });
+    try {
+      await createVerifiedHttpAttempt(fixture.app);
+      await fixture.queueScheduler.runAll();
+
+      const leaderboard = await fixture.app.inject({
+        method: "GET",
+        url: "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1",
+      });
+
+      expect(leaderboard.statusCode).toBe(200);
+      expect(LeaderboardResponseSchema.parse(leaderboard.json())).toMatchObject(
+        {
+          view: "live",
+          challengeId: "wall-pass",
+          challengeVersion: 1,
+          ruleVersion: "wall-pass-v1-score-1",
+          calculatedAt: NOW,
+          cohortSize: 1,
+          entries: [
+            {
+              rank: 1,
+              score: 100,
+              completedAt: NOW,
+            },
+          ],
+          nextCursor: null,
+        },
+      );
+      expect(JSON.stringify(leaderboard.json())).not.toMatch(
+        /athlete|media|receipt|policy|provenance/i,
+      );
     } finally {
       await fixture.close();
     }

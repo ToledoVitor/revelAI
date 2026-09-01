@@ -14,6 +14,7 @@ import {
 } from "../queue/in-memory-analysis-queue.js";
 import {
   resolveProductionSQLiteAttemptUploadPort,
+  resolveProductionSQLiteAttemptProcessingPort,
   type SQLiteAttemptRepository,
 } from "../repositories/sqlite-attempt-repository.js";
 import {
@@ -25,7 +26,7 @@ import { createInternallyComposedAttemptApi } from "../http/attempt-api.js";
 type ProductionAttemptApiInput = Readonly<
   Omit<
     Parameters<typeof createInternallyComposedAttemptApi>[0],
-    "repository" | "queue"
+    "repository" | "queue" | "leaderboard"
   > & {
     repository: SQLiteAttemptRepository;
     retention: SQLiteRetentionRepository;
@@ -36,7 +37,7 @@ type ProductionAttemptApiInput = Readonly<
 type ResolvedProductionAttemptApiInput = Readonly<
   Omit<
     Parameters<typeof createInternallyComposedAttemptApi>[0],
-    "repository" | "queue"
+    "repository" | "queue" | "leaderboard"
   > & {
     repository: SQLiteAttemptRepository;
     retention: SQLiteRetentionRepository;
@@ -146,6 +147,11 @@ export function createProductionAttemptApiFromResolvedQueue(
     !isFactoryIssuedAnalysisQueuePortForHost(snapshot.queue, snapshot.queueHost)
   )
     throw new Error("C8 requires a factory-issued media upload composition.");
+  const processing = resolveProductionSQLiteAttemptProcessingPort(
+    snapshot.repository,
+  );
+  if (!processing || !processing.isCurrent())
+    throw new Error("C8 requires a factory-issued leaderboard composition.");
   const mediaUpload = createFactoryIssuedMediaUploadService({
     repository: snapshot.repository,
     retention: snapshot.retention,
@@ -160,6 +166,7 @@ export function createProductionAttemptApiFromResolvedQueue(
   );
   if (!service)
     throw new Error("C8 media upload does not match this attempt API host.");
+  const listLiveLeaderboard = processing.processing.listLiveLeaderboard;
   return createInternallyComposedAttemptApi(
     Object.freeze({
       repository: snapshot.repository,
@@ -172,6 +179,17 @@ export function createProductionAttemptApiFromResolvedQueue(
       ids: snapshot.ids,
       nonce: snapshot.nonce,
       log: snapshot.log,
+      leaderboard: Object.freeze({
+        listLiveLeaderboard: (
+          input: Parameters<typeof listLiveLeaderboard>[0],
+        ) => {
+          if (!processing.isCurrent())
+            throw new Error(
+              "C8 requires a factory-issued leaderboard composition.",
+            );
+          return listLiveLeaderboard(input);
+        },
+      }),
     }),
     service,
   );

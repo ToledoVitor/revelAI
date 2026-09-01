@@ -118,6 +118,7 @@ type ProductionSQLiteAttemptProcessingPort = Readonly<{
     | "recordProcessingFailure"
     | "deadLetterProcessingClaim"
     | "finalizeTerminalResult"
+    | "listLiveLeaderboard"
   >;
 }>;
 
@@ -1877,6 +1878,8 @@ const exactDeadLetterProcessingClaim =
   SQLiteAttemptRepository.prototype.deadLetterProcessingClaim;
 const exactFinalizeTerminalResult =
   SQLiteAttemptRepository.prototype.finalizeTerminalResult;
+const exactListLiveLeaderboard =
+  SQLiteAttemptRepository.prototype.listLiveLeaderboard;
 
 function registerProductionSQLiteAttemptUploadPort(
   repository: SQLiteAttemptRepository,
@@ -1955,6 +1958,9 @@ function registerProductionSQLiteAttemptProcessingPort(
         finalizeTerminalResult: (
           input: Parameters<AttemptRepository["finalizeTerminalResult"]>[0],
         ) => exactFinalizeTerminalResult.call(repository, input),
+        listLiveLeaderboard: (
+          input: Parameters<AttemptRepository["listLiveLeaderboard"]>[0],
+        ) => exactListLiveLeaderboard.call(repository, input),
       }),
     }),
   );
@@ -1977,31 +1983,76 @@ function isCurrentProductionSQLiteAttemptRepository(
     !Object.hasOwn(repository, "recordProcessingFailure") &&
     !Object.hasOwn(repository, "deadLetterProcessingClaim") &&
     !Object.hasOwn(repository, "finalizeTerminalResult") &&
-    SQLiteAttemptRepository.prototype.prepareMediaUpload ===
-      exactPrepareMediaUpload &&
-    SQLiteAttemptRepository.prototype.attachPreparedMedia ===
-      exactAttachPreparedMedia &&
-    SQLiteAttemptRepository.prototype.rollbackMediaAttachment ===
-      exactRollbackMediaAttachment &&
-    SQLiteAttemptRepository.prototype.beginMediaAttachmentRecovery ===
-      exactBeginMediaAttachmentRecovery &&
-    SQLiteAttemptRepository.prototype.acknowledgeMediaAttachmentCleanup ===
-      exactAcknowledgeMediaAttachmentCleanup &&
-    SQLiteAttemptRepository.prototype.markMediaDeliveryQueued ===
-      exactMarkMediaDeliveryQueued &&
-    SQLiteAttemptRepository.prototype.claimProcessing ===
-      exactClaimProcessing &&
-    SQLiteAttemptRepository.prototype.getProcessingContext ===
-      exactGetProcessingContext &&
-    SQLiteAttemptRepository.prototype.releaseProcessingClaim ===
-      exactReleaseProcessingClaim &&
-    SQLiteAttemptRepository.prototype.recordProcessingFailure ===
-      exactRecordProcessingFailure &&
-    SQLiteAttemptRepository.prototype.deadLetterProcessingClaim ===
-      exactDeadLetterProcessingClaim &&
-    SQLiteAttemptRepository.prototype.finalizeTerminalResult ===
-      exactFinalizeTerminalResult
+    !Object.hasOwn(repository, "listLiveLeaderboard") &&
+    hasExactProductionMethod("prepareMediaUpload", exactPrepareMediaUpload) &&
+    hasExactProductionMethod("attachPreparedMedia", exactAttachPreparedMedia) &&
+    hasExactProductionMethod(
+      "rollbackMediaAttachment",
+      exactRollbackMediaAttachment,
+    ) &&
+    hasExactProductionMethod(
+      "beginMediaAttachmentRecovery",
+      exactBeginMediaAttachmentRecovery,
+    ) &&
+    hasExactProductionMethod(
+      "acknowledgeMediaAttachmentCleanup",
+      exactAcknowledgeMediaAttachmentCleanup,
+    ) &&
+    hasExactProductionMethod(
+      "markMediaDeliveryQueued",
+      exactMarkMediaDeliveryQueued,
+    ) &&
+    hasExactProductionMethod("claimProcessing", exactClaimProcessing) &&
+    hasExactProductionMethod(
+      "getProcessingContext",
+      exactGetProcessingContext,
+    ) &&
+    hasExactProductionMethod(
+      "releaseProcessingClaim",
+      exactReleaseProcessingClaim,
+    ) &&
+    hasExactProductionMethod(
+      "recordProcessingFailure",
+      exactRecordProcessingFailure,
+    ) &&
+    hasExactProductionMethod(
+      "deadLetterProcessingClaim",
+      exactDeadLetterProcessingClaim,
+    ) &&
+    hasExactProductionMethod(
+      "finalizeTerminalResult",
+      exactFinalizeTerminalResult,
+    ) &&
+    hasExactProductionMethod("listLiveLeaderboard", exactListLiveLeaderboard)
   );
+}
+
+type ProductionAttemptMethod =
+  | "prepareMediaUpload"
+  | "attachPreparedMedia"
+  | "rollbackMediaAttachment"
+  | "beginMediaAttachmentRecovery"
+  | "acknowledgeMediaAttachmentCleanup"
+  | "markMediaDeliveryQueued"
+  | "claimProcessing"
+  | "getProcessingContext"
+  | "releaseProcessingClaim"
+  | "recordProcessingFailure"
+  | "deadLetterProcessingClaim"
+  | "finalizeTerminalResult"
+  | "listLiveLeaderboard";
+
+/** Descriptor inspection does not invoke a hostile getter installed later. */
+function hasExactProductionMethod(
+  name: ProductionAttemptMethod,
+  expected: unknown,
+): boolean {
+  const descriptor = Object.getOwnPropertyDescriptor(
+    SQLiteAttemptRepository.prototype,
+    name,
+  );
+  if (!descriptor) return false;
+  return descriptor.value === expected && !descriptor.get && !descriptor.set;
 }
 
 function parseAttemptRow(row: unknown): AttemptRecord {

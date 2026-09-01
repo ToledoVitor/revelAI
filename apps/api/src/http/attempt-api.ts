@@ -17,6 +17,8 @@ import {
   CalibrationSessionSchema,
   ChallengeListResponseSchema,
   CreateAttemptInputSchema,
+  LeaderboardQuerySchema,
+  LeaderboardResponseSchema,
   CreateAttemptResponseSchema,
   MAX_MULTIPART_ENVELOPE_BYTES,
   MAX_UPLOAD_BYTES,
@@ -57,6 +59,7 @@ type AttemptApiIdGenerator = Readonly<{ next(): string }>;
 type AttemptUploadQueue = AttemptApiQueuePort;
 type AttemptApiInput = Readonly<{
   repository: AttemptHttpRepository;
+  leaderboard?: Pick<AttemptRepository, "listLiveLeaderboard">;
   queue: AttemptUploadQueue;
   cleaner: OpaqueAcceptedMediaCleaner;
   maxUploadBytes?: number;
@@ -70,6 +73,7 @@ type AttemptApiInput = Readonly<{
 
 const RECOVERY_BATCH_LIMIT = 100;
 const HOUR_MILLISECONDS = 60 * 60 * 1_000;
+const LIVE_LEADERBOARD_PATH = "/v1/leaderboards/wall-pass";
 const silentRecoveryLog: MediaAttachmentRecoveryLog = Object.freeze({
   event: () => undefined,
 });
@@ -138,6 +142,10 @@ function createAttemptApiInternal(
   });
   const athleteIds = new WeakMap<FastifyRequest, string>();
   const clock = input.clock ?? { now: () => new Date().toISOString() };
+  const now = clock.now.bind(clock);
+  const listLiveLeaderboard = input.leaderboard
+    ? input.leaderboard.listLiveLeaderboard
+    : input.repository.listLiveLeaderboard.bind(input.repository);
   const ids = input.ids ?? { next: randomUUID };
   const nonce = input.nonce ?? (() => randomBytes(32).toString("base64url"));
   const attemptRead = createAttemptReadService({
@@ -146,7 +154,7 @@ function createAttemptApiInternal(
   let recovery: C8RecoveryRuntimeHandle | undefined;
   try {
     app.addHook("onRequest", async (request) => {
-      if (isPublicChallengeRequest(request)) return;
+      if (isPublicRouteRequest(request)) return;
       const athleteId = parseAthleteIdentity(request);
       if (!athleteId) throw new AttemptRouteError("invalid_athlete_identity");
       athleteIds.set(request, athleteId);
@@ -185,6 +193,33 @@ function createAttemptApiInternal(
             ],
           },
         ],
+      });
+    });
+
+    app.get(LIVE_LEADERBOARD_PATH, async (request, reply) => {
+      if (!hasExactPublicPath(request, LIVE_LEADERBOARD_PATH))
+        throw new AttemptRouteError("invalid_request");
+      const query = parseRequest(LeaderboardQuerySchema, request.query);
+      const calculatedAt = now();
+      const page = await listLiveLeaderboard({
+        challenge: {
+          id: "wall-pass",
+          version: query.version,
+          ruleVersion: query.ruleVersion,
+        },
+        limit: query.limit,
+        calculatedAt,
+        ...(query.cursor ? { cursor: query.cursor } : {}),
+      });
+      return sendResponse(reply, 200, LeaderboardResponseSchema, {
+        view: "live",
+        challengeId: "wall-pass",
+        challengeVersion: query.version,
+        ruleVersion: query.ruleVersion,
+        calculatedAt,
+        cohortSize: page.cohortSize,
+        entries: page.entries,
+        nextCursor: page.nextCursor,
       });
     });
 
@@ -290,7 +325,7 @@ function createAttemptApiInternal(
       log: input.log ?? silentRecoveryLog,
       scheduler: input.scheduler ?? processHourlyRecoveryScheduler,
       maxBatchSize: input.recoveryBatchLimit ?? RECOVERY_BATCH_LIMIT,
-      now: () => clock.now(),
+      now,
     });
     app.addHook("onClose", async () => {
       await recovery?.stop();
@@ -357,8 +392,33 @@ function sendRouteError(
   return reply.code(RouteErrorStatusByCode[code]).send(body);
 }
 
-function isPublicChallengeRequest(request: FastifyRequest): boolean {
-  return request.routeOptions.url === "/v1/challenges";
+function isPublicRouteRequest(request: FastifyRequest): boolean {
+  return (
+    request.routeOptions.url === "/v1/challenges" ||
+    request.routeOptions.url === LIVE_LEADERBOARD_PATH ||
+    isPublicLeaderboardPathCandidate(publicRoutePath(request))
+  );
+}
+
+/**
+ * The sole public leaderboard has no athlete identity. Keep noncanonical
+ * continuations and method variants of that raw path in the public error
+ * surface too, so malformed routing cannot turn it into an auth probe.
+ */
+function isPublicLeaderboardPathCandidate(path: string | undefined): boolean {
+  if (!path?.startsWith(LIVE_LEADERBOARD_PATH)) return false;
+  const delimiter = path.at(LIVE_LEADERBOARD_PATH.length);
+  return delimiter === undefined || !/[A-Za-z0-9_-]/.test(delimiter);
+}
+
+function hasExactPublicPath(request: FastifyRequest, path: string): boolean {
+  return publicRoutePath(request) === path;
+}
+
+function publicRoutePath(request: FastifyRequest): string | undefined {
+  const rawUrl = request.raw.url;
+  if (typeof rawUrl !== "string") return undefined;
+  return rawUrl.split("?", 1)[0];
 }
 
 function parseAthleteIdentity(request: FastifyRequest): string | undefined {
