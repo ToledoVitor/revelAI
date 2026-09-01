@@ -180,7 +180,7 @@ describe("Free Training analysis", () => {
     expect(delivered).toEqual([ATTEMPT_ID]);
   });
 
-  it("runs the official HTTP Free root from accepted media through durable terminal result", async () => {
+  it("keeps the official Free root on its issued queue after queue method mutation", async () => {
     const root = await mkdtemp(join(tmpdir(), "revelai-free-http-"));
     directories.push(root);
     const database = openSqliteDatabase(join(root, "api.sqlite"));
@@ -206,6 +206,31 @@ describe("Free Training analysis", () => {
         clock: { now: () => NOW },
       },
     });
+    Object.assign(queue as object, {
+      isAvailable: async () => false,
+      enqueue: async () => {
+        throw new Error("mutated enqueue");
+      },
+      subscribe: () => {
+        throw new Error("mutated subscribe");
+      },
+      scheduleDrain: () => undefined,
+      drain: async () => undefined,
+    });
+    Object.setPrototypeOf(
+      queue,
+      Object.freeze({
+        isAvailable: async () => false,
+        enqueue: async () => {
+          throw new Error("mutated enqueue prototype");
+        },
+        subscribe: () => {
+          throw new Error("mutated subscribe prototype");
+        },
+        scheduleDrain: () => undefined,
+        drain: async () => undefined,
+      }),
+    );
     const created = await app.inject({
       method: "POST",
       url: "/v1/attempts",

@@ -14,6 +14,19 @@ type QueueOptions = Readonly<{
   scheduler?: QueueScheduler;
 }>;
 
+type QueueState = {
+  readonly available: () => boolean | Promise<boolean>;
+  readonly pending: AnalysisJob[];
+  readonly subscribers: Set<
+    Readonly<{
+      deliver: AnalysisJobDelivery;
+      mode: "free" | "verified" | undefined;
+    }>
+  >;
+  drainScheduled: boolean;
+  closed: boolean;
+};
+
 const microtaskScheduler: QueueScheduler = {
   schedule(task) {
     queueMicrotask(() => {
@@ -22,100 +35,117 @@ const microtaskScheduler: QueueScheduler = {
   },
 };
 
+const factoryIssuedAnalysisQueuePorts = new WeakMap<object, AnalysisQueue>();
+
+/** Resolves only the closure port issued for one exact production queue. */
+export function resolveFactoryIssuedAnalysisQueuePort(
+  value: unknown,
+): AnalysisQueue | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  return factoryIssuedAnalysisQueuePorts.get(value);
+}
+
 /**
  * Development-only, single-process at-least-once identifier queue. It never
- * deduplicates jobs or owns attempt lifecycle state.
+ * deduplicates jobs or owns attempt lifecycle state. Its factory-issued port
+ * closes over state, so later public method mutation cannot redirect a live
+ * production composition.
  */
 export class InMemoryAnalysisQueue implements AnalysisQueue {
-  private readonly available: () => boolean | Promise<boolean>;
-  private readonly scheduler: QueueScheduler;
-  private readonly pending: AnalysisJob[] = [];
-  private readonly subscribers = new Set<
-    Readonly<{
-      deliver: AnalysisJobDelivery;
-      mode: "free" | "verified" | undefined;
-    }>
-  >();
-  private drainScheduled = false;
-  private closed = false;
+  readonly #port: AnalysisQueue;
+  readonly #close: () => void;
 
   public constructor(options: QueueOptions = {}) {
-    this.available = options.available ?? (() => true);
-    this.scheduler = options.scheduler ?? microtaskScheduler;
+    if (new.target !== InMemoryAnalysisQueue)
+      throw new Error("In-memory analysis queues cannot be subclassed.");
+    const scheduler = options.scheduler ?? microtaskScheduler;
+    const schedule = scheduler.schedule;
+    const state: QueueState = {
+      available: options.available ?? (() => true),
+      pending: [],
+      subscribers: new Set(),
+      drainScheduled: false,
+      closed: false,
+    };
+    const isAvailable = async (): Promise<boolean> =>
+      !state.closed && (await state.available());
+    const scheduleDrain = (): void => {
+      if (state.drainScheduled || state.pending.length === 0) return;
+      state.drainScheduled = true;
+      schedule.call(scheduler, async () => {
+        state.drainScheduled = false;
+        await drain();
+      });
+    };
+    const drain = async (): Promise<void> => {
+      while (await isAvailable()) {
+        if (state.pending.length === 0 || state.subscribers.size === 0) return;
+        const jobIndex = state.pending.findIndex((job) =>
+          [...state.subscribers].some((subscription) =>
+            acceptsDelivery(subscription, job),
+          ),
+        );
+        if (jobIndex < 0) return;
+        const job = state.pending.splice(jobIndex, 1)[0]!;
+        const subscription = [...state.subscribers].find((candidate) =>
+          acceptsDelivery(candidate, job),
+        );
+        if (!subscription) {
+          state.pending.splice(jobIndex, 0, job);
+          return;
+        }
+
+        try {
+          await subscription.deliver(job);
+        } catch {
+          state.pending.unshift(job);
+          scheduleDrain();
+          return;
+        }
+      }
+    };
+    const enqueue = async (job: AnalysisJob): Promise<void> => {
+      if (!(await isAvailable())) throw new QueueUnavailableError();
+      state.pending.push(Object.freeze({ ...job }));
+      scheduleDrain();
+    };
+    const subscribe = (
+      deliver: AnalysisJobDelivery,
+      options?: Readonly<{ mode: "free" | "verified" }>,
+    ): (() => void) => {
+      if (state.closed) throw new QueueUnavailableError();
+      const subscription = Object.freeze({ deliver, mode: options?.mode });
+      state.subscribers.add(subscription);
+      scheduleDrain();
+      return () => {
+        state.subscribers.delete(subscription);
+      };
+    };
+    this.#close = () => {
+      state.closed = true;
+      state.subscribers.clear();
+    };
+    this.#port = Object.freeze({ isAvailable, enqueue, subscribe });
+    factoryIssuedAnalysisQueuePorts.set(this, this.#port);
   }
 
-  public async isAvailable(): Promise<boolean> {
-    return !this.closed && (await this.available());
+  public isAvailable(): Promise<boolean> {
+    return this.#port.isAvailable();
   }
 
-  public async enqueue(job: AnalysisJob): Promise<void> {
-    if (!(await this.isAvailable())) {
-      throw new QueueUnavailableError();
-    }
-
-    this.pending.push(Object.freeze({ ...job }));
-    this.scheduleDrain();
+  public enqueue(job: AnalysisJob): Promise<void> {
+    return this.#port.enqueue(job);
   }
 
   public subscribe(
     deliver: AnalysisJobDelivery,
     options?: Readonly<{ mode: "free" | "verified" }>,
   ): () => void {
-    if (this.closed) {
-      throw new QueueUnavailableError();
-    }
-
-    const subscription = Object.freeze({ deliver, mode: options?.mode });
-    this.subscribers.add(subscription);
-    this.scheduleDrain();
-    return () => {
-      this.subscribers.delete(subscription);
-    };
+    return this.#port.subscribe(deliver, options);
   }
 
   public close(): void {
-    this.closed = true;
-    this.subscribers.clear();
-  }
-
-  private scheduleDrain(): void {
-    if (this.drainScheduled || this.pending.length === 0) {
-      return;
-    }
-
-    this.drainScheduled = true;
-    this.scheduler.schedule(async () => {
-      this.drainScheduled = false;
-      await this.drain();
-    });
-  }
-
-  private async drain(): Promise<void> {
-    while (await this.isAvailable()) {
-      if (this.pending.length === 0 || this.subscribers.size === 0) return;
-      const jobIndex = this.pending.findIndex((job) =>
-        [...this.subscribers].some((subscription) =>
-          acceptsDelivery(subscription, job),
-        ),
-      );
-      if (jobIndex < 0) return;
-      const job = this.pending.splice(jobIndex, 1)[0]!;
-      const subscription = [...this.subscribers].find((candidate) =>
-        acceptsDelivery(candidate, job),
-      );
-      if (!subscription) {
-        this.pending.splice(jobIndex, 0, job);
-        return;
-      }
-
-      try {
-        await subscription.deliver(job);
-      } catch {
-        this.pending.unshift(job);
-        this.scheduleDrain();
-        return;
-      }
-    }
+    this.#close();
   }
 }
 

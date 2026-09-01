@@ -7,6 +7,7 @@ import {
   type SQLiteRetentionRepository,
 } from "../media/sqlite-retention-repository.js";
 import type { AnalysisQueue } from "../queue/analysis-queue.js";
+import { resolveFactoryIssuedAnalysisQueuePort } from "../queue/in-memory-analysis-queue.js";
 import {
   resolveProductionSQLiteAttemptUploadPort,
   type SQLiteAttemptRepository,
@@ -36,10 +37,12 @@ export function createFactoryIssuedMediaUploadService(
   const attempt = resolveProductionSQLiteAttemptUploadPort(repository);
   const retentionPort = resolveProductionSQLiteRetentionUploadPort(retention);
   const c5 = resolveFactoryIssuedC5MediaPipelinePort(pipeline);
+  const queuePort = resolveFactoryIssuedAnalysisQueuePort(queue);
   if (
     !attempt ||
     !retentionPort ||
     !c5 ||
+    !queuePort ||
     attempt.token !== retentionPort.token ||
     !attempt.isCurrent() ||
     !retentionPort.isCurrent()
@@ -48,8 +51,6 @@ export function createFactoryIssuedMediaUploadService(
   if (c5.handoffVerifier !== attempt.handoffVerifier)
     throw new Error("C8 media upload pipeline does not match C4 authority.");
 
-  const isAvailable = queue.isAvailable;
-  const enqueue = queue.enqueue;
   const service = createMediaUploadService({
     requireCurrent: () => {
       if (!attempt.isCurrent() || !retentionPort.isCurrent())
@@ -59,8 +60,8 @@ export function createFactoryIssuedMediaUploadService(
     },
     prepareMediaUpload: (request) => attempt.prepareMediaUpload(request),
     queue: Object.freeze({
-      isAvailable: () => isAvailable.call(queue),
-      enqueue: (job) => enqueue.call(queue, job),
+      isAvailable: queuePort.isAvailable,
+      enqueue: queuePort.enqueue,
     }),
     attachment: attempt.attachment,
     acceptMultipart: c5.acceptMultipart,

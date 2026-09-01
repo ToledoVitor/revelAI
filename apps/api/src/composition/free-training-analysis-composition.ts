@@ -4,6 +4,7 @@ import {
   type C5MediaPipeline,
 } from "../media/media-pipeline.js";
 import type { AnalysisQueue } from "../queue/analysis-queue.js";
+import { resolveFactoryIssuedAnalysisQueuePort } from "../queue/in-memory-analysis-queue.js";
 import {
   resolveProductionSQLiteAttemptProcessingPort,
   type SQLiteAttemptRepository,
@@ -44,7 +45,7 @@ export function createFactoryIssuedFreeTrainingRuntime(
   const clock = rawOptions.clock;
   const snapshot = Object.freeze({
     repository,
-    queue: sealAnalysisQueue(rawQueue),
+    queue: resolveRequiredAnalysisQueuePort(rawQueue),
     mediaPipeline,
     options: Object.freeze({ provider, scheduler, clock }),
   });
@@ -165,7 +166,7 @@ function snapshotFreeTrainingApiInput(
   return Object.freeze({
     repository,
     retention,
-    queue: sealAnalysisQueue(rawQueue),
+    queue: rawQueue,
     mediaPipeline,
     cleaner,
     maxUploadBytes,
@@ -183,15 +184,11 @@ function snapshotFreeTrainingApiInput(
   });
 }
 
-function sealAnalysisQueue(queue: AnalysisQueue): AnalysisQueue {
-  const isAvailable = queue.isAvailable;
-  const enqueue = queue.enqueue;
-  const subscribe = queue.subscribe;
-  return Object.freeze({
-    isAvailable: () => isAvailable.call(queue),
-    enqueue: (job) => enqueue.call(queue, job),
-    subscribe: (deliver, options) => subscribe.call(queue, deliver, options),
-  });
+function resolveRequiredAnalysisQueuePort(queue: AnalysisQueue): AnalysisQueue {
+  const port = resolveFactoryIssuedAnalysisQueuePort(queue);
+  if (!port)
+    throw new Error("C8 requires a factory-issued media upload composition.");
+  return port;
 }
 
 function assertFactoryIssuedFreeTrainingComposition(

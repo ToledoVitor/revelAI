@@ -31,6 +31,7 @@ import {
   QueueUnavailableError,
   type AnalysisQueue,
 } from "../queue/analysis-queue.js";
+import { resolveFactoryIssuedAnalysisQueuePort } from "../queue/in-memory-analysis-queue.js";
 import { MediaPipelineError } from "../media/probe.js";
 import { RepositoryError } from "../repositories/attempt-repository.js";
 import type {
@@ -119,12 +120,15 @@ export function createInternallyComposedAttemptApi(
   input: AttemptApiInput,
   mediaUpload: BoundMediaUploadService,
 ): FastifyInstance {
+  const queue = resolveFactoryIssuedAnalysisQueuePort(input.queue);
+  if (!queue)
+    throw new Error("C8 requires a factory-issued media upload composition.");
   const service = mediaUpload.forHost(
     Object.freeze({ repository: input.repository, queue: input.queue }),
   );
   if (!service)
     throw new Error("C8 media upload does not match this attempt API host.");
-  return createAttemptApiInternal(input, service);
+  return createAttemptApiInternal(Object.freeze({ ...input, queue }), service);
 }
 
 function createAttemptApiInternal(

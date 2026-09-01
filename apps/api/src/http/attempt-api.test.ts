@@ -33,6 +33,7 @@ import { SQLiteRetentionRepository } from "../media/sqlite-retention-repository.
 import type { LocalMediaProber } from "../storage/local-media-storage.js";
 import { createLocalC8AcceptedMediaCleaner } from "../services/local-c8-accepted-media-cleaner.js";
 import type { MediaUploadService } from "../services/media-upload-service.js";
+import { InMemoryAnalysisQueue } from "../queue/in-memory-analysis-queue.js";
 import {
   createFactoryIssuedMediaUploadService,
   createProductionAttemptApi,
@@ -166,6 +167,8 @@ describe("attempt HTTP foundation", () => {
       Object.create(SQLiteRetentionRepository.prototype),
       fixture.retention,
     );
+    const queueProxy = new Proxy(fixture.queue, {});
+    const queueClone = Object.assign({}, fixture.queue);
 
     expect(() => issue(derived)).toThrow(
       "factory-issued media upload composition",
@@ -176,6 +179,33 @@ describe("attempt HTTP foundation", () => {
     expect(() => issue(clone)).toThrow(
       "factory-issued media upload composition",
     );
+    expect(() =>
+      createFactoryIssuedMediaUploadService({
+        repository: fixture.repository,
+        retention: fixture.retention,
+        queue: queueProxy,
+        mediaPipeline: fixture.c5.pipeline,
+      }),
+    ).toThrow("factory-issued media upload composition");
+    expect(() =>
+      createFactoryIssuedMediaUploadService({
+        repository: fixture.repository,
+        retention: fixture.retention,
+        queue: queueClone,
+        mediaPipeline: fixture.c5.pipeline,
+      }),
+    ).toThrow("factory-issued media upload composition");
+    expect(() =>
+      createFactoryIssuedMediaUploadService({
+        repository: fixture.repository,
+        retention: fixture.retention,
+        queue: {
+          isAvailable: async () => true,
+          enqueue: async () => undefined,
+        },
+        mediaPipeline: fixture.c5.pipeline,
+      }),
+    ).toThrow("factory-issued media upload composition");
     expect(() =>
       createFactoryIssuedMediaUploadService({
         repository: fixture.repository,
@@ -1304,8 +1334,10 @@ describe("attempt HTTP foundation", () => {
       athleteId: ATHLETE_A,
       input: { mode: "free" },
     });
-    fixture.setQueueEnqueue(() => {
-      throw new Error("queue down");
+    let availabilityChecks = 0;
+    fixture.setQueueAvailability(() => {
+      availabilityChecks += 1;
+      return availabilityChecks < 3;
     });
     const reply = await fixture.app.inject({
       method: "POST",
@@ -2438,12 +2470,9 @@ async function makeMediaApi(
     handoffVerifier: c5.handoffVerifier,
   });
   let availability = (): boolean => true;
-  let enqueue = async (): Promise<void> => undefined;
-  const queue = {
-    isAvailable: async () => availability(),
-    enqueue: async () => enqueue(),
-    subscribe: () => () => undefined,
-  };
+  const queue = new InMemoryAnalysisQueue({
+    available: () => availability(),
+  });
   const retention = new SQLiteRetentionRepository({ database });
   const app = createProductionAttemptApi({
     repository,
@@ -2471,9 +2500,6 @@ async function makeMediaApi(
     retention,
     setQueueAvailability(value: () => boolean) {
       availability = value;
-    },
-    setQueueEnqueue(value: () => Promise<void>) {
-      enqueue = value;
     },
     async close() {
       await app.close();
