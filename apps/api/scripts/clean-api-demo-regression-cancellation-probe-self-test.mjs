@@ -39,8 +39,7 @@ const closeAfterKillMs = 5_000;
 const processAuditNoiseBytes = 128 * 1024;
 const processAuditNoiseChunkBytes = 16 * 1024;
 const processAuditNoiseChunkCount = 9;
-const processAuditMarkerEnvironment =
-  "REVELAI_CLEAN_API_AUDIT_PROCESS_MARKER";
+const processAuditMarkerEnvironment = "REVELAI_CLEAN_API_AUDIT_PROCESS_MARKER";
 const foreignSession = sessionToken();
 const foreignFixture = await mkdtemp(
   join(tmpdir(), `${fixtureRoot}${foreignSession}-`),
@@ -184,11 +183,7 @@ async function assertSyntheticProcessAuditFindsLateSession() {
       mode: 0o700,
     });
     await chmod(executable, 0o700);
-    assertArgumentsWithinConservativeLinuxLimit([
-      "-ww",
-      "-axo",
-      "command=",
-    ]);
+    assertArgumentsWithinConservativeLinuxLimit(["-ww", "-axo", "command="]);
     assertOversizedLinuxArgumentIsRejected();
     if (
       processAuditNoiseChunkBytes * processAuditNoiseChunkCount <=

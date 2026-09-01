@@ -83,12 +83,15 @@ export function processTableContains(needle, environment = process.env) {
       return;
     }
 
-    hardDeadline = setTimeout(() => {
-      timedOut = true;
-      terminate();
-      if (child?.pid !== undefined) signalProcessGroup(child.pid, "SIGKILL");
-      settle(() => reject(new Error("Process-table audit failed.")));
-    }, processTableTimeoutMs + terminationGraceMs + 500);
+    hardDeadline = setTimeout(
+      () => {
+        timedOut = true;
+        terminate();
+        if (child?.pid !== undefined) signalProcessGroup(child.pid, "SIGKILL");
+        settle(() => reject(new Error("Process-table audit failed.")));
+      },
+      processTableTimeoutMs + terminationGraceMs + 500,
+    );
 
     child.stdout.on("data", (chunk) => {
       const bytes = Buffer.byteLength(chunk);
