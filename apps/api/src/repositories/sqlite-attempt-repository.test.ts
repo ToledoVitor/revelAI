@@ -372,6 +372,41 @@ function freeOutcome(
   };
 }
 
+function createV20TerminalPredecessor(
+  filename: string,
+  input: Readonly<{
+    attemptId: string;
+    outcome: TerminalCandidate;
+    completedAt: string;
+  }>,
+) {
+  if (input.outcome.state !== "valid")
+    throw new Error("Expected a valid terminal predecessor outcome.");
+  const database = openSqliteDatabaseAtVersionForTest(filename, 20);
+  database.raw
+    .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+    .run(ATHLETE_A, input.completedAt);
+  database.raw
+    .prepare(
+      "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, media_json, processing_generation, created_at, updated_at) VALUES (?, ?, 'free', NULL, NULL, NULL, 'processing', 'active', NULL, 1, ?, ?)",
+    )
+    .run(input.attemptId, ATHLETE_A, input.completedAt, input.completedAt);
+  database.raw
+    .prepare(
+      "INSERT INTO terminal_results (id, attempt_id, lease_id, generation, terminal_state, outcome_json, candidate_json, completed_at, created_at) VALUES (?, ?, ?, 1, 'valid', ?, ?, ?, ?)",
+    )
+    .run(
+      `terminal-${input.attemptId}`,
+      input.attemptId,
+      LEASE_A,
+      JSON.stringify(input.outcome),
+      JSON.stringify(input.outcome),
+      input.completedAt,
+      input.completedAt,
+    );
+  return database;
+}
+
 function rankedOutcome(
   attemptId: string,
   completedAt: string,
@@ -3726,6 +3761,122 @@ describe("SQLiteAttemptRepository", () => {
         .get(),
     ).toEqual({ count: 21 });
     reopened.close();
+  });
+
+  it("repairs exact v20 terminal predecessors transactionally and leaves mismatches fail-closed", async () => {
+    const completedAt = fixture.clock.now();
+    const validFilename = join(fixture.directory, "legacy-terminal-v20.sqlite");
+    const predecessor = createV20TerminalPredecessor(validFilename, {
+      attemptId: ATTEMPT_A,
+      outcome: freeOutcome(ATTEMPT_A, completedAt),
+      completedAt,
+    });
+    expect(predecessor.raw.pragma("user_version", { simple: true })).toBe(20);
+    predecessor.close();
+
+    const normalized = openSqliteDatabase(validFilename);
+    expect(
+      normalized.raw
+        .prepare("SELECT status FROM attempts WHERE id = ?")
+        .get(ATTEMPT_A),
+    ).toEqual({ status: "valid" });
+    expect(normalized.raw.pragma("user_version", { simple: true })).toBe(21);
+    normalized.close();
+
+    const staleCurrent = openSqliteDatabaseAtVersionForTest(validFilename, 21);
+    staleCurrent.raw.pragma("user_version = 0");
+    staleCurrent.close();
+
+    const idempotent = openSqliteDatabase(validFilename);
+    expect(
+      idempotent.raw
+        .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+        .get(),
+    ).toEqual({ count: 21 });
+    expect(idempotent.raw.pragma("user_version", { simple: true })).toBe(21);
+    expect(
+      idempotent.raw
+        .prepare("SELECT status FROM attempts WHERE id = ?")
+        .get(ATTEMPT_A),
+    ).toEqual({ status: "valid" });
+    idempotent.close();
+
+    const mismatchFilename = join(
+      fixture.directory,
+      "legacy-terminal-v20-mismatch.sqlite",
+    );
+    const mismatchPredecessor = createV20TerminalPredecessor(mismatchFilename, {
+      attemptId: ATTEMPT_A,
+      outcome: freeOutcome(ATTEMPT_B, completedAt),
+      completedAt,
+    });
+    mismatchPredecessor.close();
+    const mismatch = openSqliteDatabase(mismatchFilename);
+    expect(
+      mismatch.raw
+        .prepare("SELECT status FROM attempts WHERE id = ?")
+        .get(ATTEMPT_A),
+    ).toEqual({ status: "processing" });
+    const mismatchRepository = SQLiteAttemptRepository.forReadOnlyTest({
+      database: mismatch,
+      clock: fixture.clock,
+      ids: new TestIds(LEASE_B),
+    });
+    await expect(
+      mismatchRepository.getAttempt({
+        attemptId: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+      }),
+    ).rejects.toMatchObject({ code: "persisted_data_corrupt" });
+    mismatch.close();
+
+    const rollbackFilename = join(
+      fixture.directory,
+      "legacy-terminal-v20-rollback.sqlite",
+    );
+    const rollbackPredecessor = createV20TerminalPredecessor(rollbackFilename, {
+      attemptId: ATTEMPT_A,
+      outcome: freeOutcome(ATTEMPT_A, completedAt),
+      completedAt,
+    });
+    // Simulate a v20 database created before user_version was reconciled.
+    rollbackPredecessor.raw.pragma("user_version = 0");
+    rollbackPredecessor.raw.exec(`
+      CREATE TRIGGER reject_v21_terminal_normalization
+      BEFORE UPDATE OF status ON attempts
+      WHEN NEW.status = 'valid'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced v21 rollback');
+      END;
+    `);
+    rollbackPredecessor.close();
+
+    expect(() => openSqliteDatabase(rollbackFilename)).toThrow(
+      "forced v21 rollback",
+    );
+    const rolledBack = openSqliteDatabaseAtVersionForTest(rollbackFilename, 20);
+    expect(rolledBack.raw.pragma("user_version", { simple: true })).toBe(20);
+    expect(
+      rolledBack.raw
+        .prepare(
+          "SELECT status, outcome_json FROM attempts INNER JOIN terminal_results ON terminal_results.attempt_id = attempts.id WHERE attempts.id = ?",
+        )
+        .get(ATTEMPT_A),
+    ).toEqual({
+      status: "processing",
+      outcome_json: JSON.stringify(freeOutcome(ATTEMPT_A, completedAt)),
+    });
+    rolledBack.raw.exec("DROP TRIGGER reject_v21_terminal_normalization");
+    rolledBack.close();
+
+    const repaired = openSqliteDatabase(rollbackFilename);
+    expect(
+      repaired.raw
+        .prepare("SELECT status FROM attempts WHERE id = ?")
+        .get(ATTEMPT_A),
+    ).toEqual({ status: "valid" });
+    expect(repaired.raw.pragma("user_version", { simple: true })).toBe(21);
+    repaired.close();
   });
 
   it("backfills a live v17 delivery row with its exact durable frame batch once", () => {

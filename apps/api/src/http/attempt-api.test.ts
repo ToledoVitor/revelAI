@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -1736,6 +1737,43 @@ describe("attempt HTTP foundation", () => {
     await fixture.close();
   });
 
+  it("rejects every raw query suffix from both canonical attempt read URLs", async () => {
+    const fixture = await makeApi();
+    const created = CreateAttemptResponseSchema.parse(
+      (
+        await fixture.app.inject({
+          method: "POST",
+          url: "/v1/attempts",
+          headers: athleteHeader(ATHLETE_A),
+          payload: { mode: "free" },
+        })
+      ).json(),
+    );
+    await fixture.app.listen({ host: "127.0.0.1", port: 0 });
+
+    try {
+      for (const path of [
+        `/v1/attempts/${created.id}?`,
+        `/v1/attempts/${created.id}?&`,
+        `/v1/attempts/${created.id}/result?`,
+        `/v1/attempts/${created.id}/result?&`,
+      ]) {
+        const response = await rawHttpGet(
+          fixture.app,
+          path,
+          athleteHeader(ATHLETE_A),
+        );
+        expect(response.statusCode, path).toBe(400);
+        expect(
+          RouteErrorSchema.parse(JSON.parse(response.body)).code,
+          path,
+        ).toBe("invalid_request");
+      }
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it("projects C4's authoritative pending and terminal outcomes through the exact C2 schemas", async () => {
     const issuedIds = [
       "11111111-1111-4111-8111-111111111112",
@@ -2269,6 +2307,42 @@ async function resolvesSoon(predicate: () => boolean): Promise<void> {
 
 function athleteHeader(athleteId: string): Readonly<Record<string, string>> {
   return { "x-revelai-athlete-id": athleteId };
+}
+
+async function rawHttpGet(
+  app: FastifyInstance,
+  path: string,
+  headers: Readonly<Record<string, string>>,
+): Promise<Readonly<{ statusCode: number; body: string }>> {
+  const address = app.server.address();
+  if (address === null || typeof address === "string")
+    throw new Error("Expected a listening TCP Fastify server.");
+  return new Promise((resolveRequest, rejectRequest) => {
+    const request = httpRequest(
+      {
+        hostname: "127.0.0.1",
+        port: address.port,
+        method: "GET",
+        path,
+        headers,
+      },
+      (response) => {
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          body += chunk;
+        });
+        response.once("error", rejectRequest);
+        response.once("end", () =>
+          resolveRequest(
+            Object.freeze({ statusCode: response.statusCode ?? 0, body }),
+          ),
+        );
+      },
+    );
+    request.once("error", rejectRequest);
+    request.end();
+  });
 }
 
 async function makeApi(

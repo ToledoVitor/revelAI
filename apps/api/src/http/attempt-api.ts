@@ -416,10 +416,9 @@ function hasExactCanonicalAttemptPath(
 ): boolean {
   const rawUrl = request.raw.url;
   if (typeof rawUrl !== "string") return false;
-  const path = rawUrl.split("?", 1)[0];
   return (
-    path === `/v1/attempts/${attemptId}` ||
-    path === `/v1/attempts/${attemptId}/result`
+    rawUrl === `/v1/attempts/${attemptId}` ||
+    rawUrl === `/v1/attempts/${attemptId}/result`
   );
 }
 

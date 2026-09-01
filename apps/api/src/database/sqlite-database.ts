@@ -924,6 +924,7 @@ function applyMigrations(
       .all()
       .map((row) => Number((row as { version: number }).version)),
   );
+  raw.pragma(`user_version = ${Math.max(0, ...applied)}`);
 
   for (const migration of migrations) {
     if (migrationVersion !== undefined && migration.version > migrationVersion)
@@ -938,6 +939,7 @@ function applyMigrations(
           "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
         )
         .run(migration.version, new Date().toISOString());
+      raw.pragma(`user_version = ${migration.version}`);
       raw.exec("COMMIT");
     } catch (error) {
       raw.exec("ROLLBACK");
