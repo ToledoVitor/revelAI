@@ -55,6 +55,8 @@ describe("FfprobeMediaProber", () => {
           "/private/path;rm -rf nope",
         ],
         timeoutMilliseconds: 7000,
+        maxStdoutBytes: 196608,
+        maxStderrBytes: 65536,
         maxOutputBytes: 262144,
       },
     ]);
@@ -107,6 +109,46 @@ describe("FfprobeMediaProber", () => {
     await expect(
       mismatch.probe({ filePath: "/private/a", magicContainer: "mp4" }),
     ).rejects.toThrow(new MediaPipelineError("media_container_not_allowed"));
+  });
+
+  it("partitions a configured aggregate FFprobe cap across stdout and stderr", async () => {
+    const calls: unknown[] = [];
+    const prober = new FfprobeMediaProber({
+      maxOutputBytes: 1024,
+      runner: {
+        run: async (command) => {
+          calls.push(command);
+          return {
+            exitCode: 0,
+            termination: "completed",
+            stdout: JSON.stringify({
+              format: { format_name: "mp4", duration: "64" },
+              streams: [
+                {
+                  codec_type: "video",
+                  codec_name: "h264",
+                  width: 1280,
+                  height: 720,
+                  avg_frame_rate: "30/1",
+                  disposition: { attached_pic: 0 },
+                },
+              ],
+            }),
+            stderr: "",
+          };
+        },
+      },
+    });
+
+    await expect(
+      prober.probe({ filePath: "/private/video.mp4", magicContainer: "mp4" }),
+    ).resolves.toMatchObject({ container: "mp4" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      maxStdoutBytes: 768,
+      maxStderrBytes: 256,
+      maxOutputBytes: 1024,
+    });
   });
 
   it.each(["timed_out", "terminated"] as const)(
