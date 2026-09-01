@@ -5,6 +5,7 @@ import {
   AttemptOutcomeSchema,
   CreateAttemptResponseSchema,
   FreeInsightSchema,
+  LeaderboardQuerySchema,
   LeaderboardResponseSchema,
   MediaUploadFixtureDescriptorSchema,
   MediaUploadPartSchema,
@@ -92,6 +93,45 @@ function requiresLiteralTemporaryFailureRetryability(
 void requiresLiteralTemporaryFailureRetryability;
 
 describe("review regression contracts", () => {
+  it("accepts only canonical live leaderboard query wire values", () => {
+    expect(
+      LeaderboardQuerySchema.parse({
+        version: "1",
+        ruleVersion: "wall-pass-v1-score-1",
+      }),
+    ).toEqual({
+      version: 1,
+      ruleVersion: "wall-pass-v1-score-1",
+      limit: 20,
+    });
+    expect(
+      LeaderboardQuerySchema.parse({
+        version: "1",
+        ruleVersion: "wall-pass-v1-score-1",
+        limit: "50",
+      }),
+    ).toMatchObject({ version: 1, limit: 50 });
+
+    for (const query of [
+      { version: 1, ruleVersion: "wall-pass-v1-score-1" },
+      { version: "01", ruleVersion: "wall-pass-v1-score-1" },
+      { version: "1.0", ruleVersion: "wall-pass-v1-score-1" },
+      { version: " 1", ruleVersion: "wall-pass-v1-score-1" },
+      { version: "1 ", ruleVersion: "wall-pass-v1-score-1" },
+      { version: "1", ruleVersion: "wall-pass-v1-score-1", limit: "01" },
+      { version: "1", ruleVersion: "wall-pass-v1-score-1", limit: "+1" },
+      { version: "1", ruleVersion: "wall-pass-v1-score-1", limit: "-1" },
+      { version: "1", ruleVersion: "wall-pass-v1-score-1", limit: "1.0" },
+      { version: "1", ruleVersion: "wall-pass-v1-score-1", limit: "1e1" },
+      { version: "1", ruleVersion: "wall-pass-v1-score-1", limit: " 1" },
+      { version: "1", ruleVersion: "wall-pass-v1-score-1", limit: "1 " },
+      { version: "1", ruleVersion: "wall-pass-v1-score-1", limit: "0" },
+      { version: "1", ruleVersion: "wall-pass-v1-score-1", limit: "51" },
+    ]) {
+      expect(LeaderboardQuerySchema.safeParse(query).success).toBe(false);
+    }
+  });
+
   it("rejects a history item whose outer identity, mode, status, and outcome disagree", () => {
     expect(
       AttemptReadResponseSchema.safeParse({

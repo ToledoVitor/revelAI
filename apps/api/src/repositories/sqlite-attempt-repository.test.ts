@@ -50,11 +50,13 @@ import {
 
 const ATHLETE_A = "11111111-1111-4111-8111-111111111111";
 const ATHLETE_B = "22222222-2222-4222-8222-222222222222";
+const ATHLETE_C = "33333333-3333-4333-8333-333333333333";
 const ATTEMPT_A = "33333333-3333-4333-8333-333333333333";
 const ATTEMPT_B = "44444444-4444-4444-8444-444444444444";
 const ATTEMPT_C = "55555555-5555-4555-8555-555555555555";
 const SESSION_A = "66666666-6666-4666-8666-666666666666";
 const SESSION_B = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const SESSION_C = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const LEASE_A = "77777777-7777-4777-8777-777777777777";
 const LEASE_B = "88888888-8888-4888-8888-888888888888";
 const ENTRY_A = "99999999-9999-4999-8999-999999999999";
@@ -1895,7 +1897,6 @@ describe("SQLiteAttemptRepository", () => {
             ruleVersion: "wall-pass-v1-score-1",
           },
           limit: 20,
-          calculatedAt: fixture.clock.now(),
         })
       ).entries,
     ).toEqual([]);
@@ -2049,7 +2050,8 @@ describe("SQLiteAttemptRepository", () => {
     } as const;
     const firstClaim = (await fixture.repository.claimProcessing(firstJob))!;
     const secondClaim = (await second.claimProcessing(secondJob))!;
-    const { activation } = await activatePassingCompetitivePolicy(fixture);
+    const { activation, rankedPolicy } =
+      await activatePassingCompetitivePolicy(fixture);
     const completedAt = fixture.clock.now();
     const first = startRepositoryActor({
       filename: join(fixture.directory, "api.sqlite"),
@@ -2127,9 +2129,9 @@ describe("SQLiteAttemptRepository", () => {
         ruleVersion: "wall-pass-v1-score-1",
       },
       limit: 1,
-      calculatedAt: completedAt,
     });
     expect(firstPage).toEqual({
+      calculatedAt: completedAt,
       cohortSize: 2,
       entries: [
         {
@@ -2149,9 +2151,9 @@ describe("SQLiteAttemptRepository", () => {
       },
       limit: 1,
       cursor: firstPage.nextCursor!,
-      calculatedAt: completedAt,
     });
     expect(secondPage).toEqual({
+      calculatedAt: completedAt,
       cohortSize: 2,
       entries: [
         {
@@ -2166,6 +2168,34 @@ describe("SQLiteAttemptRepository", () => {
     expect(
       Buffer.from(firstPage.nextCursor!, "base64url").toString("utf8"),
     ).not.toContain(ATTEMPT_A);
+    fixture.clock.advance(1);
+    const thirdClaim = await claimVerifiedAttempt(fixture, {
+      attemptId: ATTEMPT_C,
+      athleteId: ATHLETE_C,
+      sessionId: SESSION_C,
+      mediaId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    });
+    const insertedAt = fixture.clock.now();
+    await fixture.repository.finalizeTerminalResult({
+      attemptId: ATTEMPT_C,
+      leaseId: thirdClaim.leaseId,
+      generation: thirdClaim.generation,
+      candidate: rankedOutcome(ATTEMPT_C, insertedAt, 90),
+      rankedPolicy,
+    });
+    const currentPage = await fixture.repository.listLiveLeaderboard({
+      challenge: {
+        id: "wall-pass",
+        version: 1,
+        ruleVersion: "wall-pass-v1-score-1",
+      },
+      limit: 10,
+    });
+    expect(currentPage.calculatedAt).toBe(insertedAt);
+    expect(currentPage.cohortSize).toBe(3);
+    expect(currentPage.entries).toContainEqual(
+      expect.objectContaining({ score: 90 }),
+    );
     await expect(
       fixture.repository.listLiveLeaderboard({
         challenge: {
@@ -2175,9 +2205,8 @@ describe("SQLiteAttemptRepository", () => {
         },
         limit: 1,
         cursor: firstPage.nextCursor!,
-        calculatedAt: "2030-01-15T12:00:01.000Z",
       }),
-    ).rejects.toMatchObject({ code: "invalid_input" });
+    ).resolves.toEqual(secondPage);
     const tamperedCursor = `${firstPage.nextCursor!.slice(0, -1)}${
       firstPage.nextCursor!.at(-1) === "A" ? "B" : "A"
     }`;
@@ -2190,7 +2219,6 @@ describe("SQLiteAttemptRepository", () => {
         },
         limit: 1,
         cursor: tamperedCursor,
-        calculatedAt: completedAt,
       }),
     ).rejects.toMatchObject({ code: "invalid_input" });
     await fixture.repository.tombstoneAttempt({
@@ -2206,9 +2234,9 @@ describe("SQLiteAttemptRepository", () => {
         },
         limit: 1,
         cursor: firstPage.nextCursor!,
-        calculatedAt: completedAt,
       }),
     ).resolves.toEqual({
+      calculatedAt: completedAt,
       cohortSize: 1,
       entries: [{ entryId: ENTRY_B, rank: 1, score: 80, completedAt }],
       nextCursor: null,
@@ -2296,6 +2324,16 @@ describe("SQLiteAttemptRepository", () => {
         candidate: rankedOutcome(ATTEMPT_A, cutoff, 80),
         rankedPolicy,
       });
+      const oldSnapshot = await local.repository.listLiveLeaderboard({
+        challenge: {
+          id: "wall-pass",
+          version: 1,
+          ruleVersion: "wall-pass-v1-score-1",
+        },
+        limit: 10,
+      });
+      expect(oldSnapshot.calculatedAt).toBe(cutoff);
+      expect(oldSnapshot.entries).toHaveLength(1);
       local.clock.advance(1);
       const secondClaim = (await local.repository.claimProcessing({
         attemptId: ATTEMPT_B,
@@ -2309,16 +2347,6 @@ describe("SQLiteAttemptRepository", () => {
         rankedPolicy,
       });
 
-      const oldSnapshot = await local.repository.listLiveLeaderboard({
-        challenge: {
-          id: "wall-pass",
-          version: 1,
-          ruleVersion: "wall-pass-v1-score-1",
-        },
-        limit: 10,
-        calculatedAt: cutoff,
-      });
-      expect(oldSnapshot.entries).toHaveLength(1);
       const currentSnapshot = await local.repository.listLiveLeaderboard({
         challenge: {
           id: "wall-pass",
@@ -2326,8 +2354,8 @@ describe("SQLiteAttemptRepository", () => {
           ruleVersion: "wall-pass-v1-score-1",
         },
         limit: 10,
-        calculatedAt: local.clock.now(),
       });
+      expect(currentSnapshot.calculatedAt).toBe(local.clock.now());
       expect(currentSnapshot.entries).toHaveLength(2);
       expect(currentSnapshot.entries).toContainEqual(oldSnapshot.entries[0]);
     } finally {
@@ -2628,7 +2656,6 @@ describe("SQLiteAttemptRepository", () => {
             ruleVersion: "wall-pass-v1-score-1",
           },
           limit: 20,
-          calculatedAt: fixture.clock.now(),
         })
       ).entries,
     ).toEqual([]);

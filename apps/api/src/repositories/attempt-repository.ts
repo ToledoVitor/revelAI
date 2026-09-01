@@ -170,7 +170,6 @@ export type LiveLeaderboardPageInput = Readonly<{
   }>;
   limit: number;
   cursor?: string;
-  calculatedAt: string;
 }>;
 
 export type LiveLeaderboardPage = Readonly<{
@@ -180,6 +179,8 @@ export type LiveLeaderboardPage = Readonly<{
     score: number;
     completedAt: string;
   }>[];
+  /** C4's authenticated first-page cutoff or the cursor's bound cutoff. */
+  calculatedAt: string;
   cohortSize: number;
   nextCursor: string | null;
 }>;

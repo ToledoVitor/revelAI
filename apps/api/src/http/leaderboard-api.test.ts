@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   LeaderboardResponseSchema,
   passingWorkflowBenchmarkReceiptFixture,
+  RouteErrorSchema,
 } from "@revelai/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { createProductionAttemptApi } from "../composition/sqlite-media-upload-composition.js";
@@ -142,7 +143,7 @@ describe("wall-pass live leaderboard HTTP", () => {
     }
   }, 10_000);
 
-  it("rejects malformed, tampered, stale, and cross-tuple leaderboard queries", async () => {
+  it("keeps an authenticated page cursor stable as the clock advances", async () => {
     const fixture = await makeLeaderboardApi();
     try {
       const rankedPolicy = await activatePassingCompetitivePolicy(fixture);
@@ -164,27 +165,84 @@ describe("wall-pass live leaderboard HTTP", () => {
         method: "GET",
         url: "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=1",
       });
-      const cursor = LeaderboardResponseSchema.parse(first.json()).nextCursor;
+      const firstPage = LeaderboardResponseSchema.parse(first.json());
+      const cursor = firstPage.nextCursor;
       expect(cursor).toEqual(expect.any(String));
+      const readsAfterFirstPage = fixture.clockReadCount();
+      const tamperedCursor = `${cursor!.slice(0, -1)}${
+        cursor!.at(-1) === "A" ? "B" : "A"
+      }`;
+      const tampered = await fixture.app.inject({
+        method: "GET",
+        url: `/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=1&cursor=${encodeURIComponent(tamperedCursor)}`,
+      });
+      expect(tampered.statusCode).toBe(400);
+      expect(RouteErrorSchema.parse(tampered.json()).code).toBe(
+        "invalid_request",
+      );
 
-      const malformedUrls = [
-        "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=20&limit=20",
+      fixture.setCalculatedAt("2030-01-15T12:00:00.001Z");
+      const second = await fixture.app.inject({
+        method: "GET",
+        url: `/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=1&cursor=${encodeURIComponent(cursor!)}`,
+      });
+      expect(second.statusCode).toBe(200);
+      expect(LeaderboardResponseSchema.parse(second.json())).toMatchObject({
+        calculatedAt: firstPage.calculatedAt,
+        cohortSize: 2,
+        entries: [{ score: 81, rank: 2 }],
+        nextCursor: null,
+      });
+      expect(fixture.clockReadCount()).toBe(readsAfterFirstPage);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("keeps malformed leaderboard namespace requests public and query grammar canonical", async () => {
+    const fixture = await makeLeaderboardApi();
+    try {
+      const canonical = await fixture.app.inject({
+        method: "GET",
+        url: "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=50",
+      });
+      expect(canonical.statusCode).toBe(200);
+
+      for (const url of [
+        "/v1/leaderboards/wall-passx",
+        "/v1/leaderboards/wall-pass/",
+        "/v1/leaderboards/not-wall-pass",
+        "/v1/leaderboards/wall-pass?version=01&ruleVersion=wall-pass-v1-score-1",
+        "/v1/leaderboards/wall-pass?version=1.0&ruleVersion=wall-pass-v1-score-1",
+        "/v1/leaderboards/wall-pass?version=1e0&ruleVersion=wall-pass-v1-score-1",
+        "/v1/leaderboards/wall-pass?version=%201&ruleVersion=wall-pass-v1-score-1",
+        "/v1/leaderboards/wall-pass?version=1%20&ruleVersion=wall-pass-v1-score-1",
         "/v1/leaderboards/wall-pass?version=1&version=1&ruleVersion=wall-pass-v1-score-1",
         "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&ruleVersion=wall-pass-v1-score-1",
         "/v1/leaderboards/wall-pass?version=2&ruleVersion=wall-pass-v1-score-1",
         "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-2",
         "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&unknown=true",
-        "/v1/leaderboards/wall-pass/?version=1&ruleVersion=wall-pass-v1-score-1",
+        "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=01",
+        "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=%2B1",
+        "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=-1",
+        "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=1.0",
+        "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=1e1",
+        "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=%201",
+        "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=1%20",
+        "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=0",
+        "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=51",
+        "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=1&limit=1",
+        "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&cursor=tampered",
         "/v1/leaderboards/wall-pass//?version=1&ruleVersion=wall-pass-v1-score-1",
         "/v1/leaderboards/wall-pass%2F?version=1&ruleVersion=wall-pass-v1-score-1",
         "/v1/leaderboards/wall-pass;malformed?version=1&ruleVersion=wall-pass-v1-score-1",
         "/v1/leaderboards/wall-pass%3Bmalformed?version=1&ruleVersion=wall-pass-v1-score-1",
-        "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&cursor=tampered",
-      ];
-      for (const url of malformedUrls) {
+      ]) {
         const response = await fixture.app.inject({ method: "GET", url });
-        expect(response.statusCode).toBe(400);
-        expect(response.json()).toMatchObject({ code: "invalid_request" });
+        expect(response.statusCode, url).toBe(400);
+        expect(RouteErrorSchema.parse(response.json()).code, url).toBe(
+          "invalid_request",
+        );
       }
 
       const wrongMethod = await fixture.app.inject({
@@ -192,15 +250,18 @@ describe("wall-pass live leaderboard HTTP", () => {
         url: "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1",
       });
       expect(wrongMethod.statusCode).toBe(400);
-      expect(wrongMethod.json()).toMatchObject({ code: "invalid_request" });
+      expect(RouteErrorSchema.parse(wrongMethod.json()).code).toBe(
+        "invalid_request",
+      );
 
-      fixture.setCalculatedAt("2030-01-15T12:00:00.001Z");
-      const stale = await fixture.app.inject({
+      const lookalikeOutsideNamespace = await fixture.app.inject({
         method: "GET",
-        url: `/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1&limit=1&cursor=${encodeURIComponent(cursor!)}`,
+        url: "/v1/leaderboardsx",
       });
-      expect(stale.statusCode).toBe(400);
-      expect(stale.json()).toMatchObject({ code: "invalid_request" });
+      expect(lookalikeOutsideNamespace.statusCode).toBe(400);
+      expect(
+        RouteErrorSchema.parse(lookalikeOutsideNamespace.json()).code,
+      ).toBe("invalid_athlete_identity");
     } finally {
       await fixture.close();
     }

@@ -226,14 +226,6 @@ describe("public contracts entry point", () => {
       [FreeInsightSchema, freeInsight],
       [AttemptOutcomeSchema, { state: "valid", result: freeInsight }],
       [AttemptResultResponseSchema, { state: "valid", result: freeInsight }],
-      [
-        LeaderboardQuerySchema,
-        {
-          version: "1",
-          ruleVersion: "wall-pass-v1-score-1",
-          limit: "20",
-        },
-      ],
       [LeaderboardResponseSchema, liveLeaderboard],
       [
         RouteErrorSchema,
@@ -252,6 +244,24 @@ describe("public contracts entry point", () => {
     for (const [schema, value] of publicContractMatrix) {
       expectJsonRoundTrip(schema, value);
     }
+
+    const leaderboardQuery = LeaderboardQuerySchema.parse({
+      version: "1",
+      ruleVersion: "wall-pass-v1-score-1",
+      limit: "20",
+    });
+    expect(leaderboardQuery).toStrictEqual({
+      version: 1,
+      ruleVersion: "wall-pass-v1-score-1",
+      limit: 20,
+    });
+    const serializedLeaderboardOutput = JSON.parse(
+      JSON.stringify(leaderboardQuery),
+    );
+    expect(serializedLeaderboardOutput).toStrictEqual(leaderboardQuery);
+    expect(
+      LeaderboardQuerySchema.safeParse(serializedLeaderboardOutput).success,
+    ).toBe(false);
 
     expect(DeleteAttemptResponseSchema.parse(undefined)).toBeUndefined();
   });

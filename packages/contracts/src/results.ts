@@ -585,9 +585,14 @@ export const CreateAttemptResponseSchema = z
 
 export const LeaderboardQuerySchema = z
   .object({
-    version: z.coerce.number().int().pipe(z.literal(1)),
+    version: z.literal("1").transform(() => 1 as const),
     ruleVersion: RuleVersionSchema,
-    limit: z.coerce.number().int().min(1).max(50).optional().default(20),
+    limit: z
+      .string()
+      .regex(/^(?:[1-9]|[1-4][0-9]|50)$/)
+      .transform((value) => Number(value))
+      .optional()
+      .transform((value) => value ?? 20),
     cursor: NonEmptyStringSchema.optional(),
   })
   .strict();

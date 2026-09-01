@@ -1637,15 +1637,15 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       cursor &&
       (cursor.challengeId !== input.challenge.id ||
         cursor.challengeVersion !== input.challenge.version ||
-        cursor.ruleVersion !== input.challenge.ruleVersion ||
-        cursor.calculatedAt !== input.calculatedAt)
+        cursor.ruleVersion !== input.challenge.ruleVersion)
     )
       throw new RepositoryError("invalid_input");
+    const calculatedAt = cursor ? cursor.calculatedAt : this.#clock.now();
     const snapshotSequence = cursor
       ? cursor.snapshotSequence
-      : this.leaderboardCommitSequence(input.calculatedAt);
+      : this.leaderboardCommitSequence(calculatedAt);
     const ranked = rankWallPassV1Cohort(
-      this.currentCohort(input.calculatedAt, snapshotSequence),
+      this.currentCohort(calculatedAt, snapshotSequence),
     );
     const afterCursor = cursor
       ? ranked.filter((entry) => isAfterLiveLeaderboardCursor(entry, cursor))
@@ -1661,6 +1661,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
     const last = afterCursor[input.limit - 1];
     return Object.freeze({
       entries: Object.freeze(entries),
+      calculatedAt,
       cohortSize: ranked.length,
       nextCursor:
         afterCursor.length > input.limit && last
@@ -1670,7 +1671,7 @@ export class SQLiteAttemptRepository implements AttemptRepository {
                 challengeId: input.challenge.id,
                 challengeVersion: input.challenge.version,
                 ruleVersion: input.challenge.ruleVersion,
-                calculatedAt: input.calculatedAt,
+                calculatedAt,
                 snapshotSequence,
                 score: last.score,
                 completedAt: last.completedAt,
@@ -3072,8 +3073,7 @@ function assertLiveLeaderboardInput(input: LiveLeaderboardPageInput): void {
     input.challenge.ruleVersion !== "wall-pass-v1-score-1" ||
     !Number.isSafeInteger(input.limit) ||
     input.limit < 1 ||
-    input.limit > 50 ||
-    !UtcIsoTimestampSchema.safeParse(input.calculatedAt).success
+    input.limit > 50
   )
     throw new RepositoryError("invalid_input");
 }

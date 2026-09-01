@@ -73,6 +73,7 @@ type AttemptApiInput = Readonly<{
 
 const RECOVERY_BATCH_LIMIT = 100;
 const HOUR_MILLISECONDS = 60 * 60 * 1_000;
+const LEADERBOARD_NAMESPACE_PATH = "/v1/leaderboards";
 const LIVE_LEADERBOARD_PATH = "/v1/leaderboards/wall-pass";
 const silentRecoveryLog: MediaAttachmentRecoveryLog = Object.freeze({
   event: () => undefined,
@@ -200,7 +201,6 @@ function createAttemptApiInternal(
       if (!hasExactPublicPath(request, LIVE_LEADERBOARD_PATH))
         throw new AttemptRouteError("invalid_request");
       const query = parseRequest(LeaderboardQuerySchema, request.query);
-      const calculatedAt = now();
       const page = await listLiveLeaderboard({
         challenge: {
           id: "wall-pass",
@@ -208,7 +208,6 @@ function createAttemptApiInternal(
           ruleVersion: query.ruleVersion,
         },
         limit: query.limit,
-        calculatedAt,
         ...(query.cursor ? { cursor: query.cursor } : {}),
       });
       return sendResponse(reply, 200, LeaderboardResponseSchema, {
@@ -216,7 +215,7 @@ function createAttemptApiInternal(
         challengeId: "wall-pass",
         challengeVersion: query.version,
         ruleVersion: query.ruleVersion,
-        calculatedAt,
+        calculatedAt: page.calculatedAt,
         cohortSize: page.cohortSize,
         entries: page.entries,
         nextCursor: page.nextCursor,
@@ -401,14 +400,15 @@ function isPublicRouteRequest(request: FastifyRequest): boolean {
 }
 
 /**
- * The sole public leaderboard has no athlete identity. Keep noncanonical
- * continuations and method variants of that raw path in the public error
- * surface too, so malformed routing cannot turn it into an auth probe.
+ * The leaderboard namespace is public. Route only its literal namespace
+ * failures through the public error surface, leaving lookalike API paths
+ * behind normal athlete authentication.
  */
 function isPublicLeaderboardPathCandidate(path: string | undefined): boolean {
-  if (!path?.startsWith(LIVE_LEADERBOARD_PATH)) return false;
-  const delimiter = path.at(LIVE_LEADERBOARD_PATH.length);
-  return delimiter === undefined || !/[A-Za-z0-9_-]/.test(delimiter);
+  return (
+    path === LEADERBOARD_NAMESPACE_PATH ||
+    path?.startsWith(`${LEADERBOARD_NAMESPACE_PATH}/`) === true
+  );
 }
 
 function hasExactPublicPath(request: FastifyRequest, path: string): boolean {
