@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { resolveMediaUploadCapability } from "../composition/media-upload-capability.js";
 import type { MediaUploadContext } from "../repositories/attempt-repository.js";
+import type { MediaUploadService } from "../services/media-upload-service.js";
 import {
   createStreamingMultipartIntake,
   drainMediaUploadRequest,
@@ -16,7 +16,8 @@ import {
 export function registerAttemptMediaUploadPlugin(
   app: FastifyInstance,
   input: Readonly<{
-    mediaUpload: unknown;
+    /** Internal application-composition seam, never an adapter capability. */
+    mediaUpload: MediaUploadService;
     maxUploadBytes: number;
     maxMultipartBytes: number;
     requiredAthleteId(request: FastifyRequest): string;
@@ -24,9 +25,7 @@ export function registerAttemptMediaUploadPlugin(
     sendAccepted(reply: FastifyReply, value: unknown): unknown;
   }>,
 ): void {
-  const mediaUpload = resolveMediaUploadCapability(input.mediaUpload);
-  if (!mediaUpload)
-    throw new Error("C8 requires a factory-issued media upload composition.");
+  const mediaUpload = input.mediaUpload;
   app.register((mediaApp, _options, done) => {
     const mediaUploads = new WeakMap<FastifyRequest, MediaUploadContext>();
     mediaApp.addContentTypeParser(

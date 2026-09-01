@@ -36,11 +36,6 @@ import type {
   AttemptRepository,
 } from "../repositories/attempt-repository.js";
 import {
-  createUnavailableMediaUploadCapability,
-  resolveMediaUploadCapabilityForHost,
-  type MediaUploadCapability,
-} from "../composition/media-upload-capability.js";
-import {
   createC8RecoveryRuntime,
   type C8RecoveryRuntimeHandle,
   type HourlyRecoveryScheduler,
@@ -50,7 +45,7 @@ import {
   type OpaqueAcceptedMediaCleaner,
 } from "../services/media-attachment-recovery.js";
 import { MultipartParserError } from "./streamed-multipart.js";
-import { MediaUploadServiceUnavailableError } from "../services/media-upload-service.js";
+import { type BoundMediaUploadService } from "../services/media-upload-service.js";
 import { registerAttemptMediaUploadPlugin } from "./attempt-media-upload-plugin.js";
 
 type AttemptHttpRepository = AttemptRepository &
@@ -72,6 +67,18 @@ const badUrlBody = JSON.stringify(
     retryable: RouteErrorRetryabilityByCode.invalid_request,
   }),
 );
+type AttemptMediaUploadRegistration = Readonly<{
+  host: Readonly<{ repository: object; queue: object }>;
+  maxUploadBytes: number;
+  maxMultipartBytes: number;
+  requiredAthleteId(request: FastifyRequest): string;
+  attemptId(request: FastifyRequest): string;
+  sendAccepted(reply: FastifyReply, value: unknown): unknown;
+}>;
+const attemptMediaUploadRegistrations = new WeakMap<
+  FastifyInstance,
+  AttemptMediaUploadRegistration
+>();
 
 const processHourlyRecoveryScheduler: HourlyRecoveryScheduler = Object.freeze({
   everyHour: (task: () => void): NodeJS.Timeout => {
@@ -92,7 +99,6 @@ export function createAttemptApi(
     repository: AttemptHttpRepository;
     queue: AttemptUploadQueue;
     cleaner: OpaqueAcceptedMediaCleaner;
-    mediaUpload?: MediaUploadCapability;
     maxUploadBytes?: number;
     scheduler?: HourlyRecoveryScheduler;
     recoveryBatchLimit?: number;
@@ -122,19 +128,6 @@ export function createAttemptApi(
   const ids = input.ids ?? { next: randomUUID };
   const nonce = input.nonce ?? (() => randomBytes(32).toString("base64url"));
   let recovery: C8RecoveryRuntimeHandle | undefined;
-  const mediaUploadHost = Object.freeze({
-    repository: input.repository,
-    queue: input.queue,
-  });
-  if (
-    input.mediaUpload &&
-    !resolveMediaUploadCapabilityForHost(input.mediaUpload, mediaUploadHost)
-  )
-    throw new Error("C8 requires a factory-issued media upload composition.");
-  const mediaUploadService =
-    input.mediaUpload ??
-    createUnavailableMediaUploadCapability(mediaUploadHost);
-
   try {
     recovery = createC8RecoveryRuntime({
       repository: input.repository,
@@ -154,16 +147,22 @@ export function createAttemptApi(
       if (!athleteId) throw new AttemptRouteError("invalid_athlete_identity");
       athleteIds.set(request, athleteId);
     });
-    registerAttemptMediaUploadPlugin(app, {
-      mediaUpload: mediaUploadService,
-      maxUploadBytes,
-      maxMultipartBytes,
-      requiredAthleteId: (request) => requiredAthleteId(athleteIds, request),
-      attemptId: (request) =>
-        parseRequest(AttemptIdPathParamsSchema, request.params).id,
-      sendAccepted: (reply, value) =>
-        sendResponse(reply, 202, MediaUploadAcceptedSchema, value),
-    });
+    attemptMediaUploadRegistrations.set(
+      app,
+      Object.freeze({
+        host: Object.freeze({
+          repository: input.repository,
+          queue: input.queue,
+        }),
+        maxUploadBytes,
+        maxMultipartBytes,
+        requiredAthleteId: (request) => requiredAthleteId(athleteIds, request),
+        attemptId: (request) =>
+          parseRequest(AttemptIdPathParamsSchema, request.params).id,
+        sendAccepted: (reply, value) =>
+          sendResponse(reply, 202, MediaUploadAcceptedSchema, value),
+      }),
+    );
 
     app.get("/v1/challenges", async (request, reply) => {
       assertNoQuery(request.query);
@@ -263,6 +262,26 @@ export function createAttemptApi(
     void app.close().catch(() => undefined);
     throw error;
   }
+}
+
+/**
+ * Internal outer-composition seam. The production root invokes this only
+ * after it has authenticated exact C4/C5/retention adapters.
+ */
+export function registerInternalComposedAttemptMediaUpload(
+  app: FastifyInstance,
+  mediaUpload: BoundMediaUploadService,
+): void {
+  const registration = attemptMediaUploadRegistrations.get(app);
+  if (!registration)
+    throw new Error("C8 media upload must attach to an attempt API instance.");
+  const service = mediaUpload.forHost(registration.host);
+  if (!service)
+    throw new Error("C8 media upload does not match this attempt API host.");
+  registerAttemptMediaUploadPlugin(app, {
+    mediaUpload: service,
+    ...registration,
+  });
 }
 
 class AttemptRouteError extends Error {
@@ -387,8 +406,6 @@ function routeErrorCode(error: unknown): RouteErrorCode {
   if (error instanceof MediaPipelineError) return error.code;
   if (error instanceof QueueUnavailableError) return "queue_unavailable";
   if (error instanceof MultipartParserError) return "invalid_request";
-  if (error instanceof MediaUploadServiceUnavailableError)
-    return "service_not_ready";
   if (error instanceof RepositoryError) {
     if (error.code === "invalid_input") return "invalid_request";
     switch (error.code) {

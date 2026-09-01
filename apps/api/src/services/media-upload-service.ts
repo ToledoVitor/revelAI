@@ -25,6 +25,16 @@ export type MediaUploadService = Readonly<{
   ): Promise<MediaUploadAccepted>;
 }>;
 
+/**
+ * Outer-composition handle: the service closure becomes available only to the
+ * exact HTTP repository and queue captured when the factory issued it.
+ */
+export type BoundMediaUploadService = Readonly<{
+  forHost(
+    host: Readonly<{ repository: object; queue: object }>,
+  ): MediaUploadService | undefined;
+}>;
+
 /** Closure ports captured by the production composition before HTTP sees them. */
 export type MediaUploadServiceDependencies = Readonly<{
   requireCurrent(): void;
@@ -41,9 +51,6 @@ export type MediaUploadServiceDependencies = Readonly<{
   ): ReturnType<C5MediaPipeline["acceptMultipart"]>;
   retention: MediaPipelineMultipartAcceptanceInput["retention"]["repository"];
 }>;
-
-/** Explicit failure when an HTTP host lacks its sealed C5 composition. */
-export class MediaUploadServiceUnavailableError extends Error {}
 
 /**
  * Builds a frozen closure use-case from already-sealed narrow ports. This
@@ -88,14 +95,6 @@ export function createMediaUploadService(
       return acceptedProjection(context);
     },
   });
-}
-
-/** An unavailable route shares the same transport shape without C4/C5 work. */
-export function createUnavailableMediaUploadService(): MediaUploadService {
-  const unavailable = async (): Promise<never> => {
-    throw new MediaUploadServiceUnavailableError();
-  };
-  return Object.freeze({ preflight: unavailable, accept: unavailable });
 }
 
 async function available(

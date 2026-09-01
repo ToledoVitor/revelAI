@@ -11,25 +11,27 @@ import {
   resolveProductionSQLiteAttemptUploadPort,
   type SQLiteAttemptRepository,
 } from "../repositories/sqlite-attempt-repository.js";
-import { createMediaUploadService } from "../services/media-upload-service.js";
 import {
-  issueMediaUploadCapability,
-  type MediaUploadCapability,
-} from "./media-upload-capability.js";
+  createMediaUploadService,
+  type BoundMediaUploadService,
+} from "../services/media-upload-service.js";
+import {
+  createAttemptApi,
+  registerInternalComposedAttemptMediaUpload,
+} from "../http/attempt-api.js";
 
 /**
- * The only production issuer for HTTP media upload capability. It joins exact
- * C4/C5 SQLite facades, the C4-bound C5 verifier, and a captured queue. The
- * storage-agnostic service owns all use-case orchestration.
+ * The outer production composition root joins exact C4/C5 SQLite facades,
+ * then supplies only captured closure ports to the storage-neutral service.
  */
-export function createProductionMediaUploadCapability(
+export function createFactoryIssuedMediaUploadService(
   input: Readonly<{
     repository: SQLiteAttemptRepository;
     retention: SQLiteRetentionRepository;
     queue: Pick<AnalysisQueue, "isAvailable" | "enqueue">;
     mediaPipeline: C5MediaPipeline;
   }>,
-): MediaUploadCapability {
+): BoundMediaUploadService {
   const repository = input.repository;
   const retention = input.retention;
   const queue = input.queue;
@@ -46,9 +48,9 @@ export function createProductionMediaUploadCapability(
     !retentionPort.isCurrent()
   )
     throw new Error("C8 requires a factory-issued media upload composition.");
-
   if (c5.handoffVerifier !== attempt.handoffVerifier)
     throw new Error("C8 media upload pipeline does not match C4 authority.");
+
   const isAvailable = queue.isAvailable;
   const enqueue = queue.enqueue;
   const service = createMediaUploadService({
@@ -70,5 +72,33 @@ export function createProductionMediaUploadCapability(
       acknowledge: retentionPort.acknowledge,
     }),
   });
-  return issueMediaUploadCapability(service, { repository, queue });
+  const host = Object.freeze({ repository, queue });
+  return Object.freeze({
+    forHost: (candidate) =>
+      candidate.repository === host.repository && candidate.queue === host.queue
+        ? service
+        : undefined,
+  });
+}
+
+/** Official production root: verified adapters compose before HTTP wiring. */
+export function createProductionAttemptApi(
+  input: Readonly<
+    Omit<Parameters<typeof createAttemptApi>[0], "repository"> & {
+      repository: SQLiteAttemptRepository;
+      retention: SQLiteRetentionRepository;
+      mediaPipeline: C5MediaPipeline;
+    }
+  >,
+) {
+  const { retention, mediaPipeline, ...api } = input;
+  const mediaUpload = createFactoryIssuedMediaUploadService({
+    repository: api.repository,
+    retention,
+    queue: api.queue,
+    mediaPipeline,
+  });
+  const app = createAttemptApi(api);
+  registerInternalComposedAttemptMediaUpload(app, mediaUpload);
+  return app;
 }
