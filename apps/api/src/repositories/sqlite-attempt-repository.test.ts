@@ -4606,6 +4606,7 @@ describe("SQLiteAttemptRepository", () => {
     expect(await durableStartupStateForTest(filename)).toEqual(before);
   });
 
+  // This covers six rounds of four child Node/TypeScript migration startups.
   it("serializes concurrent fresh and predecessor migration startup", async () => {
     for (const source of [
       {
@@ -4647,7 +4648,7 @@ describe("SQLiteAttemptRepository", () => {
         reopened.close();
       }
     }
-  });
+  }, 10_000);
 
   it("backfills a live v17 delivery row with its exact durable frame batch once", () => {
     const filename = join(fixture.directory, "delivery-recovery-v17.sqlite");

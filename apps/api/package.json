@@ -8,7 +8,7 @@
     "check:production-dist": "node scripts/assert-production-dist.mjs",
     "lint": "eslint src",
     "typecheck": "tsc --project tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=4 --minWorkers=4",
     "openapi:generate": "pnpm run build && node scripts/generate-openapi.mjs",
     "openapi:check": "pnpm run build && node scripts/generate-openapi.mjs --check",
     "benchmark:roboflow": "pnpm run build && node scripts/benchmark-roboflow-wall-pass.mjs",
