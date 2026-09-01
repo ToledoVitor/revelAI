@@ -124,6 +124,90 @@ describe("extraction manifest", () => {
     }
   });
 
+  it("reopens an exact legacy unframed receipt only when all ordered frame bytes still match", async () => {
+    const frameBatchId = IDs[2];
+    const frames = verifiedFrames().map((frame, index) => ({
+      ...frame,
+      reference: `${frameBatchId}_${String(index).padStart(4, "0")}`,
+    }));
+    const current = createExtractionManifest({
+      attemptId: IDs[0],
+      generation: 1,
+      mediaId: IDs[1],
+      mediaSha256: "a".repeat(64),
+      mode: "verified",
+      probe,
+      frames,
+    });
+    if (current.mode !== "verified")
+      throw new Error("verified fixture required");
+    const scenes = current.frames.items.slice(40).map((frame) => ({
+      timestampSeconds: frame.timestampSeconds,
+      score: 0.1,
+    }));
+    attestVerifiedExtractionContinuity(current, scenes);
+    const legacy = {
+      ...current,
+      rawPreRollSha256: createHash("sha256")
+        .update(
+          Buffer.concat(
+            frames.slice(0, 40).map((frame) => Buffer.from(frame.rawBytes)),
+          ),
+        )
+        .digest("hex"),
+    };
+    const receipt = storageReceipt({
+      frameBatchId,
+      authority: {
+        attemptId: IDs[0],
+        athleteId: "44444444-4444-4444-8444-444444444444",
+        generation: 1,
+        mode: "verified",
+        mediaId: IDs[1],
+        sourceSha256: "a".repeat(64),
+        uploadedAt: "2030-01-15T12:00:00.000Z",
+        calibrationSessionId: "55555555-5555-4555-8555-555555555555",
+        calibrationNonce: "legacy-nonce",
+      },
+      manifest: legacy,
+      frames: frames.map((frame) => frame.rawBytes),
+      activeScenes: scenes,
+    });
+    const bytes = Buffer.from(JSON.stringify(receipt));
+    const reader = {
+      readReceipt: async () => ({ bytes }),
+      readFrame: async (reference: string) =>
+        frames.find((frame) => frame.reference === reference)!.rawBytes,
+      sourceSha256ForOriginal: async () => "a".repeat(64),
+    };
+
+    const rebuilt = await reconstructDurableProcessingContext({
+      context: storageContext({
+        frameBatchId,
+        mediaId: IDs[1],
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      }),
+      frames: reader,
+      receipts: reader,
+      authority: {
+        upload: {
+          attemptId: IDs[0],
+          athleteId: "44444444-4444-4444-8444-444444444444",
+          generation: 1,
+          mode: "verified",
+          mediaId: IDs[1],
+          sourceSha256: "a".repeat(64),
+          uploadedAt: "2030-01-15T12:00:00.000Z",
+          calibrationSessionId: "55555555-5555-4555-8555-555555555555",
+          calibrationNonce: "legacy-nonce",
+        },
+      },
+    });
+    if (rebuilt.mode !== "verified")
+      throw new Error("verified reconstruction required");
+    expect(rebuilt.rawPreRollSha256).not.toBe(legacy.rawPreRollSha256);
+  });
+
   it("rejects missing, reordered, unopaque, or path-bearing verified frames", () => {
     const base = verifiedFrames();
     for (const frames of [

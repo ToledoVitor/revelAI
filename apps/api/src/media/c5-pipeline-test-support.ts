@@ -5,7 +5,10 @@ import type {
   MediaUploadContext,
   StoredMediaAttachment,
 } from "../repositories/attempt-repository.js";
-import { createLocalFrameExtraction } from "../storage/local-frame-extraction.js";
+import {
+  createLocalFrameExtraction,
+  type BoundedFrameProcessRunner,
+} from "../storage/local-frame-extraction.js";
 import {
   createLocalMediaStorage,
   type LocalMediaStorage,
@@ -46,6 +49,7 @@ export function createC5PipelineTestSupport(
   input: Readonly<{
     root: string;
     prober?: LocalMediaProber;
+    runner?: BoundedFrameProcessRunner;
     /** Selects deterministic runner evidence for real multipart route tests. */
     mode?: "free" | "verified";
   }>,
@@ -81,7 +85,7 @@ export function createC5PipelineTestSupport(
         return id;
       },
     },
-    runner: {
+    runner: input.runner ?? {
       run: async (command) => {
         const timestamps = Array.from(
           { length: 640 },

@@ -1,6 +1,7 @@
 import {
   createDemoVisionProvider,
   createRoboflowVisionProvider,
+  type ProviderFetch,
   type VisionProvider,
 } from "@revelai/vision";
 import { createHash } from "node:crypto";
@@ -100,17 +101,34 @@ export async function verifiedCandidateFixture(
 /** Test-only deterministic provider; it never performs a network request. */
 export function createVerifiedFixtureVisionProvider(
   provenance: "demo" | "roboflow",
+  options: Readonly<{
+    onWorkflowRequest?: (
+      url: Parameters<ProviderFetch>[0],
+      init: Parameters<ProviderFetch>[1],
+    ) => void;
+    /** Exercises the production retry/deadline classification without I/O. */
+    temporaryWorkflowFailures?: number;
+    workspaceId?: string;
+    verifiedModelBundleId?: string;
+    verifiedProviderVersion?: string;
+  }> = {},
 ): VisionProvider {
   if (provenance === "demo") return createDemoVisionProvider();
+  const workspaceId = options.workspaceId ?? "revelai-workspace";
+  const verifiedModelBundleId =
+    options.verifiedModelBundleId ?? "wall-pass-bundle-v1";
+  const verifiedProviderVersion =
+    options.verifiedProviderVersion ?? "roboflow-inference-v1";
   const frameIndexes: number[] = [];
+  let temporaryFailures = options.temporaryWorkflowFailures ?? 0;
   return createRoboflowVisionProvider({
     config: {
       apiUrl: "http://127.0.0.1:9001",
-      workspaceId: "revelai-workspace",
+      workspaceId,
       freeModelBundleId: "free-bundle-v1",
-      verifiedModelBundleId: "wall-pass-bundle-v1",
+      verifiedModelBundleId,
       freeProviderVersion: "roboflow-inference-v1",
-      verifiedProviderVersion: "roboflow-inference-v1",
+      verifiedProviderVersion,
     },
     transformer: {
       async transform(frame, transform, signal) {
@@ -123,19 +141,39 @@ export function createVerifiedFixtureVisionProvider(
         });
       },
     },
-    fetch: async (_url, init) => {
-      void init;
+    fetch: async (url, init) => {
+      options.onWorkflowRequest?.(url, init);
+      if (temporaryFailures > 0) {
+        temporaryFailures -= 1;
+        return {
+          status: 503,
+          json: async () => ({ errors: ["temporary fixture failure"] }),
+        };
+      }
       const index = frameIndexes.shift();
       if (index === undefined) throw new Error("fixture frame index required");
       return {
         status: 200,
-        json: async () => ({ outputs: [roboflowOutput(index)] }),
+        json: async () => ({
+          outputs: [
+            roboflowOutput(index, {
+              verifiedModelBundleId,
+              verifiedProviderVersion,
+            }),
+          ],
+        }),
       };
     },
   });
 }
 
-function roboflowOutput(frameIndex: number) {
+function roboflowOutput(
+  frameIndex: number,
+  input: Readonly<{
+    verifiedModelBundleId: string;
+    verifiedProviderVersion: string;
+  }>,
+) {
   const activeIndex = frameIndex - 40;
   const active = activeIndex >= 0 && activeIndex < 600;
   const phase = activeIndex >= 0 ? activeIndex % 5 : 0;
@@ -157,8 +195,8 @@ function roboflowOutput(frameIndex: number) {
     workflow: {
       id: "revelai-wall-pass-geometry-v1",
       version: "1.0.0",
-      modelBundleId: "wall-pass-bundle-v1",
-      providerVersion: "roboflow-inference-v1",
+      modelBundleId: input.verifiedModelBundleId,
+      providerVersion: input.verifiedProviderVersion,
     },
     detections: [
       {

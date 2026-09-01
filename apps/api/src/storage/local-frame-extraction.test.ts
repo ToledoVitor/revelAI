@@ -508,11 +508,11 @@ describe("LocalFrameExtraction", () => {
     ).rejects.toThrow("media_probe_failed");
   });
 
-  it("smokes the owned argv against FFmpeg when the binary is available", async () => {
-    if (!(await ffmpegAvailable())) return;
+  it("smokes the owned argv against an explicit portable MP4 FFmpeg capability", async (context) => {
+    if (!(await ffmpegHasPortableMpeg4())) return context.skip();
     const root = await setupRoot(roots);
     const staged = join(root, "temporary", `${mediaId}.uploading`);
-    await runProcess("ffmpeg", [
+    const generated = await runProcess("ffmpeg", [
       "-nostdin",
       "-y",
       "-f",
@@ -520,13 +520,14 @@ describe("LocalFrameExtraction", () => {
       "-i",
       "color=c=black:s=1280x720:r=10:d=64",
       "-c:v",
-      "libx264",
-      "-crf",
-      "51",
+      "mpeg4",
       "-pix_fmt",
       "yuv420p",
+      "-f",
+      "mp4",
       staged,
     ]);
+    expect(generated.exitCode).toBe(0);
     const generatedSourceSha256 = createHash("sha256")
       .update(await readFile(staged))
       .digest("hex");
@@ -813,9 +814,14 @@ function insertBeforeEoi(bytes: Uint8Array, insert: Uint8Array): Uint8Array {
   ]);
 }
 
-async function ffmpegAvailable(): Promise<boolean> {
+/** Skip only when the local binary or its built-in portable MPEG-4 encoder is absent. */
+async function ffmpegHasPortableMpeg4(): Promise<boolean> {
   try {
-    return (await runProcess("ffmpeg", ["-version"])).exitCode === 0;
+    const [version, encoders] = await Promise.all([
+      runProcess("ffmpeg", ["-version"]),
+      runProcess("ffmpeg", ["-hide_banner", "-encoders"]),
+    ]);
+    return version.exitCode === 0 && /\bmpeg4\b/.test(encoders.stdout);
   } catch {
     return false;
   }
