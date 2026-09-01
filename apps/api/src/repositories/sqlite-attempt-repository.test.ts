@@ -41,7 +41,10 @@ import {
   type StoredMedia,
   type TerminalCandidate,
 } from "./attempt-repository.js";
-import { SQLiteCompetitivePolicyRepository } from "./sqlite-competitive-policy-repository.js";
+import {
+  resolveProductionSQLiteCompetitivePolicyLookupPort,
+  SQLiteCompetitivePolicyRepository,
+} from "./sqlite-competitive-policy-repository.js";
 
 const ATHLETE_A = "11111111-1111-4111-8111-111111111111";
 const ATHLETE_B = "22222222-2222-4222-8222-222222222222";
@@ -637,6 +640,29 @@ function rankedOutcome(
       competitiveStatus: "ranked",
       competitiveEligible: true,
     },
+  };
+}
+
+function competitivePolicyActivation(
+  receipt: typeof passingWorkflowBenchmarkReceiptFixture,
+  id: string,
+) {
+  return {
+    id,
+    receiptId: receipt.id,
+    receiptSha256: receipt.receiptSha256,
+    receiptSchemaVersion: receipt.schemaVersion,
+    workspaceId: receipt.workflow.workspaceId,
+    modelBundleId: receipt.workflow.modelBundleId,
+    workflowId: receipt.workflow.workflowId,
+    workflowVersion: receipt.workflow.workflowVersion,
+    providerVersion: receipt.workflow.providerVersion,
+    calibrationEvidenceVersion: receipt.evidence.calibrationEvidenceVersion,
+    extractionEvidenceVersion: receipt.evidence.extractionEvidenceVersion,
+    observationEvidenceVersion: receipt.evidence.observationEvidenceVersion,
+    challengeId: "wall-pass" as const,
+    challengeVersion: 1 as const,
+    ruleVersion: "wall-pass-v1-score-1" as const,
   };
 }
 
@@ -6151,6 +6177,61 @@ describe("SQLiteAttemptRepository", () => {
         workspaceId: "wrong-workspace",
       }),
     ).resolves.toBeNull();
+  });
+
+  it("snapshots the exact database once and seals policy lookup from later raw prepare mutation", async () => {
+    let databaseReads = 0;
+    const policy = new SQLiteCompetitivePolicyRepository({
+      get database() {
+        databaseReads += 1;
+        if (databaseReads > 1) throw new Error("policy database re-read");
+        return fixture.database;
+      },
+      clock: fixture.clock,
+    });
+    expect(databaseReads).toBe(1);
+    const tuple = competitivePolicyActivation(
+      passingWorkflowBenchmarkReceiptFixture,
+      "abababab-abab-4bab-8bab-abababababab",
+    );
+    await policy.storeBenchmarkReceipt(passingWorkflowBenchmarkReceiptFixture);
+    await policy.activateCompetitivePolicy(tuple);
+    const port = resolveProductionSQLiteCompetitivePolicyLookupPort(policy);
+    if (!port) throw new Error("expected a factory-issued policy lookup port");
+
+    const raw = fixture.database.raw;
+    const ownPrepare = raw.prepare;
+    Object.defineProperty(raw, "prepare", {
+      configurable: true,
+      value: () => {
+        throw new Error("mutated raw prepare");
+      },
+    });
+    await expect(port.lookup.getActivePolicy(tuple)).resolves.toMatchObject({
+      id: tuple.id,
+    });
+    Reflect.deleteProperty(raw, "prepare");
+
+    const prototype = Object.getPrototypeOf(raw) as {
+      prepare: typeof raw.prepare;
+    };
+    const prototypeDescriptor = Object.getOwnPropertyDescriptor(
+      prototype,
+      "prepare",
+    );
+    Object.defineProperty(prototype, "prepare", {
+      configurable: true,
+      value: () => {
+        throw new Error("mutated raw prototype prepare");
+      },
+    });
+    await expect(port.lookup.getActivePolicy(tuple)).resolves.toMatchObject({
+      id: tuple.id,
+    });
+    if (prototypeDescriptor)
+      Object.defineProperty(prototype, "prepare", prototypeDescriptor);
+    else Reflect.deleteProperty(prototype, "prepare");
+    expect(ownPrepare).toBeTypeOf("function");
   });
 
   it("enforces compound ownership, one-use, result linkage, policy provenance, and leaderboard checks in SQLite", async () => {

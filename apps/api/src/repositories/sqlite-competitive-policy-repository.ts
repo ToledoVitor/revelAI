@@ -54,23 +54,30 @@ export class SQLiteCompetitivePolicyRepository
 {
   readonly #raw;
   readonly #clock: PolicyClock;
+  readonly #lookupActivePolicy: (
+    input: Readonly<{
+      now: string;
+      tuple: CompetitivePolicyTuple;
+    }>,
+  ) => CompetitivePolicyActivation | null;
 
   public constructor(
     input: Readonly<{ database: SqliteDatabase; clock: PolicyClock }>,
   ) {
-    if (!isFactoryIssuedSqliteDatabase(input.database))
+    const database = input.database;
+    if (!isFactoryIssuedSqliteDatabase(database))
       throw new Error(
         "Competitive policy requires a factory-issued SQLite database capability.",
       );
-    this.#raw = input.database.raw;
-    this.#clock = input.clock;
-    const token = resolveFactoryIssuedSqliteDatabaseCompositionToken(
-      input.database,
-    );
+    const raw = database.raw;
+    const token = resolveFactoryIssuedSqliteDatabaseCompositionToken(database);
     if (!token)
       throw new Error(
         "Competitive policy factory database composition token is required.",
       );
+    this.#raw = raw;
+    this.#clock = input.clock;
+    this.#lookupActivePolicy = createActivePolicyLookup(raw);
     registerProductionSQLiteCompetitivePolicyLookupPort(this, token);
   }
 
@@ -366,46 +373,12 @@ export class SQLiteCompetitivePolicyRepository
   public async getActiveCompetitivePolicy(
     tuple: CompetitivePolicyTuple,
   ): Promise<CompetitivePolicyActivation | null> {
-    let row: Record<string, unknown> | undefined;
     try {
-      row = this.#raw
-        .prepare(
-          `SELECT p.id, p.receipt_id, p.receipt_sha256, p.receipt_schema_version, p.workspace_id, p.model_bundle_id, p.workflow_id, p.workflow_version, p.provider_version, p.calibration_evidence_version, p.extraction_evidence_version, p.observation_evidence_version, p.challenge_id, p.challenge_version, p.rule_version,
-                r.receipt_json, r.receipt_sha256 AS source_receipt_sha256, r.schema_version AS source_schema_version, r.model_bundle_id AS source_model_bundle_id, r.workflow_id AS source_workflow_id, r.workflow_version AS source_workflow_version, r.provider_version AS source_provider_version, r.status AS source_status, r.run_at AS source_run_at, r.valid_until AS source_valid_until, r.invalidated_at AS source_invalidated_at
-         FROM approved_competitive_model_policies p
-         INNER JOIN workflow_benchmark_receipts r
-           ON r.id = p.receipt_id
-          AND r.receipt_sha256 = p.receipt_sha256
-          AND r.schema_version = p.receipt_schema_version
-          AND r.model_bundle_id = p.model_bundle_id
-          AND r.workflow_id = p.workflow_id
-          AND r.workflow_version = p.workflow_version
-          AND r.provider_version = p.provider_version
-         LEFT JOIN workflow_benchmark_receipt_invalidations i ON i.receipt_id = r.id
-         LEFT JOIN workflow_benchmark_receipt_invalidation_quarantine q ON q.receipt_id = r.id
-         WHERE p.active = 1 AND r.status = 'passed' AND r.invalidated_at IS NULL AND i.receipt_id IS NULL AND q.receipt_id IS NULL AND r.valid_until > ?
-           AND p.workspace_id = ? AND p.model_bundle_id = ? AND p.workflow_id = ? AND p.workflow_version = ? AND p.provider_version = ? AND p.calibration_evidence_version = ? AND p.extraction_evidence_version = ? AND p.observation_evidence_version = ? AND p.challenge_id = ? AND p.challenge_version = ? AND p.rule_version = ?`,
-        )
-        .get(
-          this.#clock.now(),
-          tuple.workspaceId,
-          tuple.modelBundleId,
-          tuple.workflowId,
-          tuple.workflowVersion,
-          tuple.providerVersion,
-          tuple.calibrationEvidenceVersion,
-          tuple.extractionEvidenceVersion,
-          tuple.observationEvidenceVersion,
-          tuple.challengeId,
-          tuple.challengeVersion,
-          tuple.ruleVersion,
-        ) as Record<string, unknown> | undefined;
+      return this.#lookupActivePolicy({ now: this.#clock.now(), tuple });
     } catch (error) {
       if (error instanceof CompetitivePolicyRepositoryError) throw error;
       throw new CompetitivePolicyLookupUnavailableError();
     }
-    if (!row) return null;
-    return parsePolicyRow(row);
   }
 
   #transaction<T>(operation: () => T): T {
@@ -419,6 +392,49 @@ export class SQLiteCompetitivePolicyRepository
       throw error;
     }
   }
+}
+
+function createActivePolicyLookup(raw: SqliteDatabase["raw"]): (
+  input: Readonly<{
+    now: string;
+    tuple: CompetitivePolicyTuple;
+  }>,
+) => CompetitivePolicyActivation | null {
+  const statement = raw.prepare(
+    `SELECT p.id, p.receipt_id, p.receipt_sha256, p.receipt_schema_version, p.workspace_id, p.model_bundle_id, p.workflow_id, p.workflow_version, p.provider_version, p.calibration_evidence_version, p.extraction_evidence_version, p.observation_evidence_version, p.challenge_id, p.challenge_version, p.rule_version,
+            r.receipt_json, r.receipt_sha256 AS source_receipt_sha256, r.schema_version AS source_schema_version, r.model_bundle_id AS source_model_bundle_id, r.workflow_id AS source_workflow_id, r.workflow_version AS source_workflow_version, r.provider_version AS source_provider_version, r.status AS source_status, r.run_at AS source_run_at, r.valid_until AS source_valid_until, r.invalidated_at AS source_invalidated_at
+     FROM approved_competitive_model_policies p
+     INNER JOIN workflow_benchmark_receipts r
+       ON r.id = p.receipt_id
+      AND r.receipt_sha256 = p.receipt_sha256
+      AND r.schema_version = p.receipt_schema_version
+      AND r.model_bundle_id = p.model_bundle_id
+      AND r.workflow_id = p.workflow_id
+      AND r.workflow_version = p.workflow_version
+      AND r.provider_version = p.provider_version
+     LEFT JOIN workflow_benchmark_receipt_invalidations i ON i.receipt_id = r.id
+     LEFT JOIN workflow_benchmark_receipt_invalidation_quarantine q ON q.receipt_id = r.id
+     WHERE p.active = 1 AND r.status = 'passed' AND r.invalidated_at IS NULL AND i.receipt_id IS NULL AND q.receipt_id IS NULL AND r.valid_until > ?
+       AND p.workspace_id = ? AND p.model_bundle_id = ? AND p.workflow_id = ? AND p.workflow_version = ? AND p.provider_version = ? AND p.calibration_evidence_version = ? AND p.extraction_evidence_version = ? AND p.observation_evidence_version = ? AND p.challenge_id = ? AND p.challenge_version = ? AND p.rule_version = ?`,
+  );
+  const get = statement.get.bind(statement);
+  return ({ now, tuple }) => {
+    const row = get(
+      now,
+      tuple.workspaceId,
+      tuple.modelBundleId,
+      tuple.workflowId,
+      tuple.workflowVersion,
+      tuple.providerVersion,
+      tuple.calibrationEvidenceVersion,
+      tuple.extractionEvidenceVersion,
+      tuple.observationEvidenceVersion,
+      tuple.challengeId,
+      tuple.challengeVersion,
+      tuple.ruleVersion,
+    ) as Record<string, unknown> | undefined;
+    return row ? parsePolicyRow(row) : null;
+  };
 }
 
 const exactGetActiveCompetitivePolicy =
