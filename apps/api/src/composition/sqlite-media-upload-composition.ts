@@ -7,7 +7,11 @@ import {
   type SQLiteRetentionRepository,
 } from "../media/sqlite-retention-repository.js";
 import type { AnalysisQueue } from "../queue/analysis-queue.js";
-import { resolveFactoryIssuedAnalysisQueuePort } from "../queue/in-memory-analysis-queue.js";
+import type { ResolvedAnalysisQueuePort } from "../queue/analysis-queue-port.js";
+import {
+  isFactoryIssuedAnalysisQueuePortForHost,
+  resolveFactoryIssuedAnalysisQueuePort,
+} from "../queue/in-memory-analysis-queue.js";
 import {
   resolveProductionSQLiteAttemptUploadPort,
   type SQLiteAttemptRepository,
@@ -84,20 +88,63 @@ export function createProductionAttemptApi(
   input: Readonly<
     Omit<
       Parameters<typeof createInternallyComposedAttemptApi>[0],
-      "repository"
+      "repository" | "queue"
     > & {
       repository: SQLiteAttemptRepository;
       retention: SQLiteRetentionRepository;
       mediaPipeline: C5MediaPipeline;
+      queue: AnalysisQueue;
     }
   >,
 ) {
-  const { retention, mediaPipeline, ...api } = input;
+  const queue = resolveRequiredAnalysisQueuePort(input.queue);
+  return createProductionAttemptApiFromResolvedQueue({
+    ...input,
+    queue,
+    queueHost: input.queue,
+  });
+}
+
+/**
+ * Outer-composition seam for a caller that already resolved one exact queue
+ * port. It validates port-to-host identity before HTTP or recovery can start.
+ */
+export function createProductionAttemptApiFromResolvedQueue(
+  input: Readonly<
+    Omit<
+      Parameters<typeof createInternallyComposedAttemptApi>[0],
+      "repository" | "queue"
+    > & {
+      repository: SQLiteAttemptRepository;
+      retention: SQLiteRetentionRepository;
+      mediaPipeline: C5MediaPipeline;
+      queue: ResolvedAnalysisQueuePort;
+      queueHost: AnalysisQueue;
+    }
+  >,
+) {
+  if (!isFactoryIssuedAnalysisQueuePortForHost(input.queue, input.queueHost))
+    throw new Error("C8 requires a factory-issued media upload composition.");
+  const { retention, mediaPipeline, queueHost, ...api } = input;
   const mediaUpload = createFactoryIssuedMediaUploadService({
     repository: api.repository,
     retention,
-    queue: api.queue,
+    queue: queueHost,
     mediaPipeline,
   });
-  return createInternallyComposedAttemptApi(api, mediaUpload);
+  const service = mediaUpload.forHost(
+    Object.freeze({ repository: api.repository, queue: queueHost }),
+  );
+  if (!service)
+    throw new Error("C8 media upload does not match this attempt API host.");
+  return createInternallyComposedAttemptApi(api, service);
+}
+
+function resolveRequiredAnalysisQueuePort(
+  queue: AnalysisQueue,
+): ResolvedAnalysisQueuePort {
+  const port = resolveFactoryIssuedAnalysisQueuePort(queue);
+  if (!port)
+    throw new Error("C8 requires a factory-issued media upload composition.");
+  return port;
 }

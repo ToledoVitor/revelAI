@@ -27,11 +27,8 @@ import {
   RouteErrorStatusByCode,
   type RouteErrorCode,
 } from "@revelai/contracts";
-import {
-  QueueUnavailableError,
-  type AnalysisQueue,
-} from "../queue/analysis-queue.js";
-import { resolveFactoryIssuedAnalysisQueuePort } from "../queue/in-memory-analysis-queue.js";
+import { QueueUnavailableError } from "../queue/analysis-queue.js";
+import type { AttemptApiQueuePort } from "../queue/analysis-queue-port.js";
 import { MediaPipelineError } from "../media/probe.js";
 import { RepositoryError } from "../repositories/attempt-repository.js";
 import type {
@@ -49,10 +46,7 @@ import {
 } from "../services/media-attachment-recovery.js";
 import { createAttemptReadService } from "../services/attempt-read-service.js";
 import { MultipartParserError } from "./streamed-multipart.js";
-import {
-  type BoundMediaUploadService,
-  type MediaUploadService,
-} from "../services/media-upload-service.js";
+import { type MediaUploadService } from "../services/media-upload-service.js";
 import { registerAttemptMediaUploadPlugin } from "./attempt-media-upload-plugin.js";
 
 type AttemptHttpRepository = AttemptRepository &
@@ -60,7 +54,7 @@ type AttemptHttpRepository = AttemptRepository &
   MediaDeliveryRedeliveryRepository;
 type AttemptApiClock = Readonly<{ now(): string }>;
 type AttemptApiIdGenerator = Readonly<{ next(): string }>;
-type AttemptUploadQueue = Pick<AnalysisQueue, "isAvailable" | "enqueue">;
+type AttemptUploadQueue = AttemptApiQueuePort;
 type AttemptApiInput = Readonly<{
   repository: AttemptHttpRepository;
   queue: AttemptUploadQueue;
@@ -113,22 +107,14 @@ export function createAttemptApi(input: AttemptApiInput): FastifyInstance {
 }
 
 /**
- * Internal outer-composition entrypoint. It resolves the factory-issued
- * service against the exact C4/queue host before Fastify or C8 recovery exist.
+ * Internal lower-level seam. Outer composition has already validated and
+ * bound the C4/C5 service and opaque queue port before HTTP is constructed.
  */
 export function createInternallyComposedAttemptApi(
   input: AttemptApiInput,
-  mediaUpload: BoundMediaUploadService,
+  mediaUpload: MediaUploadService,
 ): FastifyInstance {
-  const queue = resolveFactoryIssuedAnalysisQueuePort(input.queue);
-  if (!queue)
-    throw new Error("C8 requires a factory-issued media upload composition.");
-  const service = mediaUpload.forHost(
-    Object.freeze({ repository: input.repository, queue: input.queue }),
-  );
-  if (!service)
-    throw new Error("C8 media upload does not match this attempt API host.");
-  return createAttemptApiInternal(Object.freeze({ ...input, queue }), service);
+  return createAttemptApiInternal(input, mediaUpload);
 }
 
 function createAttemptApiInternal(

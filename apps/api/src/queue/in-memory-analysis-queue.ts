@@ -4,6 +4,7 @@ import {
   type AnalysisJobDelivery,
   type AnalysisQueue,
 } from "./analysis-queue.js";
+import type { ResolvedAnalysisQueuePort } from "./analysis-queue-port.js";
 
 export type QueueScheduler = Readonly<{
   schedule(task: () => Promise<void>): void;
@@ -35,14 +36,32 @@ const microtaskScheduler: QueueScheduler = {
   },
 };
 
-const factoryIssuedAnalysisQueuePorts = new WeakMap<object, AnalysisQueue>();
+const factoryIssuedAnalysisQueuePorts = new WeakMap<
+  object,
+  ResolvedAnalysisQueuePort
+>();
+const factoryIssuedAnalysisQueueHosts = new WeakMap<object, object>();
 
 /** Resolves only the closure port issued for one exact production queue. */
 export function resolveFactoryIssuedAnalysisQueuePort(
   value: unknown,
-): AnalysisQueue | undefined {
+): ResolvedAnalysisQueuePort | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   return factoryIssuedAnalysisQueuePorts.get(value);
+}
+
+/** Confirms an opaque port belongs to this exact original queue host. */
+export function isFactoryIssuedAnalysisQueuePortForHost(
+  port: unknown,
+  host: unknown,
+): port is ResolvedAnalysisQueuePort {
+  return (
+    typeof port === "object" &&
+    port !== null &&
+    typeof host === "object" &&
+    host !== null &&
+    factoryIssuedAnalysisQueueHosts.get(port) === host
+  );
 }
 
 /**
@@ -52,7 +71,7 @@ export function resolveFactoryIssuedAnalysisQueuePort(
  * production composition.
  */
 export class InMemoryAnalysisQueue implements AnalysisQueue {
-  readonly #port: AnalysisQueue;
+  readonly #port: ResolvedAnalysisQueuePort;
   readonly #close: () => void;
 
   public constructor(options: QueueOptions = {}) {
@@ -125,8 +144,13 @@ export class InMemoryAnalysisQueue implements AnalysisQueue {
       state.closed = true;
       state.subscribers.clear();
     };
-    this.#port = Object.freeze({ isAvailable, enqueue, subscribe });
+    this.#port = Object.freeze({
+      isAvailable,
+      enqueue,
+      subscribe,
+    }) as ResolvedAnalysisQueuePort;
     factoryIssuedAnalysisQueuePorts.set(this, this.#port);
+    factoryIssuedAnalysisQueueHosts.set(this.#port, this);
   }
 
   public isAvailable(): Promise<boolean> {

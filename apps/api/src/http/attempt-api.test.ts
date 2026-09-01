@@ -33,10 +33,14 @@ import { SQLiteRetentionRepository } from "../media/sqlite-retention-repository.
 import type { LocalMediaProber } from "../storage/local-media-storage.js";
 import { createLocalC8AcceptedMediaCleaner } from "../services/local-c8-accepted-media-cleaner.js";
 import type { MediaUploadService } from "../services/media-upload-service.js";
-import { InMemoryAnalysisQueue } from "../queue/in-memory-analysis-queue.js";
+import {
+  InMemoryAnalysisQueue,
+  resolveFactoryIssuedAnalysisQueuePort,
+} from "../queue/in-memory-analysis-queue.js";
 import {
   createFactoryIssuedMediaUploadService,
   createProductionAttemptApi,
+  createProductionAttemptApiFromResolvedQueue,
 } from "../composition/sqlite-media-upload-composition.js";
 import {
   createAttemptApi,
@@ -62,6 +66,51 @@ describe("attempt HTTP foundation", () => {
         resolve(import.meta.dirname, ".."),
       ),
     ).resolves.toBeUndefined();
+  });
+
+  it("keeps analysis queue resolution out of HTTP and services", async () => {
+    await expect(
+      assertAnalysisQueueResolutionTopology(resolve(import.meta.dirname, "..")),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects a compiler-resolved queue resolver outside outer composition", async () => {
+    const root = await mkdtemp(join(tmpdir(), "revelai-queue-topology-"));
+    directories.push(root);
+    await Promise.all([
+      mkdir(join(root, "queue"), { recursive: true }),
+      mkdir(join(root, "composition"), { recursive: true }),
+      mkdir(join(root, "services"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(
+        join(root, "queue", "in-memory-analysis-queue.ts"),
+        "export function resolveFactoryIssuedAnalysisQueuePort(): void {}\n",
+      ),
+      writeFile(
+        join(root, "composition", "sqlite-media-upload-composition.ts"),
+        [
+          'import { resolveFactoryIssuedAnalysisQueuePort } from "../queue/in-memory-analysis-queue.js";',
+          "resolveFactoryIssuedAnalysisQueuePort();",
+          "",
+        ].join("\n"),
+      ),
+    ]);
+    await expect(
+      assertAnalysisQueueResolutionTopology(root),
+    ).resolves.toBeUndefined();
+
+    await writeFile(
+      join(root, "services", "forged-queue-resolution.ts"),
+      [
+        'import { resolveFactoryIssuedAnalysisQueuePort } from "../queue/in-memory-analysis-queue.js";',
+        "resolveFactoryIssuedAnalysisQueuePort();",
+        "",
+      ].join("\n"),
+    );
+    await expect(assertAnalysisQueueResolutionTopology(root)).rejects.toThrow(
+      "only from outer composition",
+    );
   });
 
   it("rejects a second compiler-resolved production upload-composition import", async () => {
@@ -616,9 +665,16 @@ describe("attempt HTTP foundation", () => {
     await other.app.close();
     const everyHour = vi.fn(() => ({ timer: 1 }));
     const scheduler = { everyHour, cancel: () => undefined };
+    const otherService = otherHandle.forHost(
+      Object.freeze({ repository: other.repository, queue: other.queue }),
+    );
+    const ownerQueue = resolveFactoryIssuedAnalysisQueuePort(owner.queue);
+    const otherQueue = resolveFactoryIssuedAnalysisQueuePort(other.queue);
+    if (!otherService || !ownerQueue || !otherQueue)
+      throw new Error("Expected a factory-issued cross-host test composition.");
     const input = {
       repository: other.repository,
-      queue: other.queue,
+      queue: otherQueue,
       cleaner: createLocalC8AcceptedMediaCleaner({
         repository: other.repository,
         storage: other.c5.storage,
@@ -627,11 +683,38 @@ describe("attempt HTTP foundation", () => {
     };
     try {
       expect(() =>
-        createInternallyComposedAttemptApi(input, ownerHandle),
-      ).toThrow("does not match this attempt API host");
+        createProductionAttemptApiFromResolvedQueue({
+          repository: other.repository,
+          retention: other.retention,
+          mediaPipeline: other.c5.pipeline,
+          queue: ownerQueue,
+          queueHost: other.queue,
+          cleaner: input.cleaner,
+          scheduler,
+        }),
+      ).toThrow("factory-issued media upload composition");
+      expect(() =>
+        createProductionAttemptApi({
+          repository: other.repository,
+          retention: other.retention,
+          mediaPipeline: other.c5.pipeline,
+          queue: {
+            isAvailable: async () => true,
+            enqueue: async () => undefined,
+            subscribe: () => () => undefined,
+          },
+          cleaner: input.cleaner,
+          scheduler,
+        }),
+      ).toThrow("factory-issued media upload composition");
+      expect(
+        ownerHandle.forHost(
+          Object.freeze({ repository: other.repository, queue: other.queue }),
+        ),
+      ).toBeUndefined();
       expect(everyHour).not.toHaveBeenCalled();
 
-      const otherApp = createInternallyComposedAttemptApi(input, otherHandle);
+      const otherApp = createInternallyComposedAttemptApi(input, otherService);
       expect(everyHour).toHaveBeenCalledTimes(1);
       await expect(
         otherApp.inject({ method: "GET", url: "/v1/challenges" }),
@@ -2731,6 +2814,92 @@ const expectedCompositionFile = join(
   "sqlite-media-upload-composition.ts",
 );
 const expectedAttemptApiFile = join("http", "attempt-api.ts");
+const expectedQueueAdapterFile = join("queue", "in-memory-analysis-queue.ts");
+const permittedQueueResolutionFiles = new Set([
+  join("composition", "sqlite-media-upload-composition.ts"),
+  join("composition", "free-training-analysis-composition.ts"),
+]);
+
+async function assertAnalysisQueueResolutionTopology(
+  sourceRoot: string,
+): Promise<void> {
+  const files = await productionTypeScriptFiles(sourceRoot);
+  const compilerOptions = {
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    noEmit: true,
+    target: ts.ScriptTarget.ES2023,
+  };
+  const adapterFile = resolve(sourceRoot, expectedQueueAdapterFile);
+  const program = ts.createProgram(files, compilerOptions);
+  const forbidden: string[] = [];
+  for (const source of program.getSourceFiles()) {
+    if (!files.includes(source.fileName)) continue;
+    visit(source, source.fileName);
+  }
+  if (forbidden.length > 0)
+    throw new Error(
+      "C8 permits analysis queue resolution only from outer composition.",
+    );
+
+  function visit(node: ts.Node, containingFile: string): void {
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      resolvesQueueAdapter(node, containingFile)
+    ) {
+      const relative = sourceRootRelative(containingFile);
+      if (!permittedQueueResolutionFiles.has(relative))
+        forbidden.push(relative);
+    }
+    if (
+      ts.isCallExpression(node) &&
+      resolvesDynamicQueueAdapter(node, containingFile)
+    ) {
+      const relative = sourceRootRelative(containingFile);
+      if (!permittedQueueResolutionFiles.has(relative))
+        forbidden.push(relative);
+    }
+    ts.forEachChild(node, (child) => visit(child, containingFile));
+  }
+
+  function resolvesQueueAdapter(
+    node: ts.ImportDeclaration | ts.ExportDeclaration,
+    containingFile: string,
+  ): boolean {
+    if (!node.moduleSpecifier || !ts.isStringLiteral(node.moduleSpecifier))
+      return false;
+    return resolvesModuleSpecifier(node.moduleSpecifier.text, containingFile);
+  }
+
+  function resolvesDynamicQueueAdapter(
+    node: ts.CallExpression,
+    containingFile: string,
+  ): boolean {
+    if (node.expression.kind !== ts.SyntaxKind.ImportKeyword) return false;
+    const moduleSpecifier = node.arguments[0];
+    if (!moduleSpecifier || !ts.isStringLiteral(moduleSpecifier)) return false;
+    return resolvesModuleSpecifier(moduleSpecifier.text, containingFile);
+  }
+
+  function resolvesModuleSpecifier(
+    moduleSpecifier: string,
+    containingFile: string,
+  ): boolean {
+    const result = ts.resolveModuleName(
+      moduleSpecifier,
+      containingFile,
+      compilerOptions,
+      ts.sys,
+    ).resolvedModule;
+    return (
+      result !== undefined && resolve(result.resolvedFileName) === adapterFile
+    );
+  }
+
+  function sourceRootRelative(file: string): string {
+    return file.slice(sourceRoot.length + 1).replaceAll("\\", "/");
+  }
+}
 
 async function assertSingleProductionUploadCompositionPath(
   sourceRoot: string,
