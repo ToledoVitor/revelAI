@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import { RouteErrorSchema } from "@revelai/contracts";
 import { afterEach, describe, expect, it } from "vitest";
+import { apiRoute } from "./openapi.js";
 import { registerOperabilityRoutes } from "./operability-routes.js";
 
 const apps: Array<ReturnType<typeof Fastify>> = [];
@@ -90,6 +91,51 @@ describe("operability routes", () => {
       );
     },
   );
+
+  it("uses the readiness descriptor's declared error schema", async () => {
+    const route = apiRoute("getReadiness");
+    const originalResponses = route.responses;
+    const descriptorMessage = "Readiness descriptor rejected a dependency.";
+    Reflect.set(
+      route,
+      "responses",
+      originalResponses.map((response) =>
+        response.status === 503
+          ? {
+              ...response,
+              schema: RouteErrorSchema.transform((body) => ({
+                ...body,
+                message: descriptorMessage,
+              })),
+            }
+          : response,
+      ),
+    );
+    const app = Fastify();
+    apps.push(app);
+    try {
+      registerOperabilityRoutes(app, {
+        readiness: {
+          database: async () => {
+            throw new Error("dependency failed");
+          },
+          storage: async () => undefined,
+          queue: async () => true,
+        },
+      });
+
+      const response = await app.inject({ method: "GET", url: "/ready" });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toEqual({
+        code: "service_not_ready",
+        message: descriptorMessage,
+        retryable: true,
+      });
+    } finally {
+      Reflect.set(route, "responses", originalResponses);
+    }
+  });
 
   it.each(["database", "storage", "queue"] as const)(
     "runs every probe under one deadline and safely fails a timed-out %s dependency",

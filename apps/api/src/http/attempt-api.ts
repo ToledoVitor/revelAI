@@ -55,6 +55,7 @@ import {
   apiRoute,
   apiRouteForFastifyRequest,
   registerApiRoute,
+  sendApiRouteError,
   sendApiRouteResponse,
   type ApiRouteContract,
 } from "./openapi.js";
@@ -368,8 +369,8 @@ function createAttemptApiInternal(
     app.setNotFoundHandler((_request, reply) =>
       sendRouteError(reply, "invalid_request"),
     );
-    app.setErrorHandler((error, _request, reply) =>
-      sendRouteError(reply, routeErrorCode(error)),
+    app.setErrorHandler((error, request, reply) =>
+      sendRouteError(reply, routeErrorCode(error), matchedApiRoute(request)),
     );
     // Install shutdown while no runtime is active so there is no fallible app
     // composition step after paired activation.
@@ -458,23 +459,33 @@ function sendResponse(
 function sendRouteError(
   reply: FastifyReply,
   code: RouteErrorCode,
+  route?: ApiRouteContract,
 ): FastifyReply {
   const body = RouteErrorSchema.parse({
     code,
     message: RouteErrorMessageByCode[code],
     retryable: RouteErrorRetryabilityByCode[code],
   });
-  return reply.code(RouteErrorStatusByCode[code]).send(body);
+  const status = RouteErrorStatusByCode[code];
+  return route
+    ? sendApiRouteError(reply, route, status, body)
+    : reply.code(status).send(body);
 }
 
 function isPublicRouteRequest(request: FastifyRequest): boolean {
-  const route = apiRouteForFastifyRequest({
-    method: request.method,
-    routePath: request.routeOptions.url,
-  });
+  const route = matchedApiRoute(request);
   return route
     ? !route.authenticated
     : isPublicLeaderboardPathCandidate(publicRoutePath(request));
+}
+
+function matchedApiRoute(
+  request: FastifyRequest,
+): ApiRouteContract | undefined {
+  return apiRouteForFastifyRequest({
+    method: request.method,
+    routePath: request.routeOptions.url,
+  });
 }
 
 /**

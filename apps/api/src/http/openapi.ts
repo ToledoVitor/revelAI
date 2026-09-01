@@ -307,6 +307,20 @@ export function sendApiRouteResponse(
   return reply.code(status).send(response.schema.parse(value));
 }
 
+export function sendApiRouteError(
+  reply: FastifyReply,
+  route: ApiRouteContract,
+  status: number,
+  value: unknown,
+): FastifyReply {
+  const response = route.responses.find(
+    (definition) => definition.status === status,
+  );
+  if (!response?.schema)
+    throw new Error("C2 route error response is not declared.");
+  return reply.code(status).send(response.schema.parse(value));
+}
+
 export function resolveMultipartWire(
   route: ApiRouteContract,
 ): Readonly<{ contentType: string; fieldName: string }> {

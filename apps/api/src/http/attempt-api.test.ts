@@ -59,7 +59,7 @@ import {
   createAttemptApi,
   createInternallyComposedAttemptApi,
 } from "./attempt-api.js";
-import { apiRouteRegistry, fastifyRoutePath } from "./openapi.js";
+import { apiRoute, apiRouteRegistry, fastifyRoutePath } from "./openapi.js";
 
 const ATHLETE_A = "11111111-1111-4111-8111-111111111111";
 const ATHLETE_B = "22222222-2222-4222-8222-222222222222";
@@ -119,6 +119,68 @@ describe("attempt HTTP foundation", () => {
       }
     } finally {
       await fixture.close();
+    }
+  });
+
+  it("uses a matched attempt descriptor's declared error schema", async () => {
+    const route = apiRoute("getAttempt");
+    const originalResponses = route.responses;
+    const descriptorMessage = "Attempt descriptor rejected this read.";
+    Reflect.set(
+      route,
+      "responses",
+      originalResponses.map((response) =>
+        response.status === 404
+          ? {
+              ...response,
+              schema: RouteErrorSchema.transform((body) => ({
+                ...body,
+                message: descriptorMessage,
+              })),
+            }
+          : response,
+      ),
+    );
+    const fixture = await makeApi();
+    try {
+      const response = await fixture.app.inject({
+        method: "GET",
+        url: "/v1/attempts/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        headers: athleteHeader(ATHLETE_A),
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({
+        code: "attempt_not_found",
+        message: descriptorMessage,
+        retryable: false,
+      });
+    } finally {
+      await fixture.close();
+      Reflect.set(route, "responses", originalResponses);
+    }
+  });
+
+  it("rejects an omitted matched attempt error status", async () => {
+    const route = apiRoute("getAttempt");
+    const originalResponses = route.responses;
+    Reflect.set(
+      route,
+      "responses",
+      originalResponses.filter((response) => response.status !== 404),
+    );
+    const fixture = await makeApi();
+    try {
+      const response = await fixture.app.inject({
+        method: "GET",
+        url: "/v1/attempts/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        headers: athleteHeader(ATHLETE_A),
+      });
+
+      expect(response.statusCode).toBe(500);
+    } finally {
+      await fixture.close();
+      Reflect.set(route, "responses", originalResponses);
     }
   });
 

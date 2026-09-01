@@ -5,7 +5,12 @@ import {
   RouteErrorSchema,
   RouteErrorStatusByCode,
 } from "@revelai/contracts";
-import { apiRoute, registerApiRoute, sendApiRouteResponse } from "./openapi.js";
+import {
+  apiRoute,
+  registerApiRoute,
+  sendApiRouteError,
+  sendApiRouteResponse,
+} from "./openapi.js";
 
 export type ReadinessProbes = Readonly<{
   database(signal: AbortSignal): Promise<void>;
@@ -47,7 +52,10 @@ export function registerOperabilityRoutes(
         status: "ready",
       });
     } catch {
-      return reply.code(RouteErrorStatusByCode.service_not_ready).send(
+      return sendApiRouteError(
+        reply,
+        readinessRoute,
+        RouteErrorStatusByCode.service_not_ready,
         RouteErrorSchema.parse({
           code: "service_not_ready",
           message: RouteErrorMessageByCode.service_not_ready,
