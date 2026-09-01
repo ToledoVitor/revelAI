@@ -119,6 +119,7 @@ type ProductionSQLiteAttemptProcessingPort = Readonly<{
     | "deadLetterProcessingClaim"
     | "finalizeTerminalResult"
     | "listLiveLeaderboard"
+    | "tombstoneAttempt"
   >;
 }>;
 
@@ -1614,6 +1615,11 @@ export class SQLiteAttemptRepository implements AttemptRepository {
         .run(now, input.attemptId);
       this.#raw
         .prepare(
+          "UPDATE retention_cleanup_records SET cleanup_requested_at = ? WHERE attempt_id = ?",
+        )
+        .run(now, input.attemptId);
+      this.#raw
+        .prepare(
           "UPDATE attempts SET deletion_state = 'tombstoned', processing_context_json = NULL, processing_generation = processing_generation + 1, processing_lease_id = NULL, processing_lease_expires_at = NULL, tombstoned_at = ?, updated_at = ? WHERE id = ? AND athlete_id = ? AND deletion_state = 'active'",
         )
         .run(now, now, input.attemptId, input.athleteId);
@@ -1881,6 +1887,8 @@ const exactFinalizeTerminalResult =
   SQLiteAttemptRepository.prototype.finalizeTerminalResult;
 const exactListLiveLeaderboard =
   SQLiteAttemptRepository.prototype.listLiveLeaderboard;
+const exactTombstoneAttempt =
+  SQLiteAttemptRepository.prototype.tombstoneAttempt;
 
 function registerProductionSQLiteAttemptUploadPort(
   repository: SQLiteAttemptRepository,
@@ -1962,6 +1970,9 @@ function registerProductionSQLiteAttemptProcessingPort(
         listLiveLeaderboard: (
           input: Parameters<AttemptRepository["listLiveLeaderboard"]>[0],
         ) => exactListLiveLeaderboard.call(repository, input),
+        tombstoneAttempt: (
+          input: Parameters<AttemptRepository["tombstoneAttempt"]>[0],
+        ) => exactTombstoneAttempt.call(repository, input),
       }),
     }),
   );
@@ -1985,6 +1996,7 @@ function isCurrentProductionSQLiteAttemptRepository(
     !Object.hasOwn(repository, "deadLetterProcessingClaim") &&
     !Object.hasOwn(repository, "finalizeTerminalResult") &&
     !Object.hasOwn(repository, "listLiveLeaderboard") &&
+    !Object.hasOwn(repository, "tombstoneAttempt") &&
     hasExactProductionMethod("prepareMediaUpload", exactPrepareMediaUpload) &&
     hasExactProductionMethod("attachPreparedMedia", exactAttachPreparedMedia) &&
     hasExactProductionMethod(
@@ -2024,7 +2036,8 @@ function isCurrentProductionSQLiteAttemptRepository(
       "finalizeTerminalResult",
       exactFinalizeTerminalResult,
     ) &&
-    hasExactProductionMethod("listLiveLeaderboard", exactListLiveLeaderboard)
+    hasExactProductionMethod("listLiveLeaderboard", exactListLiveLeaderboard) &&
+    hasExactProductionMethod("tombstoneAttempt", exactTombstoneAttempt)
   );
 }
 
@@ -2041,7 +2054,8 @@ type ProductionAttemptMethod =
   | "recordProcessingFailure"
   | "deadLetterProcessingClaim"
   | "finalizeTerminalResult"
-  | "listLiveLeaderboard";
+  | "listLiveLeaderboard"
+  | "tombstoneAttempt";
 
 /** Descriptor inspection does not invoke a hostile getter installed later. */
 function hasExactProductionMethod(

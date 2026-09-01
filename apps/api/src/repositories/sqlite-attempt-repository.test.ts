@@ -42,6 +42,7 @@ import {
   type StoredMedia,
   type TerminalCandidate,
 } from "./attempt-repository.js";
+import { createAttemptApi } from "../http/attempt-api.js";
 import {
   issueRankedPolicyFinalization,
   resolveProductionSQLiteCompetitivePolicyLookupPort,
@@ -2917,6 +2918,91 @@ describe("SQLiteAttemptRepository", () => {
         candidate: freeOutcome(ATTEMPT_A, fixture.clock.now()),
       }),
     ).toEqual({ kind: "tombstoned" });
+  });
+
+  it("traces a Fastify DELETE against a separately-locked finalizer without resurrection", async () => {
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const job = await attachMedia(fixture, {
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      media: {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        contentType: "video/mp4",
+        bytes: 10,
+        deleteAt: "2030-01-16T12:00:00.000Z",
+      },
+    });
+    const claim = (await fixture.repository.claimProcessing(job))!;
+    const app = createAttemptApi({
+      repository: fixture.repository,
+      queue: new InMemoryAnalysisQueue(),
+      cleaner: { cleanup: async () => undefined },
+      scheduler: { everyHour: () => undefined, cancel: () => undefined },
+      clock: fixture.clock,
+    });
+    const barrier = startSqliteLockBarrier({
+      filename: join(fixture.directory, "api.sqlite"),
+      holdMilliseconds: 150,
+    });
+    const finalizer = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: fixture.clock.now(),
+      ids: ["dddddddd-dddd-4ddd-8ddd-dddddddddddd"],
+      delayMilliseconds: 0,
+      action: "finalize",
+      input: {
+        attemptId: ATTEMPT_A,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+        candidate: freeOutcome(ATTEMPT_A, fixture.clock.now()),
+      },
+    });
+    try {
+      await Promise.all([barrier.locked, finalizer.ready]);
+      finalizer.start();
+      await finalizer.attempting;
+      const deleted = await app.inject({
+        method: "DELETE",
+        url: `/v1/attempts/${ATTEMPT_A}`,
+        headers: { "x-revelai-athlete-id": ATHLETE_A },
+      });
+      const finalizerResult = await finalizer.done;
+      await barrier.done;
+
+      expect(deleted.statusCode).toBe(204);
+      expect(finalizerResult.error).toBeUndefined();
+      expect(finalizerResult.value).toEqual(
+        expect.objectContaining({
+          kind: expect.stringMatching(/finalized|tombstoned/),
+        }),
+      );
+      expect(
+        await fixture.repository.getAttempt({
+          attemptId: ATTEMPT_A,
+          athleteId: ATHLETE_A,
+        }),
+      ).toBeNull();
+      expect(
+        fixture.database.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
+          )
+          .get(ATTEMPT_A),
+      ).toEqual({ count: 0 });
+      expect(
+        fixture.database.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM leaderboard_entries WHERE attempt_id = ?",
+          )
+          .get(ATTEMPT_A),
+      ).toEqual({ count: 0 });
+    } finally {
+      await app.close();
+    }
   });
 
   it("guards rollback and claims by attachment generation, then reclaims only after the exclusive lease boundary", async () => {

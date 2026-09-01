@@ -167,6 +167,7 @@ export function createProductionAttemptApiFromResolvedQueue(
   if (!service)
     throw new Error("C8 media upload does not match this attempt API host.");
   const listLiveLeaderboard = processing.processing.listLiveLeaderboard;
+  const tombstoneAttempt = processing.processing.tombstoneAttempt;
   return createInternallyComposedAttemptApi(
     Object.freeze({
       repository: snapshot.repository,
@@ -188,6 +189,15 @@ export function createProductionAttemptApiFromResolvedQueue(
               "C8 requires a factory-issued leaderboard composition.",
             );
           return listLiveLeaderboard(input);
+        },
+      }),
+      tombstone: Object.freeze({
+        tombstoneAttempt: (input: Parameters<typeof tombstoneAttempt>[0]) => {
+          if (!processing.isCurrent())
+            throw new Error(
+              "C8 requires a factory-issued tombstone composition.",
+            );
+          return tombstoneAttempt(input);
         },
       }),
     }),

@@ -711,6 +711,59 @@ describe("Verified Training analysis", () => {
     }
   });
 
+  it("tombstones a ranked Verified attempt through the combined root and retracts its live entry", async () => {
+    const fixture = await makeCombinedVerifiedHttpRoot({
+      provider: createVerifiedFixtureVisionProvider("roboflow"),
+      approvedPolicy: true,
+    });
+    try {
+      const attemptId = await createVerifiedHttpAttempt(fixture.app);
+      await fixture.queueScheduler.runAll();
+
+      const before = await fixture.app.inject({
+        method: "GET",
+        url: "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1",
+      });
+      expect(LeaderboardResponseSchema.parse(before.json())).toMatchObject({
+        cohortSize: 1,
+        entries: [{ rank: 1 }],
+      });
+
+      const deleted = await fixture.app.inject({
+        method: "DELETE",
+        url: `/v1/attempts/${attemptId}`,
+        headers: { "x-revelai-athlete-id": ATHLETE_ID },
+      });
+      expect(deleted.statusCode).toBe(204);
+      expect(deleted.body).toBe("");
+
+      for (const suffix of ["", "/result"]) {
+        const read = await fixture.app.inject({
+          method: "GET",
+          url: `/v1/attempts/${attemptId}${suffix}`,
+          headers: { "x-revelai-athlete-id": ATHLETE_ID },
+        });
+        expect(read.statusCode).toBe(404);
+      }
+      const after = await fixture.app.inject({
+        method: "GET",
+        url: "/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1",
+      });
+      expect(LeaderboardResponseSchema.parse(after.json())).toMatchObject({
+        cohortSize: 0,
+        entries: [],
+        nextCursor: null,
+      });
+      expect(
+        fixture.database.raw
+          .prepare("SELECT COUNT(*) AS count FROM leaderboard_entries")
+          .get(),
+      ).toEqual({ count: 0 });
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it("projects an experimental Roboflow result from the combined Fastify root when no policy is active", async () => {
     const fixture = await makeCombinedVerifiedHttpRoot({
       provider: createVerifiedFixtureVisionProvider("roboflow"),

@@ -17,6 +17,7 @@ import {
   CalibrationSessionSchema,
   ChallengeListResponseSchema,
   CreateAttemptInputSchema,
+  DeleteAttemptResponseSchema,
   LeaderboardQuerySchema,
   LeaderboardResponseSchema,
   CreateAttemptResponseSchema,
@@ -60,6 +61,7 @@ type AttemptUploadQueue = AttemptApiQueuePort;
 type AttemptApiInput = Readonly<{
   repository: AttemptHttpRepository;
   leaderboard?: Pick<AttemptRepository, "listLiveLeaderboard">;
+  tombstone?: Pick<AttemptRepository, "tombstoneAttempt">;
   queue: AttemptUploadQueue;
   cleaner: OpaqueAcceptedMediaCleaner;
   maxUploadBytes?: number;
@@ -147,6 +149,9 @@ function createAttemptApiInternal(
   const listLiveLeaderboard = input.leaderboard
     ? input.leaderboard.listLiveLeaderboard
     : input.repository.listLiveLeaderboard.bind(input.repository);
+  const tombstoneAttempt = input.tombstone
+    ? input.tombstone.tombstoneAttempt
+    : input.repository.tombstoneAttempt.bind(input.repository);
   const ids = input.ids ?? { next: randomUUID };
   const nonce = input.nonce ?? (() => randomBytes(32).toString("base64url"));
   const attemptRead = createAttemptReadService({
@@ -273,6 +278,16 @@ function createAttemptApiInternal(
       );
     });
 
+    app.delete("/v1/attempts/:id", async (request, reply) => {
+      assertNoQuery(request.query);
+      assertNoBody(request.body);
+      await tombstoneAttempt({
+        attemptId: requiredCanonicalAttemptId(request),
+        athleteId: requiredAthleteId(athleteIds, request),
+      });
+      return sendResponse(reply, 204, DeleteAttemptResponseSchema, undefined);
+    });
+
     app.get("/v1/attempts", async (request, reply) => {
       const query = parseRequest(AttemptListQuerySchema, request.query);
       const page = await input.repository.listAttempts({
@@ -364,6 +379,10 @@ function assertNoQuery(query: unknown): void {
     Object.keys(query).length !== 0
   )
     throw new AttemptRouteError("invalid_request");
+}
+
+function assertNoBody(body: unknown): void {
+  if (body !== undefined) throw new AttemptRouteError("invalid_request");
 }
 
 function sendResponse<Output>(

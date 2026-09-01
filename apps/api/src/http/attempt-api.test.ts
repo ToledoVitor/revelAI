@@ -30,6 +30,7 @@ import { SQLiteAttemptRepository } from "../repositories/sqlite-attempt-reposito
 import { createC5PipelineTestSupport } from "../media/c5-pipeline-test-support.js";
 import { MediaPipelineError } from "../media/probe.js";
 import { SQLiteRetentionRepository } from "../media/sqlite-retention-repository.js";
+import { RetentionScavenger } from "../media/retention-scavenger.js";
 import type { LocalMediaProber } from "../storage/local-media-storage.js";
 import { createLocalC8AcceptedMediaCleaner } from "../services/local-c8-accepted-media-cleaner.js";
 import type { MediaUploadService } from "../services/media-upload-service.js";
@@ -60,6 +61,396 @@ afterEach(async () => {
 });
 
 describe("attempt HTTP foundation", () => {
+  it("tombstones an owned active attempt through one empty DELETE response", async () => {
+    const fixture = await makeMediaApi();
+    try {
+      const attempt = await fixture.repository.createAttempt({
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        athleteId: ATHLETE_A,
+        input: { mode: "free" },
+      });
+
+      const deleted = await fixture.app.inject({
+        method: "DELETE",
+        url: `/v1/attempts/${attempt.id}`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(deleted.statusCode).toBe(204);
+      expect(deleted.body).toBe("");
+
+      for (const suffix of ["", "/result"]) {
+        const read = await fixture.app.inject({
+          method: "GET",
+          url: `/v1/attempts/${attempt.id}${suffix}`,
+          headers: athleteHeader(ATHLETE_A),
+        });
+        expect(read.statusCode).toBe(404);
+        expect(RouteErrorSchema.parse(read.json()).code).toBe(
+          "attempt_not_found",
+        );
+      }
+
+      const duplicate = await fixture.app.inject({
+        method: "DELETE",
+        url: `/v1/attempts/${attempt.id}`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(duplicate.statusCode).toBe(404);
+      expect(RouteErrorSchema.parse(duplicate.json()).code).toBe(
+        "attempt_not_found",
+      );
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("scopes DELETE to its athlete and rejects ambiguous delete requests", async () => {
+    const fixture = await makeMediaApi();
+    try {
+      const attempt = await fixture.repository.createAttempt({
+        id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        athleteId: ATHLETE_A,
+        input: { mode: "free" },
+      });
+
+      const wrongOwner = await fixture.app.inject({
+        method: "DELETE",
+        url: `/v1/attempts/${attempt.id}`,
+        headers: athleteHeader(ATHLETE_B),
+      });
+      expect(wrongOwner.statusCode).toBe(404);
+      expect(RouteErrorSchema.parse(wrongOwner.json()).code).toBe(
+        "attempt_not_found",
+      );
+
+      const unknown = await fixture.app.inject({
+        method: "DELETE",
+        url: "/v1/attempts/cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(unknown.statusCode).toBe(404);
+      expect(RouteErrorSchema.parse(unknown.json()).code).toBe(
+        "attempt_not_found",
+      );
+
+      for (const request of [
+        {
+          url: `/v1/attempts/${attempt.id}?unexpected=true`,
+          headers: athleteHeader(ATHLETE_A),
+        },
+        {
+          url: `/v1/attempts/${attempt.id.toUpperCase()}`,
+          headers: athleteHeader(ATHLETE_A),
+        },
+        {
+          url: `/v1/attempts/${attempt.id}`,
+          headers: {
+            ...athleteHeader(ATHLETE_A),
+            "content-type": "application/json",
+          },
+          payload: {},
+        },
+      ] as const) {
+        const rejected = await fixture.app.inject({
+          method: "DELETE",
+          ...request,
+        });
+        expect(rejected.statusCode).toBe(400);
+        expect(RouteErrorSchema.parse(rejected.json()).code).toBe(
+          "invalid_request",
+        );
+      }
+
+      const stillActive = await fixture.app.inject({
+        method: "GET",
+        url: `/v1/attempts/${attempt.id}`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(stillActive.statusCode).toBe(200);
+
+      await fixture.app.listen({ host: "127.0.0.1", port: 0 });
+      for (const path of [
+        `/v1/attempts/${attempt.id}?`,
+        `/v1/attempts/${attempt.id}?&`,
+      ]) {
+        const rejected = await rawHttpDelete(
+          fixture.app,
+          path,
+          athleteHeader(ATHLETE_A),
+        );
+        expect(rejected.statusCode, path).toBe(400);
+        expect(
+          RouteErrorSchema.parse(JSON.parse(rejected.body)).code,
+          path,
+        ).toBe("invalid_request");
+      }
+
+      for (const headers of [
+        {},
+        { "x-revelai-athlete-id": "not-an-athlete" },
+        { "x-revelai-athlete-id": [ATHLETE_A, ATHLETE_B] },
+      ]) {
+        const rejected = await fixture.app.inject({
+          method: "DELETE",
+          url: `/v1/attempts/${attempt.id}`,
+          headers,
+        });
+        expect(rejected.statusCode).toBe(400);
+        expect(RouteErrorSchema.parse(rejected.json()).code).toBe(
+          "invalid_athlete_identity",
+        );
+      }
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("makes every owned retention fact due atomically when DELETE tombstones media", async () => {
+    const fixture = await makeMediaApi();
+    try {
+      const attempt = await fixture.repository.createAttempt({
+        id: "dededede-dede-4ded-8ded-dededededede",
+        athleteId: ATHLETE_A,
+        input: { mode: "free" },
+      });
+      const body = rawMultipartBody({
+        name: "media",
+        filename: "attempt.mp4",
+        contentType: "video/mp4",
+        bytes: validMp4Bytes(),
+      });
+      const uploaded = await fixture.app.inject({
+        method: "POST",
+        url: `/v1/attempts/${attempt.id}/media`,
+        headers: {
+          ...athleteHeader(ATHLETE_A),
+          "content-type": "multipart/form-data; boundary=revelai-test-boundary",
+        },
+        payload: body,
+      });
+      expect(uploaded.statusCode).toBe(202);
+
+      const deleteAt = "2030-02-15T12:00:00.000Z";
+      await Promise.all([
+        fixture.retention.schedule({
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          attemptId: attempt.id,
+          kind: "frame",
+          deleteAt,
+        }),
+        fixture.retention.schedule({
+          id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          attemptId: attempt.id,
+          kind: "temporary",
+          deleteAt,
+        }),
+        fixture.retention.schedule({
+          id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          attemptId: attempt.id,
+          kind: "observation",
+          deleteAt,
+        }),
+      ]);
+      expect(
+        await fixture.retention.listDue({
+          now: "2030-01-15T12:00:00.000Z",
+          limit: 10,
+        }),
+      ).toEqual([]);
+
+      const deleted = await fixture.app.inject({
+        method: "DELETE",
+        url: `/v1/attempts/${attempt.id}`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(deleted.statusCode).toBe(204);
+
+      const due = await fixture.retention.listDue({
+        now: "2030-01-15T12:00:00.000Z",
+        limit: 10,
+      });
+      expect(due.map((record) => record.kind)).toEqual(
+        expect.arrayContaining([
+          "original",
+          "frame",
+          "temporary",
+          "observation",
+        ]),
+      );
+      for (const record of due)
+        expect(record.cleanupRequestedAt).toBe("2030-01-15T12:00:00.000Z");
+
+      const restartedDatabase = fixture.database.reopen();
+      try {
+        const restartedRetention = new SQLiteRetentionRepository({
+          database: restartedDatabase,
+        });
+        expect(
+          (
+            await restartedRetention.listDue({
+              now: "2030-01-15T12:00:00.000Z",
+              limit: 10,
+            })
+          ).map((record) => record.id),
+        ).toEqual(expect.arrayContaining(due.map((record) => record.id)));
+      } finally {
+        restartedDatabase.close();
+      }
+
+      let failOnce = true;
+      const events: unknown[] = [];
+      const scavenger = new RetentionScavenger({
+        repository: fixture.retention,
+        objects: {
+          delete: async (record) => {
+            if (
+              record.id === "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" &&
+              failOnce
+            ) {
+              failOnce = false;
+              throw new Error("must-not-leak /private/media-path");
+            }
+          },
+        },
+        maxBatchSize: 10,
+        log: { event: (event) => events.push(event) },
+        now: () => "2030-01-15T12:00:00.000Z",
+      });
+      await expect(scavenger.run("2030-01-15T12:00:00.000Z")).resolves.toEqual(
+        expect.objectContaining({
+          kind: "completed",
+          processed: due.length - 1,
+        }),
+      );
+      expect(
+        await fixture.retention.listDue({
+          now: "2030-01-15T12:00:00.000Z",
+          limit: 10,
+        }),
+      ).toEqual([
+        expect.objectContaining({
+          id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          kind: "temporary",
+        }),
+      ]);
+      expect(JSON.stringify(events)).not.toContain("/private/media-path");
+      await expect(scavenger.run("2030-01-15T12:00:00.000Z")).resolves.toEqual(
+        expect.objectContaining({ kind: "completed", processed: 1 }),
+      );
+      await expect(
+        fixture.retention.listDue({
+          now: "2030-01-15T12:00:00.000Z",
+          limit: 10,
+        }),
+      ).resolves.toEqual([]);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("tombstones valid, invalid, and failed terminal attempts through the same HTTP boundary", async () => {
+    const fixture = await makeMediaApi();
+    const cases: readonly Readonly<{
+      id: string;
+      mode: "free" | "verified";
+      candidate: TerminalCandidate;
+    }>[] = [
+      {
+        id: "abababab-abab-4bab-8bab-abababababab",
+        mode: "free",
+        candidate: freeTerminalCandidate(
+          "abababab-abab-4bab-8bab-abababababab",
+        ),
+      },
+      {
+        id: "bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc",
+        mode: "free",
+        candidate: {
+          state: "failed",
+          attemptId: "bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc",
+          mode: "free",
+          code: "analysis_internal_error",
+          message: "A análise não pôde ser concluída.",
+          retryable: false,
+        },
+      },
+      {
+        id: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd",
+        mode: "verified",
+        candidate: {
+          state: "invalid",
+          attemptId: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd",
+          mode: "verified",
+          code: "calibration_not_verified",
+          message: "Refaça a calibração antes de tentar novamente.",
+          retryable: true,
+        },
+      },
+    ];
+    try {
+      for (const input of cases) {
+        const attempt = await createAttemptForReadProjection(fixture, input);
+        const claim = await fixture.repository.claimProcessing({
+          attemptId: attempt.id,
+          generation: 1,
+        });
+        expect(claim).not.toBeNull();
+        await fixture.repository.finalizeTerminalResult({
+          attemptId: attempt.id,
+          leaseId: claim!.leaseId,
+          generation: claim!.generation,
+          candidate: input.candidate,
+        });
+
+        const deleted = await fixture.app.inject({
+          method: "DELETE",
+          url: `/v1/attempts/${attempt.id}`,
+          headers: athleteHeader(ATHLETE_A),
+        });
+        expect(deleted.statusCode, attempt.id).toBe(204);
+        expect(deleted.body, attempt.id).toBe("");
+        const read = await fixture.app.inject({
+          method: "GET",
+          url: `/v1/attempts/${attempt.id}/result`,
+          headers: athleteHeader(ATHLETE_A),
+        });
+        expect(read.statusCode, attempt.id).toBe(404);
+        expect(RouteErrorSchema.parse(read.json()).code, attempt.id).toBe(
+          "attempt_not_found",
+        );
+      }
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("keeps an already-queued processing generation inert after HTTP deletion", async () => {
+    const fixture = await makeMediaApi();
+    try {
+      const attempt = await createAttemptForReadProjection(fixture, {
+        id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        mode: "free",
+        candidate: freeTerminalCandidate(
+          "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        ),
+      });
+      const deleted = await fixture.app.inject({
+        method: "DELETE",
+        url: `/v1/attempts/${attempt.id}`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(deleted.statusCode).toBe(204);
+      await expect(
+        fixture.repository.claimProcessing({
+          attemptId: attempt.id,
+          generation: 1,
+        }),
+      ).resolves.toBeNull();
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it("enforces one compiler-resolved production upload-composition path", async () => {
     await expect(
       assertSingleProductionUploadCompositionPath(
@@ -186,7 +577,7 @@ describe("attempt HTTP foundation", () => {
     database.close();
   });
 
-  it("issues media upload capability only to exact C4/C5 factory instances", async () => {
+  it("issues upload and tombstone capabilities only to exact C4/C5 factory instances", async () => {
     const fixture = await makeMediaApi();
     const issue = (repository: SQLiteAttemptRepository) =>
       createFactoryIssuedMediaUploadService({
@@ -194,6 +585,18 @@ describe("attempt HTTP foundation", () => {
         retention: fixture.retention,
         queue: fixture.queue,
         mediaPipeline: fixture.c5.pipeline,
+      });
+    const issueAttemptApi = (repository: SQLiteAttemptRepository) =>
+      createProductionAttemptApi({
+        repository,
+        retention: fixture.retention,
+        queue: fixture.queue,
+        mediaPipeline: fixture.c5.pipeline,
+        cleaner: createLocalC8AcceptedMediaCleaner({
+          repository: fixture.repository,
+          storage: fixture.c5.storage,
+        }),
+        scheduler: { everyHour: () => undefined, cancel: () => undefined },
       });
     class DerivedAttemptRepository extends SQLiteAttemptRepository {}
     const derived = new DerivedAttemptRepository({
@@ -218,6 +621,15 @@ describe("attempt HTTP foundation", () => {
     );
     const queueProxy = new Proxy(fixture.queue, {});
     const queueClone = Object.assign({}, fixture.queue);
+    const crossDatabase = openSqliteDatabase(
+      join(fixture.directory, "cross-authority.sqlite"),
+    );
+    const crossDatabaseRepository = new SQLiteAttemptRepository({
+      database: crossDatabase,
+      clock: { now: () => "2030-01-15T12:00:00.000Z" },
+      ids: { next: () => "fefefefe-fefe-4efe-8efe-fefefefefefe" },
+      handoffVerifier: fixture.c5.handoffVerifier,
+    });
 
     expect(() => issue(derived)).toThrow(
       "factory-issued media upload composition",
@@ -226,6 +638,13 @@ describe("attempt HTTP foundation", () => {
       "factory-issued media upload composition",
     );
     expect(() => issue(clone)).toThrow(
+      "factory-issued media upload composition",
+    );
+    for (const repository of [derived, proxy, clone])
+      expect(() => issueAttemptApi(repository)).toThrow(
+        "factory-issued leaderboard composition",
+      );
+    expect(() => issueAttemptApi(crossDatabaseRepository)).toThrow(
       "factory-issued media upload composition",
     );
     expect(() =>
@@ -345,6 +764,7 @@ describe("attempt HTTP foundation", () => {
       });
     }
 
+    crossDatabase.close();
     await fixture.close();
   });
 
@@ -385,6 +805,77 @@ describe("attempt HTTP foundation", () => {
     } finally {
       Reflect.deleteProperty(fixture.repository, "prepareMediaUpload");
     }
+    await fixture.close();
+  });
+
+  it("fails DELETE closed without reading hostile tombstone accessors issued after composition", async () => {
+    const fixture = await makeMediaApi();
+    const attempt = await fixture.repository.createAttempt({
+      id: "fefefefe-fefe-4efe-8efe-fefefefefefe",
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+    });
+    const expectBlocked = async () => {
+      const reply = await fixture.app.inject({
+        method: "DELETE",
+        url: `/v1/attempts/${attempt.id}`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(reply.statusCode).toBe(503);
+      expect(RouteErrorSchema.parse(reply.json())).toMatchObject({
+        code: "service_not_ready",
+      });
+    };
+
+    let ownReads = 0;
+    Object.defineProperty(fixture.repository, "tombstoneAttempt", {
+      configurable: true,
+      get: () => {
+        ownReads += 1;
+        throw new Error("hostile own accessor");
+      },
+    });
+    try {
+      await expectBlocked();
+      expect(ownReads).toBe(0);
+    } finally {
+      Reflect.deleteProperty(fixture.repository, "tombstoneAttempt");
+    }
+
+    const original = Object.getOwnPropertyDescriptor(
+      SQLiteAttemptRepository.prototype,
+      "tombstoneAttempt",
+    );
+    let prototypeReads = 0;
+    Object.defineProperty(
+      SQLiteAttemptRepository.prototype,
+      "tombstoneAttempt",
+      {
+        configurable: true,
+        get: () => {
+          prototypeReads += 1;
+          throw new Error("hostile prototype accessor");
+        },
+      },
+    );
+    try {
+      await expectBlocked();
+      expect(prototypeReads).toBe(0);
+    } finally {
+      if (original)
+        Object.defineProperty(
+          SQLiteAttemptRepository.prototype,
+          "tombstoneAttempt",
+          original,
+        );
+    }
+
+    expect(
+      await fixture.repository.getAttempt({
+        attemptId: attempt.id,
+        athleteId: ATHLETE_A,
+      }),
+    ).toMatchObject({ status: "awaiting-upload" });
     await fixture.close();
   });
 
@@ -2665,6 +3156,23 @@ async function rawHttpGet(
   path: string,
   headers: Readonly<Record<string, string>>,
 ): Promise<Readonly<{ statusCode: number; body: string }>> {
+  return rawHttpRequest(app, "GET", path, headers);
+}
+
+async function rawHttpDelete(
+  app: FastifyInstance,
+  path: string,
+  headers: Readonly<Record<string, string>>,
+): Promise<Readonly<{ statusCode: number; body: string }>> {
+  return rawHttpRequest(app, "DELETE", path, headers);
+}
+
+async function rawHttpRequest(
+  app: FastifyInstance,
+  method: "GET" | "DELETE",
+  path: string,
+  headers: Readonly<Record<string, string>>,
+): Promise<Readonly<{ statusCode: number; body: string }>> {
   const address = app.server.address();
   if (address === null || typeof address === "string")
     throw new Error("Expected a listening TCP Fastify server.");
@@ -2673,7 +3181,7 @@ async function rawHttpGet(
       {
         hostname: "127.0.0.1",
         port: address.port,
-        method: "GET",
+        method,
         path,
         headers,
       },
@@ -2751,6 +3259,7 @@ async function makeApi(
   return {
     app,
     database,
+    directory,
     repository,
     scheduled,
     get cancelled() {
@@ -2813,6 +3322,7 @@ async function makeMediaApi(
   return {
     app,
     database,
+    directory,
     repository,
     queue,
     c5,
