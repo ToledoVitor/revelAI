@@ -261,10 +261,12 @@ export interface IdGenerator {
  * transaction boundary. It cannot read or mutate repository state.
  */
 export type C4TransactionEntryObserver = Readonly<{
-  beforeEnter(input: Readonly<{
-    operation: "finalize" | "tombstone";
-    attemptId: string;
-  }>): Promise<void>;
+  beforeEnter(
+    input: Readonly<{
+      operation: "finalize" | "tombstone";
+      attemptId: string;
+    }>,
+  ): Promise<void>;
 }>;
 
 /** Narrow production-operation observer for mode-isolation diagnostics. */

@@ -46,10 +46,7 @@ export function createFreeTrainingRuntime(
     input.forbiddenPorts ?? defaultFreeTrainingForbiddenPorts;
   const worker = new AnalysisWorker({
     queue: input.queue,
-    repository: guardFreeTerminalPersistence(
-      input.repository,
-      forbiddenPorts,
-    ),
+    repository: guardFreeTerminalPersistence(input.repository, forbiddenPorts),
     process: createFreeTrainingAnalysisProcessor({
       ...input.analysis,
       forbiddenPorts,
