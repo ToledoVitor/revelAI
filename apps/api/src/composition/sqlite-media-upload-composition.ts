@@ -6,6 +6,7 @@ import {
   resolveProductionSQLiteRetentionUploadPort,
   type SQLiteRetentionRepository,
 } from "../media/sqlite-retention-repository.js";
+import type { RetentionLog } from "../media/retention-scavenger.js";
 import type { AnalysisQueue } from "../queue/analysis-queue.js";
 import type { ResolvedAnalysisQueuePort } from "../queue/analysis-queue-port.js";
 import {
@@ -21,12 +22,16 @@ import {
   createMediaUploadService,
   type BoundMediaUploadService,
 } from "../services/media-upload-service.js";
+import {
+  createC8RetentionRuntime,
+  type RetentionRuntimeFactory,
+} from "../services/retention-runtime.js";
 import { createInternallyComposedAttemptApi } from "../http/attempt-api.js";
 
 type ProductionAttemptApiInput = Readonly<
   Omit<
     Parameters<typeof createInternallyComposedAttemptApi>[0],
-    "repository" | "queue" | "leaderboard"
+    "repository" | "queue" | "leaderboard" | "tombstone" | "retentionRuntime"
   > & {
     repository: SQLiteAttemptRepository;
     retention: SQLiteRetentionRepository;
@@ -37,7 +42,7 @@ type ProductionAttemptApiInput = Readonly<
 type ResolvedProductionAttemptApiInput = Readonly<
   Omit<
     Parameters<typeof createInternallyComposedAttemptApi>[0],
-    "repository" | "queue" | "leaderboard"
+    "repository" | "queue" | "leaderboard" | "tombstone" | "retentionRuntime"
   > & {
     repository: SQLiteAttemptRepository;
     retention: SQLiteRetentionRepository;
@@ -114,6 +119,88 @@ export function createFactoryIssuedMediaUploadService(
   });
 }
 
+/**
+ * Binds the only C5 physical-retention capability to the same exact C4 and
+ * retention database host. HTTP receives only the start closure, never a
+ * storage adapter or a retention repository it could replay against.
+ */
+export function createFactoryIssuedRetentionRuntimeFactory(
+  input: Readonly<{
+    repository: SQLiteAttemptRepository;
+    retention: SQLiteRetentionRepository;
+    mediaPipeline: C5MediaPipeline;
+    log?: RetentionLog;
+  }>,
+): RetentionRuntimeFactory {
+  const repository = input.repository;
+  const retention = input.retention;
+  const pipeline = input.mediaPipeline;
+  const log = input.log;
+  const snapshot = Object.freeze({ repository, retention, pipeline, log });
+  const processing = resolveProductionSQLiteAttemptProcessingPort(
+    snapshot.repository,
+  );
+  const retentionPort = resolveProductionSQLiteRetentionUploadPort(
+    snapshot.retention,
+  );
+  const c5 = resolveFactoryIssuedC5MediaPipelinePort(snapshot.pipeline);
+  if (
+    !processing ||
+    !retentionPort ||
+    !c5 ||
+    processing.token !== retentionPort.token ||
+    processing.handoffVerifier !== c5.handoffVerifier ||
+    !processing.isCurrent() ||
+    !retentionPort.isCurrent()
+  )
+    throw new Error("C8 requires a factory-issued retention composition.");
+
+  const listDue = retentionPort.listDue;
+  const acknowledge = retentionPort.acknowledge;
+  const deleteRetentionRecord = c5.deleteRetentionRecord;
+  const retentionLog = snapshot.log ?? silentRetentionLog;
+  const requireCurrent = () => {
+    if (!processing.isCurrent() || !retentionPort.isCurrent())
+      throw new Error("C8 retention composition is no longer current.");
+  };
+  return Object.freeze({
+    start: ({
+      scheduler,
+      maxBatchSize,
+      now,
+    }: Parameters<RetentionRuntimeFactory["start"]>[0]) => {
+      requireCurrent();
+      return createC8RetentionRuntime({
+        owner: snapshot.retention,
+        repository: Object.freeze({
+          listDue: (request: Parameters<typeof listDue>[0]) => {
+            requireCurrent();
+            return listDue(request);
+          },
+          acknowledge: (record: Parameters<typeof acknowledge>[0]) => {
+            requireCurrent();
+            return acknowledge(record);
+          },
+        }),
+        objects: Object.freeze({
+          delete: (record: Parameters<typeof deleteRetentionRecord>[0]) => {
+            requireCurrent();
+            return deleteRetentionRecord(record);
+          },
+        }),
+        log: retentionLog,
+        scheduler,
+        maxBatchSize,
+        now,
+      });
+    },
+  });
+}
+
+const silentRetentionLog: RetentionLog = Object.freeze({
+  event: () => undefined,
+});
+
 /** Official production root: verified adapters compose before HTTP wiring. */
 export function createProductionAttemptApi(input: ProductionAttemptApiInput) {
   const snapshot = snapshotProductionAttemptApiInput(input);
@@ -132,6 +219,7 @@ export function createProductionAttemptApi(input: ProductionAttemptApiInput) {
     ids: snapshot.ids,
     nonce: snapshot.nonce,
     log: snapshot.log,
+    retentionLog: snapshot.retentionLog,
   });
 }
 
@@ -166,6 +254,15 @@ export function createProductionAttemptApiFromResolvedQueue(
   );
   if (!service)
     throw new Error("C8 media upload does not match this attempt API host.");
+  // Resolve this before HTTP starts either scheduled owner. A malformed,
+  // cloned, cross-database, or mutation-stale retention host therefore cannot
+  // leave recovery running without its paired retention consumer.
+  const retentionRuntime = createFactoryIssuedRetentionRuntimeFactory({
+    repository: snapshot.repository,
+    retention: snapshot.retention,
+    mediaPipeline: snapshot.mediaPipeline,
+    log: snapshot.retentionLog,
+  });
   const listLiveLeaderboard = processing.processing.listLiveLeaderboard;
   const tombstoneAttempt = processing.processing.tombstoneAttempt;
   return createInternallyComposedAttemptApi(
@@ -180,6 +277,7 @@ export function createProductionAttemptApiFromResolvedQueue(
       ids: snapshot.ids,
       nonce: snapshot.nonce,
       log: snapshot.log,
+      retentionRuntime,
       leaderboard: Object.freeze({
         listLiveLeaderboard: (
           input: Parameters<typeof listLiveLeaderboard>[0],
@@ -220,6 +318,7 @@ function snapshotProductionAttemptApiInput(
   const ids = input.ids;
   const nonce = input.nonce;
   const log = input.log;
+  const retentionLog = input.retentionLog;
   return Object.freeze({
     repository,
     retention,
@@ -233,6 +332,7 @@ function snapshotProductionAttemptApiInput(
     ids,
     nonce,
     log,
+    retentionLog,
   });
 }
 
@@ -252,6 +352,7 @@ function snapshotResolvedProductionAttemptApiInput(
   const ids = input.ids;
   const nonce = input.nonce;
   const log = input.log;
+  const retentionLog = input.retentionLog;
   return Object.freeze({
     repository,
     retention,
@@ -266,6 +367,7 @@ function snapshotResolvedProductionAttemptApiInput(
     ids,
     nonce,
     log,
+    retentionLog,
   });
 }
 

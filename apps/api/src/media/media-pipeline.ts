@@ -31,6 +31,7 @@ import {
   isLocalFrameExtractionCapability,
   type LocalFrameExtraction,
 } from "../storage/local-frame-extraction.js";
+import type { RetentionRecord } from "./retention-scavenger.js";
 
 /**
  * C5's acceptance result deliberately separates private evidence from its
@@ -87,6 +88,12 @@ type FactoryIssuedC5MediaPipelinePort = Readonly<{
     }>,
   ): Promise<ExtractionManifest>;
   readFrame(reference: string): Promise<Uint8Array>;
+  /**
+   * C5's opaque retention bridge. The outer composition can request physical
+   * deletion, but never receives a storage object, path, or replaceable
+   * storage method.
+   */
+  deleteRetentionRecord(record: RetentionRecord): Promise<void>;
 }>;
 const factoryIssuedC5MediaPipelinePorts = new WeakMap<
   object,
@@ -184,6 +191,13 @@ class MediaPipeline implements C5MediaPipeline {
   public publicApi(): C5MediaPipeline {
     const accept = this.accept.bind(this);
     const acceptMultipart = this.acceptMultipart.bind(this);
+    // Capture C5-issued storage closures while the pipeline is issued. The
+    // public facade is frozen, but retaining these exact functions also keeps
+    // later own/prototype accessor mutation from selecting another storage
+    // implementation at retention-execution time.
+    const deleteOriginal = this.storage.delete;
+    const deleteFrame = this.storage.deleteFrame;
+    const deleteTemporary = this.storage.deleteTemporary;
     const reconstruct = (
       input: Readonly<{
         context: unknown;
@@ -208,6 +222,14 @@ class MediaPipeline implements C5MediaPipeline {
         acceptMultipart,
         reconstructDurableProcessingContext: reconstruct,
         readFrame: (reference) => this.extractor.readFrame(reference),
+        deleteRetentionRecord: async (record) => {
+          if (record.kind === "original") return deleteOriginal(record.id);
+          if (record.kind === "frame") return deleteFrame(record.id);
+          if (record.kind === "temporary") return deleteTemporary(record.id);
+          // Observations are canonical C4 data, acknowledged transactionally
+          // by the retention repository after this intentionally empty C5
+          // physical-delete step.
+        },
       }),
     );
     return publicApi;

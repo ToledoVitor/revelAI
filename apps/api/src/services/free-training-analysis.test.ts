@@ -470,6 +470,7 @@ describe("Free Training analysis", () => {
       ids: 1,
       nonce: 1,
       log: 1,
+      retentionLog: 1,
       freeTraining: 1,
     });
     const created = await app.inject({

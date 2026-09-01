@@ -23,6 +23,7 @@ type ProductionSQLiteRetentionUploadPort = Readonly<{
   token: SqliteDatabaseCompositionToken;
   isCurrent(): boolean;
   schedule: SQLiteRetentionRepository["schedule"];
+  listDue: SQLiteRetentionRepository["listDue"];
   acknowledge: SQLiteRetentionRepository["acknowledge"];
 }>;
 
@@ -201,6 +202,7 @@ export class SQLiteRetentionRepository implements RetentionRepository {
 }
 
 const exactSchedule = SQLiteRetentionRepository.prototype.schedule;
+const exactListDue = SQLiteRetentionRepository.prototype.listDue;
 const exactAcknowledge = SQLiteRetentionRepository.prototype.acknowledge;
 
 function registerProductionSQLiteRetentionUploadPort(
@@ -214,6 +216,7 @@ function registerProductionSQLiteRetentionUploadPort(
       token,
       isCurrent: () => isCurrentProductionSQLiteRetentionRepository(repository),
       schedule: (input) => exactSchedule.call(repository, input),
+      listDue: (input) => exactListDue.call(repository, input),
       acknowledge: (record) => exactAcknowledge.call(repository, record),
     }),
   );
@@ -225,9 +228,28 @@ function isCurrentProductionSQLiteRetentionRepository(
   return (
     Object.getPrototypeOf(repository) === SQLiteRetentionRepository.prototype &&
     !Object.hasOwn(repository, "schedule") &&
+    !Object.hasOwn(repository, "listDue") &&
     !Object.hasOwn(repository, "acknowledge") &&
-    SQLiteRetentionRepository.prototype.schedule === exactSchedule &&
-    SQLiteRetentionRepository.prototype.acknowledge === exactAcknowledge
+    hasExactProductionRetentionMethod("schedule", exactSchedule) &&
+    hasExactProductionRetentionMethod("listDue", exactListDue) &&
+    hasExactProductionRetentionMethod("acknowledge", exactAcknowledge)
+  );
+}
+
+/** Descriptor inspection never invokes a hostile accessor installed later. */
+function hasExactProductionRetentionMethod(
+  name: "schedule" | "listDue" | "acknowledge",
+  expected: unknown,
+): boolean {
+  const descriptor = Object.getOwnPropertyDescriptor(
+    SQLiteRetentionRepository.prototype,
+    name,
+  );
+  return (
+    descriptor !== undefined &&
+    descriptor.value === expected &&
+    !descriptor.get &&
+    !descriptor.set
   );
 }
 

@@ -66,6 +66,7 @@ export function createProductionTrainingAttemptApi(
     ids: snapshot.ids,
     nonce: snapshot.nonce,
     log: snapshot.log,
+    retentionLog: snapshot.retentionLog,
   });
   let free: FreeTrainingRuntimeHandle | undefined;
   try {
@@ -109,6 +110,7 @@ function snapshotTrainingAttemptApiInput(
   const ids = input.ids;
   const nonce = input.nonce;
   const log = input.log;
+  const retentionLog = input.retentionLog;
   const rawFreeTraining = input.freeTraining;
   const freeProvider = rawFreeTraining.provider;
   const freeScheduler = rawFreeTraining.scheduler;
@@ -132,6 +134,7 @@ function snapshotTrainingAttemptApiInput(
     ids,
     nonce,
     log,
+    retentionLog,
     freeTraining: Object.freeze({
       provider: freeProvider,
       scheduler: freeScheduler,

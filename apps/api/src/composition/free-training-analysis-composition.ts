@@ -153,6 +153,7 @@ export function createProductionFreeTrainingAttemptApi(
     ids: snapshot.ids,
     nonce: snapshot.nonce,
     log: snapshot.log,
+    retentionLog: snapshot.retentionLog,
   });
   try {
     const runtime = createFactoryIssuedFreeTrainingRuntimeFromResolvedQueue({
@@ -191,6 +192,7 @@ function snapshotFreeTrainingApiInput(
   const ids = input.ids;
   const nonce = input.nonce;
   const log = input.log;
+  const retentionLog = input.retentionLog;
   const rawFreeTraining = input.freeTraining;
   const provider = rawFreeTraining.provider;
   const visionScheduler = rawFreeTraining.scheduler;
@@ -209,6 +211,7 @@ function snapshotFreeTrainingApiInput(
     ids,
     nonce,
     log,
+    retentionLog,
     freeTraining: Object.freeze({
       provider,
       scheduler: visionScheduler,

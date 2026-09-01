@@ -33,6 +33,7 @@ import {
 import { QueueUnavailableError } from "../queue/analysis-queue.js";
 import type { AttemptApiQueuePort } from "../queue/analysis-queue-port.js";
 import { MediaPipelineError } from "../media/probe.js";
+import type { RetentionLog } from "../media/retention-scavenger.js";
 import { RepositoryError } from "../repositories/attempt-repository.js";
 import type {
   AttemptRecord,
@@ -47,6 +48,10 @@ import {
   type MediaDeliveryRedeliveryRepository,
   type OpaqueAcceptedMediaCleaner,
 } from "../services/media-attachment-recovery.js";
+import {
+  type C8RetentionRuntimeHandle,
+  type RetentionRuntimeFactory,
+} from "../services/retention-runtime.js";
 import { createAttemptReadService } from "../services/attempt-read-service.js";
 import { MultipartParserError } from "./streamed-multipart.js";
 import { type MediaUploadService } from "../services/media-upload-service.js";
@@ -71,6 +76,9 @@ type AttemptApiInput = Readonly<{
   ids?: AttemptApiIdGenerator;
   nonce?: () => string;
   log?: MediaAttachmentRecoveryLog;
+  retentionLog?: RetentionLog;
+  /** Outer production composition supplies the sealed C4/C5 retention join. */
+  retentionRuntime?: RetentionRuntimeFactory;
 }>;
 
 const RECOVERY_BATCH_LIMIT = 100;
@@ -146,6 +154,7 @@ function createAttemptApiInternal(
   const athleteIds = new WeakMap<FastifyRequest, string>();
   const clock = input.clock ?? { now: () => new Date().toISOString() };
   const now = clock.now.bind(clock);
+  const scheduler = input.scheduler ?? processHourlyRecoveryScheduler;
   const listLiveLeaderboard = input.leaderboard
     ? input.leaderboard.listLiveLeaderboard
     : input.repository.listLiveLeaderboard.bind(input.repository);
@@ -158,6 +167,7 @@ function createAttemptApiInternal(
     repository: input.repository,
   });
   let recovery: C8RecoveryRuntimeHandle | undefined;
+  let retention: C8RetentionRuntimeHandle | undefined;
   try {
     app.addHook("onRequest", async (request) => {
       if (isPublicRouteRequest(request)) return;
@@ -337,16 +347,21 @@ function createAttemptApiInternal(
       queue: input.queue,
       cleaner: input.cleaner,
       log: input.log ?? silentRecoveryLog,
-      scheduler: input.scheduler ?? processHourlyRecoveryScheduler,
+      scheduler,
+      maxBatchSize: input.recoveryBatchLimit ?? RECOVERY_BATCH_LIMIT,
+      now,
+    });
+    retention = input.retentionRuntime?.start({
+      scheduler,
       maxBatchSize: input.recoveryBatchLimit ?? RECOVERY_BATCH_LIMIT,
       now,
     });
     app.addHook("onClose", async () => {
-      await recovery?.stop();
+      await Promise.all([recovery?.stop(), retention?.stop()]);
     });
     return app;
   } catch (error) {
-    void recovery?.stop();
+    void Promise.all([recovery?.stop(), retention?.stop()]);
     void app.close().catch(() => undefined);
     throw error;
   }

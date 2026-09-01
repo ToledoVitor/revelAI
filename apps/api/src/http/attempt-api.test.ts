@@ -1,4 +1,12 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -30,7 +38,10 @@ import { SQLiteAttemptRepository } from "../repositories/sqlite-attempt-reposito
 import { createC5PipelineTestSupport } from "../media/c5-pipeline-test-support.js";
 import { MediaPipelineError } from "../media/probe.js";
 import { SQLiteRetentionRepository } from "../media/sqlite-retention-repository.js";
-import { RetentionScavenger } from "../media/retention-scavenger.js";
+import {
+  RetentionScavenger,
+  type RetentionLog,
+} from "../media/retention-scavenger.js";
 import type { LocalMediaProber } from "../storage/local-media-storage.js";
 import { createLocalC8AcceptedMediaCleaner } from "../services/local-c8-accepted-media-cleaner.js";
 import type { MediaUploadService } from "../services/media-upload-service.js";
@@ -40,6 +51,7 @@ import {
 } from "../queue/in-memory-analysis-queue.js";
 import {
   createFactoryIssuedMediaUploadService,
+  createFactoryIssuedRetentionRuntimeFactory,
   createProductionAttemptApi,
   createProductionAttemptApiFromResolvedQueue,
 } from "../composition/sqlite-media-upload-composition.js";
@@ -348,6 +360,139 @@ describe("attempt HTTP foundation", () => {
     }
   });
 
+  it("drains terminal DELETE retention from the official root's separate hourly task", async () => {
+    const fixture = await makeMediaApi();
+    try {
+      const attempt = await createAttemptForReadProjection(fixture, {
+        id: "f0f0f0f0-f0f0-4f0f-8f0f-f0f0f0f0f0f0",
+        mode: "free",
+        candidate: freeTerminalCandidate(
+          "f0f0f0f0-f0f0-4f0f-8f0f-f0f0f0f0f0f0",
+        ),
+      });
+      const claim = await fixture.repository.claimProcessing({
+        attemptId: attempt.id,
+        generation: 1,
+      });
+      expect(claim).not.toBeNull();
+      const context = await fixture.repository.getProcessingContext({
+        attemptId: attempt.id,
+        generation: claim!.generation,
+        leaseId: claim!.leaseId,
+      });
+      expect(context).not.toBeNull();
+      const mediaId = context!.processing.receipt.mediaId;
+      const frameBatchId = context!.processing.receipt.frameBatchId;
+      await fixture.repository.finalizeTerminalResult({
+        attemptId: attempt.id,
+        leaseId: claim!.leaseId,
+        generation: claim!.generation,
+        candidate: freeTerminalCandidate(attempt.id),
+      });
+      const temporaryId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const observationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+      await writeFile(
+        join(fixture.directory, "c5", "temporary", `${temporaryId}.uploading`),
+        "orphaned temporary evidence",
+        { mode: 0o600 },
+      );
+      fixture.database.raw
+        .prepare(
+          "INSERT INTO canonical_observations (id, attempt_id, payload_json, delete_at, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(
+          observationId,
+          attempt.id,
+          JSON.stringify({ source: "retention-route-fixture" }),
+          "2030-02-15T12:00:00.000Z",
+          "2030-01-15T12:00:00.000Z",
+        );
+      await Promise.all([
+        fixture.retention.schedule({
+          id: temporaryId,
+          attemptId: attempt.id,
+          kind: "temporary",
+          deleteAt: "2030-02-15T12:00:00.000Z",
+        }),
+        fixture.retention.schedule({
+          id: frameBatchId,
+          attemptId: attempt.id,
+          kind: "frame",
+          deleteAt: "2030-02-15T12:00:00.000Z",
+        }),
+        fixture.retention.schedule({
+          id: observationId,
+          attemptId: attempt.id,
+          kind: "observation",
+          deleteAt: "2030-02-15T12:00:00.000Z",
+        }),
+      ]);
+      await expect(
+        readFile(
+          join(fixture.directory, "c5", "originals", mediaId, "payload"),
+        ),
+      ).resolves.toHaveLength(validMp4Bytes().byteLength);
+
+      const deleted = await fixture.app.inject({
+        method: "DELETE",
+        url: `/v1/attempts/${attempt.id}`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(deleted.statusCode).toBe(204);
+      expect(
+        fixture.database.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM canonical_observations WHERE id = ?",
+          )
+          .get(observationId),
+      ).toEqual({ count: 0 });
+      expect(fixture.hourlyTasks).toHaveLength(2);
+
+      fixture.hourlyTasks[0]!();
+      await nextEventTurn();
+      expect(
+        (
+          await fixture.retention.listDue({
+            now: "2030-01-15T12:00:00.000Z",
+            limit: 10,
+          })
+        ).map((record) => record.kind),
+      ).toEqual(
+        expect.arrayContaining([
+          "original",
+          "frame",
+          "temporary",
+          "observation",
+        ]),
+      );
+
+      fixture.hourlyTasks[1]!();
+      await waitForRetentionDrain(fixture.retention);
+      await expect(
+        readFile(
+          join(fixture.directory, "c5", "originals", mediaId, "payload"),
+        ),
+      ).rejects.toThrow();
+      await expect(
+        readdir(join(fixture.directory, "c5", "frames", frameBatchId)),
+      ).rejects.toThrow();
+      await expect(
+        readFile(
+          join(
+            fixture.directory,
+            "c5",
+            "temporary",
+            `${temporaryId}.uploading`,
+          ),
+        ),
+      ).rejects.toThrow();
+      await fixture.app.close();
+      expect(fixture.cancelledHourlyTasks).toHaveLength(2);
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it("tombstones valid, invalid, and failed terminal attempts through the same HTTP boundary", async () => {
     const fixture = await makeMediaApi();
     const cases: readonly Readonly<{
@@ -388,13 +533,40 @@ describe("attempt HTTP foundation", () => {
       },
     ];
     try {
-      for (const input of cases) {
+      const physical: Array<
+        Readonly<{ mediaId: string; frameBatchId: string }>
+      > = [];
+      for (const [index, input] of cases.entries()) {
         const attempt = await createAttemptForReadProjection(fixture, input);
         const claim = await fixture.repository.claimProcessing({
           attemptId: attempt.id,
           generation: 1,
         });
         expect(claim).not.toBeNull();
+        const context = await fixture.repository.getProcessingContext({
+          attemptId: attempt.id,
+          generation: claim!.generation,
+          leaseId: claim!.leaseId,
+        });
+        expect(context).not.toBeNull();
+        const mediaId = context!.processing.receipt.mediaId;
+        const frameBatchId = context!.processing.receipt.frameBatchId;
+        physical.push(Object.freeze({ mediaId, frameBatchId }));
+        const scheduled = await Promise.all([
+          fixture.retention.schedule({
+            id: frameBatchId,
+            attemptId: attempt.id,
+            kind: "frame",
+            deleteAt: "2030-02-15T12:00:00.000Z",
+          }),
+          fixture.retention.schedule({
+            id: `99999999-9999-4999-8999-${String(index + 1).padStart(12, "0")}`,
+            attemptId: attempt.id,
+            kind: "observation",
+            deleteAt: "2030-02-15T12:00:00.000Z",
+          }),
+        ]);
+        expect(scheduled).not.toContainEqual({ kind: "conflict" });
         await fixture.repository.finalizeTerminalResult({
           attemptId: attempt.id,
           leaseId: claim!.leaseId,
@@ -419,8 +591,207 @@ describe("attempt HTTP foundation", () => {
           "attempt_not_found",
         );
       }
+      fixture.hourlyTasks[1]!();
+      await waitForRetentionDrain(fixture.retention);
+      for (const record of physical) {
+        await expect(
+          readFile(
+            join(
+              fixture.directory,
+              "c5",
+              "originals",
+              record.mediaId,
+              "payload",
+            ),
+          ),
+        ).rejects.toThrow();
+        await expect(
+          readdir(join(fixture.directory, "c5", "frames", record.frameBatchId)),
+        ).rejects.toThrow();
+      }
     } finally {
       await fixture.close();
+    }
+  });
+
+  it("retries a real C5 deletion failure from the official retention timer without leaking a path", async () => {
+    const events: unknown[] = [];
+    const fixture = await makeMediaApi({
+      retentionLog: { event: (event) => void events.push(event) },
+    });
+    try {
+      const attempt = await createAttemptForReadProjection(fixture, {
+        id: "dededede-dede-4ede-8ede-dededededede",
+        mode: "free",
+        candidate: freeTerminalCandidate(
+          "dededede-dede-4ede-8ede-dededededede",
+        ),
+      });
+      const claim = await fixture.repository.claimProcessing({
+        attemptId: attempt.id,
+        generation: 1,
+      });
+      expect(claim).not.toBeNull();
+      await fixture.repository.finalizeTerminalResult({
+        attemptId: attempt.id,
+        leaseId: claim!.leaseId,
+        generation: claim!.generation,
+        candidate: freeTerminalCandidate(attempt.id),
+      });
+      await chmod(join(fixture.directory, "c5", "originals"), 0o500);
+      const deleted = await fixture.app.inject({
+        method: "DELETE",
+        url: `/v1/attempts/${attempt.id}`,
+        headers: athleteHeader(ATHLETE_A),
+      });
+      expect(deleted.statusCode).toBe(204);
+
+      fixture.hourlyTasks[1]!();
+      await resolvesSoon(() => events.length > 0);
+      expect(events).toEqual([
+        {
+          category: "retention_cleanup_failed",
+          attempt: attempt.id.slice(0, 8),
+          resource: expect.any(String),
+        },
+      ]);
+      expect(JSON.stringify(events)).not.toContain(fixture.directory);
+      expect(
+        await fixture.retention.listDue({
+          now: "2030-01-15T12:00:00.000Z",
+          limit: 10,
+        }),
+      ).not.toEqual([]);
+
+      await chmod(join(fixture.directory, "c5", "originals"), 0o700);
+      fixture.hourlyTasks[1]!();
+      await waitForRetentionDrain(fixture.retention);
+    } finally {
+      await chmod(join(fixture.directory, "c5", "originals"), 0o700).catch(
+        () => undefined,
+      );
+      await fixture.close();
+    }
+  });
+
+  it("drains DELETE retention from a reopened official root on immediate startup", async () => {
+    const fixture = await makeMediaApi();
+    let initialClosed = false;
+    let reopened:
+      | Readonly<{
+          app: FastifyInstance;
+          database: ReturnType<typeof openSqliteDatabase>;
+          retention: SQLiteRetentionRepository;
+          scheduled: Array<() => void>;
+        }>
+      | undefined;
+    try {
+      const attempt = await createAttemptForReadProjection(fixture, {
+        id: "ecececec-ecec-4ece-8ece-ecececececec",
+        mode: "free",
+        candidate: freeTerminalCandidate(
+          "ecececec-ecec-4ece-8ece-ecececececec",
+        ),
+      });
+      const claim = await fixture.repository.claimProcessing({
+        attemptId: attempt.id,
+        generation: 1,
+      });
+      expect(claim).not.toBeNull();
+      const context = await fixture.repository.getProcessingContext({
+        attemptId: attempt.id,
+        generation: claim!.generation,
+        leaseId: claim!.leaseId,
+      });
+      expect(context).not.toBeNull();
+      await fixture.repository.releaseProcessingClaim({
+        attemptId: attempt.id,
+        generation: claim!.generation,
+        leaseId: claim!.leaseId,
+      });
+      const mediaId = context!.processing.receipt.mediaId;
+      const frameBatchId = context!.processing.receipt.frameBatchId;
+      await Promise.all([
+        fixture.retention.schedule({
+          id: frameBatchId,
+          attemptId: attempt.id,
+          kind: "frame",
+          deleteAt: "2030-02-15T12:00:00.000Z",
+        }),
+        fixture.retention.schedule({
+          id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          attemptId: attempt.id,
+          kind: "observation",
+          deleteAt: "2030-02-15T12:00:00.000Z",
+        }),
+      ]);
+      await expect(
+        readFile(
+          join(fixture.directory, "c5", "originals", mediaId, "payload"),
+        ),
+      ).resolves.toHaveLength(validMp4Bytes().byteLength);
+
+      await expect(
+        fixture.app.inject({
+          method: "DELETE",
+          url: `/v1/attempts/${attempt.id}`,
+          headers: athleteHeader(ATHLETE_A),
+        }),
+      ).resolves.toMatchObject({ statusCode: 204 });
+      await fixture.app.close();
+      fixture.database.close();
+      initialClosed = true;
+
+      const database = openSqliteDatabase(
+        join(fixture.directory, "api.sqlite"),
+      );
+      const repository = new SQLiteAttemptRepository({
+        database,
+        clock: { now: () => "2030-01-15T12:00:00.000Z" },
+        ids: { next: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+        handoffVerifier: fixture.c5.handoffVerifier,
+      });
+      const retention = new SQLiteRetentionRepository({ database });
+      const queue = new InMemoryAnalysisQueue({ available: () => true });
+      const scheduled: Array<() => void> = [];
+      const app = createProductionAttemptApi({
+        repository,
+        retention,
+        queue,
+        mediaPipeline: fixture.c5.pipeline,
+        cleaner: createLocalC8AcceptedMediaCleaner({
+          repository,
+          storage: fixture.c5.storage,
+        }),
+        scheduler: {
+          everyHour: (task) => {
+            scheduled.push(task);
+            return task;
+          },
+          cancel: () => undefined,
+        },
+      });
+      reopened = Object.freeze({ app, database, retention, scheduled });
+      await waitForRetentionDrain(reopened.retention);
+      expect(reopened.scheduled).toHaveLength(2);
+      await expect(
+        readFile(
+          join(fixture.directory, "c5", "originals", mediaId, "payload"),
+        ),
+      ).rejects.toThrow();
+      await expect(
+        readdir(join(fixture.directory, "c5", "frames", frameBatchId)),
+      ).rejects.toThrow();
+      await expect(
+        reopened.retention.listDue({
+          now: "2030-01-15T12:00:00.000Z",
+          limit: 10,
+        }),
+      ).resolves.toEqual([]);
+    } finally {
+      await reopened?.app.close();
+      reopened?.database.close();
+      if (!initialClosed) await fixture.close();
     }
   });
 
@@ -598,6 +969,16 @@ describe("attempt HTTP foundation", () => {
         }),
         scheduler: { everyHour: () => undefined, cancel: () => undefined },
       });
+    const issueRetention = (
+      repository: SQLiteAttemptRepository,
+      retention = fixture.retention,
+      mediaPipeline = fixture.c5.pipeline,
+    ) =>
+      createFactoryIssuedRetentionRuntimeFactory({
+        repository,
+        retention,
+        mediaPipeline,
+      });
     class DerivedAttemptRepository extends SQLiteAttemptRepository {}
     const derived = new DerivedAttemptRepository({
       database: fixture.database,
@@ -621,6 +1002,9 @@ describe("attempt HTTP foundation", () => {
     );
     const queueProxy = new Proxy(fixture.queue, {});
     const queueClone = Object.assign({}, fixture.queue);
+    const foreignC5 = createC5PipelineTestSupport({
+      root: join(fixture.directory, "foreign-c5"),
+    });
     const crossDatabase = openSqliteDatabase(
       join(fixture.directory, "cross-authority.sqlite"),
     );
@@ -647,6 +1031,39 @@ describe("attempt HTTP foundation", () => {
     expect(() => issueAttemptApi(crossDatabaseRepository)).toThrow(
       "factory-issued media upload composition",
     );
+    for (const repository of [derived, proxy, clone])
+      expect(() => issueRetention(repository)).toThrow(
+        "factory-issued retention composition",
+      );
+    expect(() => issueRetention(crossDatabaseRepository)).toThrow(
+      "factory-issued retention composition",
+    );
+    expect(() => issueRetention(fixture.repository, derivedRetention)).toThrow(
+      "factory-issued retention composition",
+    );
+    expect(() => issueRetention(fixture.repository, retentionProxy)).toThrow(
+      "factory-issued retention composition",
+    );
+    expect(() => issueRetention(fixture.repository, retentionClone)).toThrow(
+      "factory-issued retention composition",
+    );
+    expect(() =>
+      issueRetention(fixture.repository, fixture.retention, foreignC5.pipeline),
+    ).toThrow("factory-issued retention composition");
+    expect(() =>
+      issueRetention(
+        fixture.repository,
+        fixture.retention,
+        new Proxy(fixture.c5.pipeline, {}),
+      ),
+    ).toThrow("factory-issued retention composition");
+    expect(() =>
+      issueRetention(
+        fixture.repository,
+        fixture.retention,
+        Object.assign({}, fixture.c5.pipeline),
+      ),
+    ).toThrow("factory-issued retention composition");
     expect(() =>
       createFactoryIssuedMediaUploadService({
         repository: fixture.repository,
@@ -757,10 +1174,41 @@ describe("attempt HTTP foundation", () => {
       expect(() => issue(fixture.repository)).toThrow(
         "factory-issued media upload composition",
       );
+      expect(() => issueRetention(fixture.repository)).toThrow(
+        "factory-issued retention composition",
+      );
     } finally {
       Object.defineProperty(SQLiteRetentionRepository.prototype, "schedule", {
         configurable: true,
         value: prototypeSchedule,
+      });
+    }
+
+    const ownListDue = fixture.retention.listDue;
+    Object.defineProperty(fixture.retention, "listDue", {
+      configurable: true,
+      value: ownListDue,
+    });
+    expect(() => issueRetention(fixture.repository)).toThrow(
+      "factory-issued retention composition",
+    );
+    Reflect.deleteProperty(fixture.retention, "listDue");
+
+    const prototypeListDue = SQLiteRetentionRepository.prototype.listDue;
+    try {
+      Object.defineProperty(SQLiteRetentionRepository.prototype, "listDue", {
+        configurable: true,
+        value: () => {
+          throw new Error("mutated prototype");
+        },
+      });
+      expect(() => issueRetention(fixture.repository)).toThrow(
+        "factory-issued retention composition",
+      );
+    } finally {
+      Object.defineProperty(SQLiteRetentionRepository.prototype, "listDue", {
+        configurable: true,
+        value: prototypeListDue,
       });
     }
 
@@ -877,6 +1325,76 @@ describe("attempt HTTP foundation", () => {
       }),
     ).toMatchObject({ status: "awaiting-upload" });
     await fixture.close();
+  });
+
+  it("fails scheduled retention closed without reading a hostile listDue accessor issued after composition", async () => {
+    const events: unknown[] = [];
+    const fixture = await makeMediaApi({
+      retentionLog: { event: (event) => void events.push(event) },
+    });
+    try {
+      const attempt = await createAttemptForReadProjection(fixture, {
+        id: "afafafaf-afaf-4faf-8faf-afafafafafaf",
+        mode: "free",
+        candidate: freeTerminalCandidate(
+          "afafafaf-afaf-4faf-8faf-afafafafafaf",
+        ),
+      });
+      await expect(
+        fixture.app.inject({
+          method: "DELETE",
+          url: `/v1/attempts/${attempt.id}`,
+          headers: athleteHeader(ATHLETE_A),
+        }),
+      ).resolves.toMatchObject({ statusCode: 204 });
+
+      let ownReads = 0;
+      Object.defineProperty(fixture.retention, "listDue", {
+        configurable: true,
+        get: () => {
+          ownReads += 1;
+          throw new Error("hostile own accessor");
+        },
+      });
+      try {
+        fixture.hourlyTasks[1]!();
+        await resolvesSoon(() => events.length > 0);
+        expect(ownReads).toBe(0);
+        expect(events).toEqual([{ category: "retention_cleanup_run_failed" }]);
+      } finally {
+        Reflect.deleteProperty(fixture.retention, "listDue");
+      }
+
+      fixture.hourlyTasks[1]!();
+      await waitForRetentionDrain(fixture.retention);
+
+      const descriptor = Object.getOwnPropertyDescriptor(
+        SQLiteRetentionRepository.prototype,
+        "listDue",
+      );
+      let prototypeReads = 0;
+      Object.defineProperty(SQLiteRetentionRepository.prototype, "listDue", {
+        configurable: true,
+        get: () => {
+          prototypeReads += 1;
+          throw new Error("hostile prototype accessor");
+        },
+      });
+      try {
+        fixture.hourlyTasks[1]!();
+        await resolvesSoon(() => events.length > 1);
+        expect(prototypeReads).toBe(0);
+      } finally {
+        if (descriptor)
+          Object.defineProperty(
+            SQLiteRetentionRepository.prototype,
+            "listDue",
+            descriptor,
+          );
+      }
+    } finally {
+      await fixture.close();
+    }
   });
 
   it("keeps C4 and retention transactions unreachable after post-issuance mutation", async () => {
@@ -1235,6 +1753,7 @@ describe("attempt HTTP foundation", () => {
     const ids = { next: () => "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" };
     const nonce = () => "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const log = { event: () => undefined };
+    const retentionLog = { event: () => undefined };
     const resolvedReads = {
       repository: 0,
       retention: 0,
@@ -1249,6 +1768,7 @@ describe("attempt HTTP foundation", () => {
       ids: 0,
       nonce: 0,
       log: 0,
+      retentionLog: 0,
     };
     const resolvedInput = {
       get repository() {
@@ -1303,6 +1823,10 @@ describe("attempt HTTP foundation", () => {
         resolvedReads.log += 1;
         return log;
       },
+      get retentionLog() {
+        resolvedReads.retentionLog += 1;
+        return retentionLog;
+      },
     };
     const rawReads = {
       repository: 0,
@@ -1317,6 +1841,7 @@ describe("attempt HTTP foundation", () => {
       ids: 0,
       nonce: 0,
       log: 0,
+      retentionLog: 0,
     };
     const rawInput = {
       get repository() {
@@ -1367,6 +1892,10 @@ describe("attempt HTTP foundation", () => {
         rawReads.log += 1;
         return log;
       },
+      get retentionLog() {
+        rawReads.retentionLog += 1;
+        return retentionLog;
+      },
     };
 
     let resolvedApp:
@@ -1393,6 +1922,7 @@ describe("attempt HTTP foundation", () => {
         ids: 1,
         nonce: 1,
         log: 1,
+        retentionLog: 1,
       });
       await expect(
         resolvedApp.inject({ method: "GET", url: "/v1/challenges" }),
@@ -1439,6 +1969,7 @@ describe("attempt HTTP foundation", () => {
         ids: 1,
         nonce: 1,
         log: 1,
+        retentionLog: 1,
       });
       await expect(
         rawApp.inject({ method: "GET", url: "/v1/challenges" }),
@@ -3147,6 +3678,26 @@ async function resolvesSoon(predicate: () => boolean): Promise<void> {
   }
 }
 
+function nextEventTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function waitForRetentionDrain(
+  retention: SQLiteRetentionRepository,
+): Promise<void> {
+  const deadline = Date.now() + 500;
+  while (true) {
+    const due = await retention.listDue({
+      now: "2030-01-15T12:00:00.000Z",
+      limit: 10,
+    });
+    if (due.length === 0) return;
+    if (Date.now() >= deadline)
+      throw new Error("Expected the official retention runtime to drain.");
+    await nextEventTurn();
+  }
+}
+
 function athleteHeader(athleteId: string): Readonly<Record<string, string>> {
   return { "x-revelai-athlete-id": athleteId };
 }
@@ -3280,6 +3831,7 @@ async function makeMediaApi(
     ids?: () => string;
     maxUploadBytes?: number;
     prober?: LocalMediaProber;
+    retentionLog?: RetentionLog;
   }>,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "revelai-attempt-media-api-"));
@@ -3302,6 +3854,8 @@ async function makeMediaApi(
     available: () => availability(),
   });
   const retention = new SQLiteRetentionRepository({ database });
+  const hourlyTasks: Array<() => void> = [];
+  const cancelledHourlyTasks: unknown[] = [];
   const app = createProductionAttemptApi({
     repository,
     queue,
@@ -3314,9 +3868,15 @@ async function makeMediaApi(
     ...(input?.maxUploadBytes === undefined
       ? {}
       : { maxUploadBytes: input.maxUploadBytes }),
+    ...(input?.retentionLog ? { retentionLog: input.retentionLog } : {}),
     scheduler: {
-      everyHour: () => 1,
-      cancel: () => undefined,
+      everyHour: (task) => {
+        hourlyTasks.push(task);
+        return task;
+      },
+      cancel: (handle) => {
+        cancelledHourlyTasks.push(handle);
+      },
     },
   });
   return {
@@ -3327,6 +3887,8 @@ async function makeMediaApi(
     queue,
     c5,
     retention,
+    hourlyTasks,
+    cancelledHourlyTasks,
     setQueueAvailability(value: () => boolean) {
       availability = value;
     },

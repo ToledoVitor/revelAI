@@ -234,6 +234,7 @@ describe("Verified Training analysis", () => {
       ids: 1,
       nonce: 1,
       log: 1,
+      retentionLog: 1,
       freeTraining: 1,
       verifiedTraining: 1,
       freeProvider: 1,
@@ -759,6 +760,30 @@ describe("Verified Training analysis", () => {
           .prepare("SELECT COUNT(*) AS count FROM leaderboard_entries")
           .get(),
       ).toEqual({ count: 0 });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("starts the sealed retention runtime beside recovery in the combined root and drains DELETE facts on its own timer", async () => {
+    const fixture = await makeCombinedVerifiedHttpRoot({
+      provider: createVerifiedFixtureVisionProvider("roboflow"),
+      approvedPolicy: true,
+    });
+    try {
+      const attemptId = await createVerifiedHttpAttempt(fixture.app);
+      await fixture.queueScheduler.runAll();
+      await expect(
+        fixture.app.inject({
+          method: "DELETE",
+          url: `/v1/attempts/${attemptId}`,
+          headers: { "x-revelai-athlete-id": ATHLETE_ID },
+        }),
+      ).resolves.toMatchObject({ statusCode: 204, body: "" });
+      expect(fixture.hourlyTasks).toHaveLength(2);
+
+      fixture.hourlyTasks[1]!();
+      await waitForCombinedRetentionDrain(fixture.retention);
     } finally {
       await fixture.close();
     }
@@ -1425,13 +1450,21 @@ async function makeCombinedVerifiedHttpRoot(
       ruleVersion: "wall-pass-v1-score-1",
     });
   }
+  const retention = new SQLiteRetentionRepository({ database });
+  const hourlyTasks: Array<() => void> = [];
   const app = createProductionTrainingAttemptApi({
     repository,
-    retention: new SQLiteRetentionRepository({ database }),
+    retention,
     mediaPipeline: c5.pipeline,
     queue,
     cleaner: { cleanup: async () => undefined },
-    scheduler: { everyHour: () => undefined, cancel: () => undefined },
+    scheduler: {
+      everyHour: (task) => {
+        hourlyTasks.push(task);
+        return task;
+      },
+      cancel: () => undefined,
+    },
     clock: { now: () => NOW },
     ids: { next: ids("bbbbbbbb") },
     freeTraining: {
@@ -1449,11 +1482,26 @@ async function makeCombinedVerifiedHttpRoot(
     app,
     database,
     queueScheduler,
+    retention,
+    hourlyTasks,
     close: async () => {
       await app.close();
       database.close();
     },
   });
+}
+
+async function waitForCombinedRetentionDrain(
+  retention: SQLiteRetentionRepository,
+): Promise<void> {
+  const deadline = Date.now() + 500;
+  while (true) {
+    const due = await retention.listDue({ now: NOW, limit: 100 });
+    if (due.length === 0) return;
+    if (Date.now() >= deadline)
+      throw new Error("Expected combined retention runtime to drain.");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
 }
 
 async function createVerifiedHttpAttempt(
