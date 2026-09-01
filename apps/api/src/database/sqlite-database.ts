@@ -915,21 +915,23 @@ function applyMigrations(
   raw: Database.Database,
   migrationVersion?: number,
 ): void {
-  raw.exec(
-    "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY NOT NULL, applied_at TEXT NOT NULL)",
-  );
-  const applied = new Set(
-    raw
-      .prepare("SELECT version FROM schema_migrations")
-      .all()
-      .map((row) => Number((row as { version: number }).version)),
-  );
-  raw.pragma(`user_version = ${Math.max(0, ...applied)}`);
+  const targetVersion = resolveMigrationTargetVersion(migrationVersion);
+  const userVersion = readValidatedUserVersion(raw);
+  ensureMigrationLedgerExistsOnlyForFreshDatabase(raw, userVersion);
+  const history = readValidatedMigrationHistory(raw, targetVersion);
+  if (userVersion > history.highestVersion) throwInvalidMigrationHistory();
 
-  for (const migration of migrations) {
-    if (migrationVersion !== undefined && migration.version > migrationVersion)
-      break;
-    if (applied.has(migration.version)) continue;
+  const pending = migrations.filter(
+    (migration) =>
+      migration.version <= targetVersion &&
+      migration.version > history.highestVersion,
+  );
+  if (pending.length === 0) {
+    reconcileStaleUserVersion(raw, userVersion, history.highestVersion);
+    return;
+  }
+
+  for (const migration of pending) {
     raw.exec("BEGIN IMMEDIATE");
     try {
       raw.exec(migration.sql);
@@ -946,6 +948,221 @@ function applyMigrations(
       throw error;
     }
   }
+}
+
+type MigrationHistory = Readonly<{
+  highestVersion: number;
+}>;
+
+type MigrationHistoryRow = Readonly<{
+  migration_rowid: unknown;
+  version: unknown;
+  applied_at: unknown;
+}>;
+
+type MigrationHistoryColumn = Readonly<{
+  cid: unknown;
+  name: unknown;
+  type: unknown;
+  notnull: unknown;
+  dflt_value: unknown;
+  pk: unknown;
+}>;
+
+type MigrationLedgerObject = Readonly<{
+  type: unknown;
+}>;
+
+function resolveMigrationTargetVersion(migrationVersion?: number): number {
+  const latestVersion = migrations.length;
+  if (
+    !migrations.every((migration, index) => migration.version === index + 1) ||
+    !Number.isSafeInteger(latestVersion)
+  )
+    throw new Error("sqlite migration definitions are invalid");
+  if (migrationVersion === undefined) return latestVersion;
+  if (
+    !Number.isSafeInteger(migrationVersion) ||
+    migrationVersion < 0 ||
+    migrationVersion > latestVersion
+  )
+    throwInvalidMigrationHistory();
+  return migrationVersion;
+}
+
+/**
+ * A fresh SQLite file has no application tables and a zero migration mirror.
+ * Any other missing or non-table ledger is durable corruption: fail before
+ * creating anything so an invalid predecessor is never silently repaired.
+ */
+function ensureMigrationLedgerExistsOnlyForFreshDatabase(
+  raw: Database.Database,
+  userVersion: number,
+): void {
+  let ledgerObjects: readonly MigrationLedgerObject[];
+  let applicationTableCount: unknown;
+  try {
+    ledgerObjects = raw
+      .prepare(
+        "SELECT type FROM sqlite_master WHERE name = 'schema_migrations'",
+      )
+      .all() as readonly MigrationLedgerObject[];
+    applicationTableCount = (
+      raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .get() as Readonly<{ count?: unknown }>
+    ).count;
+  } catch {
+    throwInvalidMigrationHistory();
+  }
+
+  if (ledgerObjects.length === 1 && ledgerObjects[0]?.type === "table") return;
+  if (
+    ledgerObjects.length !== 0 ||
+    userVersion !== 0 ||
+    applicationTableCount !== 0
+  )
+    throwInvalidMigrationHistory();
+
+  raw.exec(
+    "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY NOT NULL, applied_at TEXT NOT NULL)",
+  );
+}
+
+function readValidatedMigrationHistory(
+  raw: Database.Database,
+  targetVersion: number,
+): MigrationHistory {
+  let rows: readonly MigrationHistoryRow[];
+  let columns: readonly MigrationHistoryColumn[];
+  let tableSql: unknown;
+  try {
+    rows = raw
+      .prepare(
+        "SELECT rowid AS migration_rowid, version, applied_at FROM schema_migrations ORDER BY rowid ASC",
+      )
+      .all() as readonly MigrationHistoryRow[];
+    columns = raw
+      .prepare("PRAGMA table_info(schema_migrations)")
+      .all() as readonly MigrationHistoryColumn[];
+    tableSql = (
+      raw
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+        )
+        .get() as Readonly<{ sql?: unknown }> | undefined
+    )?.sql;
+  } catch {
+    throwInvalidMigrationHistory();
+  }
+
+  for (const [index, row] of rows.entries()) {
+    const expectedVersion = index + 1;
+    if (
+      row.migration_rowid !== expectedVersion ||
+      row.version !== expectedVersion ||
+      expectedVersion > targetVersion ||
+      !isCanonicalMigrationAppliedAt(row.applied_at)
+    )
+      throwInvalidMigrationHistory();
+  }
+  if (!hasExpectedMigrationHistorySchema(columns, tableSql))
+    throwInvalidMigrationHistory();
+  return Object.freeze({ highestVersion: rows.length });
+}
+
+function hasExpectedMigrationHistorySchema(
+  columns: readonly MigrationHistoryColumn[],
+  tableSql: unknown,
+): boolean {
+  const expectedSql =
+    "create table schema_migrations (version integer primary key not null, applied_at text not null)";
+  return (
+    normalizeMigrationSchemaSql(tableSql) === expectedSql &&
+    columns.length === 2 &&
+    hasExpectedMigrationHistoryColumn(columns[0], {
+      cid: 0,
+      name: "version",
+      type: "INTEGER",
+      notnull: 1,
+      pk: 1,
+    }) &&
+    hasExpectedMigrationHistoryColumn(columns[1], {
+      cid: 1,
+      name: "applied_at",
+      type: "TEXT",
+      notnull: 1,
+      pk: 0,
+    })
+  );
+}
+
+function normalizeMigrationSchemaSql(value: unknown): string | null {
+  return typeof value === "string"
+    ? value.replaceAll(/\s+/g, " ").trim().toLowerCase()
+    : null;
+}
+
+function hasExpectedMigrationHistoryColumn(
+  column: MigrationHistoryColumn | undefined,
+  expected: Readonly<{
+    cid: number;
+    name: string;
+    type: string;
+    notnull: number;
+    pk: number;
+  }>,
+): boolean {
+  return (
+    column?.cid === expected.cid &&
+    column.name === expected.name &&
+    column.type === expected.type &&
+    column.notnull === expected.notnull &&
+    column.dflt_value === null &&
+    column.pk === expected.pk
+  );
+}
+
+function isCanonicalMigrationAppliedAt(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)
+  )
+    return false;
+  const milliseconds = Date.parse(value);
+  return (
+    Number.isFinite(milliseconds) &&
+    new Date(milliseconds).toISOString() === value
+  );
+}
+
+function readValidatedUserVersion(raw: Database.Database): number {
+  const value = raw.pragma("user_version", { simple: true });
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throwInvalidMigrationHistory();
+  return value;
+}
+
+function reconcileStaleUserVersion(
+  raw: Database.Database,
+  userVersion: number,
+  highestVersion: number,
+): void {
+  if (userVersion === highestVersion) return;
+  raw.exec("BEGIN IMMEDIATE");
+  try {
+    raw.pragma(`user_version = ${highestVersion}`);
+    raw.exec("COMMIT");
+  } catch (error) {
+    raw.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function throwInvalidMigrationHistory(): never {
+  throw new Error("sqlite migration history is invalid");
 }
 
 function canonicalizeLegacyTerminalCandidates(raw: Database.Database): void {

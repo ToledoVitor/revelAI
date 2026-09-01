@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   openSqliteDatabase,
   openSqliteDatabaseAtVersionForTest,
+  type SqliteDatabase,
 } from "../database/sqlite-database.js";
 import {
   InMemoryAnalysisQueue,
@@ -405,6 +406,68 @@ function createV20TerminalPredecessor(
       input.completedAt,
     );
   return database;
+}
+
+type MigrationHistoryFixtureRow = Readonly<{
+  version: number | string;
+  appliedAt: string;
+}>;
+
+function readMigrationHistoryRows(
+  database: SqliteDatabase,
+): readonly MigrationHistoryFixtureRow[] {
+  return database.raw
+    .prepare(
+      "SELECT version, applied_at AS appliedAt FROM schema_migrations ORDER BY rowid ASC",
+    )
+    .all() as readonly MigrationHistoryFixtureRow[];
+}
+
+function replaceMigrationHistoryForTest(
+  database: SqliteDatabase,
+  rows: readonly MigrationHistoryFixtureRow[],
+  schema = "CREATE TABLE schema_migrations (version NUMERIC NOT NULL, applied_at TEXT NOT NULL)",
+): void {
+  database.raw.exec("DROP TABLE schema_migrations");
+  database.raw.exec(schema);
+  const insert = database.raw.prepare(
+    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+  );
+  for (const row of rows) insert.run(row.version, row.appliedAt);
+}
+
+function migrationHistoryStateForTest(database: SqliteDatabase): Readonly<{
+  userVersion: unknown;
+  rows: unknown;
+}> {
+  return Object.freeze({
+    userVersion: database.raw.pragma("user_version", { simple: true }),
+    rows: database.raw
+      .prepare("SELECT rowid, * FROM schema_migrations ORDER BY rowid ASC")
+      .all(),
+  });
+}
+
+function missingLedgerStateForTest(database: SqliteDatabase): Readonly<{
+  userVersion: unknown;
+  schemaObject: unknown;
+  athleteCount: unknown;
+  attemptCount: unknown;
+}> {
+  return Object.freeze({
+    userVersion: database.raw.pragma("user_version", { simple: true }),
+    schemaObject: database.raw
+      .prepare(
+        "SELECT type, name, sql FROM sqlite_master WHERE name = 'schema_migrations'",
+      )
+      .all(),
+    athleteCount: database.raw
+      .prepare("SELECT COUNT(*) AS count FROM athletes")
+      .get(),
+    attemptCount: database.raw
+      .prepare("SELECT COUNT(*) AS count FROM attempts")
+      .get(),
+  });
 }
 
 function rankedOutcome(
@@ -3849,15 +3912,15 @@ describe("SQLiteAttemptRepository", () => {
         SELECT RAISE(ABORT, 'forced v21 rollback');
       END;
     `);
-    rollbackPredecessor.close();
 
     expect(() => openSqliteDatabase(rollbackFilename)).toThrow(
       "forced v21 rollback",
     );
-    const rolledBack = openSqliteDatabaseAtVersionForTest(rollbackFilename, 20);
-    expect(rolledBack.raw.pragma("user_version", { simple: true })).toBe(20);
     expect(
-      rolledBack.raw
+      rollbackPredecessor.raw.pragma("user_version", { simple: true }),
+    ).toBe(0);
+    expect(
+      rollbackPredecessor.raw
         .prepare(
           "SELECT status, outcome_json FROM attempts INNER JOIN terminal_results ON terminal_results.attempt_id = attempts.id WHERE attempts.id = ?",
         )
@@ -3866,8 +3929,10 @@ describe("SQLiteAttemptRepository", () => {
       status: "processing",
       outcome_json: JSON.stringify(freeOutcome(ATTEMPT_A, completedAt)),
     });
-    rolledBack.raw.exec("DROP TRIGGER reject_v21_terminal_normalization");
-    rolledBack.close();
+    rollbackPredecessor.raw.exec(
+      "DROP TRIGGER reject_v21_terminal_normalization",
+    );
+    rollbackPredecessor.close();
 
     const repaired = openSqliteDatabase(rollbackFilename);
     expect(
@@ -3877,6 +3942,178 @@ describe("SQLiteAttemptRepository", () => {
     ).toEqual({ status: "valid" });
     expect(repaired.raw.pragma("user_version", { simple: true })).toBe(21);
     repaired.close();
+  });
+
+  it("rejects corrupted migration ledgers and ahead mirrors without changing a durable predecessor", () => {
+    const canonicalAppliedAt = "2030-01-15T12:00:00.000Z";
+    const cases: readonly Readonly<{
+      label: string;
+      mutate(database: SqliteDatabase): void;
+    }>[] = [
+      {
+        label: "future history",
+        mutate(database) {
+          database.raw
+            .prepare(
+              "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            )
+            .run(22, canonicalAppliedAt);
+        },
+      },
+      {
+        label: "gap before the v20 prefix end",
+        mutate(database) {
+          database.raw
+            .prepare("DELETE FROM schema_migrations WHERE version = 20")
+            .run();
+        },
+      },
+      {
+        label: "duplicate history row",
+        mutate(database) {
+          const rows = readMigrationHistoryRows(database);
+          replaceMigrationHistoryForTest(database, [
+            ...rows,
+            { version: 20, appliedAt: canonicalAppliedAt },
+          ]);
+        },
+      },
+      {
+        label: "out-of-order history rows",
+        mutate(database) {
+          const [first, second, ...rest] = readMigrationHistoryRows(database);
+          if (!first || !second) throw new Error("Expected v20 history rows.");
+          replaceMigrationHistoryForTest(database, [second, first, ...rest]);
+        },
+      },
+      {
+        label: "fractional version row",
+        mutate(database) {
+          const rows = readMigrationHistoryRows(database);
+          replaceMigrationHistoryForTest(database, [
+            ...rows.slice(0, -1),
+            { version: 20.5, appliedAt: canonicalAppliedAt },
+          ]);
+        },
+      },
+      {
+        label: "text version row",
+        mutate(database) {
+          const rows = readMigrationHistoryRows(database);
+          replaceMigrationHistoryForTest(database, [
+            ...rows.slice(0, -1),
+            { version: "20x", appliedAt: canonicalAppliedAt },
+          ]);
+        },
+      },
+      {
+        label: "unsafe version row",
+        mutate(database) {
+          const rows = readMigrationHistoryRows(database);
+          replaceMigrationHistoryForTest(database, [
+            ...rows.slice(0, -1),
+            {
+              version: Number.MAX_SAFE_INTEGER + 1,
+              appliedAt: canonicalAppliedAt,
+            },
+          ]);
+        },
+      },
+      {
+        label: "noncanonical applied_at row",
+        mutate(database) {
+          database.raw
+            .prepare(
+              "UPDATE schema_migrations SET applied_at = ? WHERE version = 20",
+            )
+            .run("2030-01-15T12:00:00Z");
+        },
+      },
+      {
+        label: "malformed ledger table",
+        mutate(database) {
+          const rows = readMigrationHistoryRows(database);
+          replaceMigrationHistoryForTest(
+            database,
+            rows,
+            "CREATE TABLE schema_migrations (version NUMERIC NOT NULL, applied_at TEXT NOT NULL, extra TEXT)",
+          );
+        },
+      },
+    ];
+
+    for (const input of cases) {
+      const filename = join(
+        fixture.directory,
+        `migration-history-${input.label.replaceAll(" ", "-")}.sqlite`,
+      );
+      const predecessor = openSqliteDatabaseAtVersionForTest(filename, 20);
+      input.mutate(predecessor);
+      const before = migrationHistoryStateForTest(predecessor);
+      expect(() => openSqliteDatabase(filename), input.label).toThrow(
+        "sqlite migration history is invalid",
+      );
+      expect(migrationHistoryStateForTest(predecessor), input.label).toEqual(
+        before,
+      );
+      predecessor.close();
+    }
+
+    const aheadFilename = join(
+      fixture.directory,
+      "migration-mirror-ahead.sqlite",
+    );
+    const current = openSqliteDatabase(aheadFilename);
+    current.raw.pragma("user_version = 22");
+    const before = migrationHistoryStateForTest(current);
+    expect(() => openSqliteDatabase(aheadFilename)).toThrow(
+      "sqlite migration history is invalid",
+    );
+    expect(migrationHistoryStateForTest(current)).toEqual(before);
+    current.close();
+
+    const missingLedgerFilename = join(
+      fixture.directory,
+      "migration-missing-ledger-ahead.sqlite",
+    );
+    const missingLedger = openSqliteDatabaseAtVersionForTest(
+      missingLedgerFilename,
+      20,
+    );
+    missingLedger.raw.exec("DROP TABLE schema_migrations");
+    missingLedger.raw.pragma("user_version = 22");
+    const missingLedgerBefore = missingLedgerStateForTest(missingLedger);
+    expect(() => openSqliteDatabase(missingLedgerFilename)).toThrow(
+      "sqlite migration history is invalid",
+    );
+    expect(missingLedgerStateForTest(missingLedger)).toEqual(
+      missingLedgerBefore,
+    );
+    missingLedger.close();
+
+    const missingLedgerWithDataFilename = join(
+      fixture.directory,
+      "migration-missing-ledger-with-data.sqlite",
+    );
+    const missingLedgerWithData = openSqliteDatabaseAtVersionForTest(
+      missingLedgerWithDataFilename,
+      20,
+    );
+    missingLedgerWithData.raw
+      .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+      .run(ATHLETE_A, canonicalAppliedAt);
+    missingLedgerWithData.raw.exec("DROP TABLE schema_migrations");
+    missingLedgerWithData.raw.pragma("user_version = 0");
+    const missingLedgerWithDataBefore = missingLedgerStateForTest(
+      missingLedgerWithData,
+    );
+    expect(() => openSqliteDatabase(missingLedgerWithDataFilename)).toThrow(
+      "sqlite migration history is invalid",
+    );
+    expect(missingLedgerStateForTest(missingLedgerWithData)).toEqual(
+      missingLedgerWithDataBefore,
+    );
+    missingLedgerWithData.close();
   });
 
   it("backfills a live v17 delivery row with its exact durable frame batch once", () => {
