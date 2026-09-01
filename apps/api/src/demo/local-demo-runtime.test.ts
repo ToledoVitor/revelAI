@@ -1,11 +1,13 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createLocalDemoRuntime,
   runLocalDemoCheckTrace,
 } from "../composition/local-demo-runtime.js";
+import { openSqliteDatabase } from "../database/sqlite-database.js";
 import {
   createConfiguredVisionProvider,
   createHostFrameProcessRunner,
@@ -221,17 +223,68 @@ describe("local demo runtime", () => {
   );
 
   it("closes both app-owned workers before queue and database resources", async () => {
+    vi.useFakeTimers();
+    const root = await fixtureRoot();
+    const timersBeforeRuntime = vi.getTimerCount();
+    try {
+      const runtime = await createLocalDemoRuntime({
+        check: true,
+        environment: demoEnvironment(root),
+        processRunner: unusedProcessRunner,
+      });
+      expect(vi.getTimerCount()).toBeGreaterThan(timersBeforeRuntime);
+
+      await runtime.close();
+
+      await expect(runtime.queue.isAvailable()).resolves.toBe(false);
+      expect(() => runtime.database.raw.prepare("SELECT 1")).toThrow();
+      expect(vi.getTimerCount()).toBe(timersBeforeRuntime);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("settles a gated upload and leaves no post-close media writes after an injected pending-route failure", async () => {
     const root = await fixtureRoot();
     const runtime = await createLocalDemoRuntime({
       check: true,
       environment: demoEnvironment(root),
       processRunner: unusedProcessRunner,
     });
+    let faultPendingRoute = false;
+    runtime.app.addHook("onRequest", async (request) => {
+      if (faultPendingRoute && request.url.endsWith("/result"))
+        throw new Error("injected pending-route failure");
+    });
 
-    await runtime.close();
+    const upload = await startGatedVerifiedUpload(runtime);
+    faultPendingRoute = true;
+    const pending = await runtime.app.inject({
+      method: "GET",
+      url: `/v1/attempts/${upload.attemptId}/result`,
+      headers: upload.athleteHeaders,
+    });
+    expect(pending.statusCode).toBeGreaterThanOrEqual(500);
 
+    await expect(settleWithin(runtime.close())).resolves.toBeUndefined();
+    await expect(settleWithin(upload.response)).resolves.toBeDefined();
     await expect(runtime.queue.isAvailable()).resolves.toBe(false);
-    expect(() => runtime.database.raw.prepare("SELECT 1")).toThrow();
+
+    const database = openSqliteDatabase(join(root, "data", "revelai.sqlite"));
+    try {
+      expect(
+        database.raw
+          .prepare("SELECT media_json FROM attempts WHERE id = ?")
+          .get(upload.attemptId),
+      ).toEqual({ media_json: null });
+    } finally {
+      database.close();
+    }
+
+    const afterClose = await mediaFiles(root);
+    runtime.releaseCheckFrameProcess();
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    expect(await mediaFiles(root)).toEqual(afterClose);
   });
 });
 
@@ -256,4 +309,112 @@ function demoEnvironment(
     MEDIA_DIR: join(root, "media"),
     ...overrides,
   };
+}
+
+async function startGatedVerifiedUpload(
+  runtime: Awaited<ReturnType<typeof createLocalDemoRuntime>>,
+): Promise<
+  Readonly<{
+    athleteHeaders: Readonly<{ "x-revelai-athlete-id": string }>;
+    attemptId: string;
+    response: Promise<unknown>;
+  }>
+> {
+  const athleteHeaders = { "x-revelai-athlete-id": crypto.randomUUID() };
+  const calibration = await runtime.app.inject({
+    method: "POST",
+    url: "/v1/calibration-sessions",
+    headers: athleteHeaders,
+    payload: { challengeId: "wall-pass", challengeVersion: 1 },
+  });
+  expect(calibration.statusCode).toBe(201);
+  const calibrationId = (calibration.json() as { id: string }).id;
+  const ready = await runtime.app.inject({
+    method: "POST",
+    url: `/v1/calibration-sessions/${calibrationId}/ready`,
+    headers: athleteHeaders,
+    payload: {
+      requiredGates: ["device", "space", "athlete", "rehearsal", "record"],
+    },
+  });
+  expect(ready.statusCode).toBe(204);
+  const created = await runtime.app.inject({
+    method: "POST",
+    url: "/v1/attempts",
+    headers: athleteHeaders,
+    payload: {
+      mode: "verified",
+      challengeId: "wall-pass",
+      challengeVersion: 1,
+      calibrationSessionId: calibrationId,
+    },
+  });
+  expect(created.statusCode).toBe(201);
+  const attemptId = (created.json() as { id: string }).id;
+  const boundary = "revelai-close-gate";
+  const response = runtime.app.inject({
+    method: "POST",
+    url: `/v1/attempts/${attemptId}/media`,
+    headers: {
+      ...athleteHeaders,
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+    },
+    payload: multipartFixture(boundary),
+  });
+  await runtime.waitForCheckFrameProcess();
+  return Object.freeze({ athleteHeaders, attemptId, response });
+}
+
+async function settleWithin<T>(operation: Promise<T>): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("Local demo close did not settle in time.")),
+          1_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function mediaFiles(root: string): Promise<readonly string[]> {
+  const mediaRoot = join(root, "media");
+  const visit = async (
+    directory: string,
+    relative: string,
+  ): Promise<string[]> => {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    const files = await Promise.all(
+      entries.map(async (entry) => {
+        const childRelative = join(relative, entry.name);
+        if (entry.isDirectory())
+          return visit(join(directory, entry.name), childRelative);
+        return [childRelative];
+      }),
+    );
+    return files.flat();
+  };
+  return visit(mediaRoot, "");
+}
+
+function multipartFixture(boundary: string): Buffer {
+  return Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="media"; filename="demo.mp4"\r\nContent-Type: video/mp4\r\n\r\n`,
+    ),
+    Buffer.from([
+      0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 1, 2, 3, 4,
+    ]),
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
 }

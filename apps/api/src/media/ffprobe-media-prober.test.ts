@@ -11,6 +11,7 @@ describe("FfprobeMediaProber", () => {
           calls.push(command);
           return {
             exitCode: 0,
+            termination: "completed",
             stdout: JSON.stringify({
               format: {
                 format_name: "mov,mp4,m4a,3gp,3g2,mj2",
@@ -61,8 +62,18 @@ describe("FfprobeMediaProber", () => {
 
   it("maps process failure, timeout, and magic/probe disagreement to safe categories", async () => {
     for (const result of [
-      { exitCode: 1, stdout: "", stderr: "/private/a" },
-      { exitCode: 0, stdout: "{}", stderr: "" },
+      {
+        exitCode: 1,
+        termination: "completed" as const,
+        stdout: "",
+        stderr: "/private/a",
+      },
+      {
+        exitCode: 0,
+        termination: "completed" as const,
+        stdout: "{}",
+        stderr: "",
+      },
     ]) {
       const prober = new FfprobeMediaProber({
         runner: { run: async () => result },
@@ -75,6 +86,7 @@ describe("FfprobeMediaProber", () => {
       runner: {
         run: async () => ({
           exitCode: 0,
+          termination: "completed",
           stdout: JSON.stringify({
             format: { format_name: "webm", duration: "64" },
             streams: [
@@ -96,4 +108,39 @@ describe("FfprobeMediaProber", () => {
       mismatch.probe({ filePath: "/private/a", magicContainer: "mp4" }),
     ).rejects.toThrow(new MediaPipelineError("media_container_not_allowed"));
   });
+
+  it.each(["timed_out", "terminated"] as const)(
+    "rejects a zero-exit %s FFprobe result before parsing media metadata",
+    async (termination) => {
+      const prober = new FfprobeMediaProber({
+        runner: {
+          run: async () => ({
+            exitCode: 0,
+            termination,
+            stdout: JSON.stringify({
+              format: {
+                format_name: "mov,mp4,m4a,3gp,3g2,mj2",
+                duration: "64",
+              },
+              streams: [
+                {
+                  codec_type: "video",
+                  codec_name: "h264",
+                  width: 1280,
+                  height: 720,
+                  avg_frame_rate: "30/1",
+                  disposition: { attached_pic: 0 },
+                },
+              ],
+            }),
+            stderr: "/private/ffprobe-output",
+          }),
+        },
+      });
+
+      await expect(
+        prober.probe({ filePath: "/private/video.mp4", magicContainer: "mp4" }),
+      ).rejects.toThrow(new MediaPipelineError("media_probe_failed"));
+    },
+  );
 });
