@@ -122,6 +122,24 @@ function deferred<Value>(): Readonly<{
   return Object.freeze({ promise, resolve });
 }
 
+async function waitForC4Boundary(
+  gate: Promise<void>,
+  operation: string,
+): Promise<void> {
+  await Promise.race([
+    gate,
+    new Promise<never>((_resolve, reject) => {
+      setTimeout(
+        () =>
+          reject(
+            new Error(`C4 ${operation} did not reach its transaction boundary`),
+          ),
+        5_000,
+      );
+    }),
+  ]);
+}
+
 afterEach(async () => {
   await Promise.all(
     directories
@@ -225,10 +243,23 @@ describe("Core acceptance through the production Fastify seam", () => {
 
   it("keeps a portrait Free multipart flow personal, noncompetitive, and retryable after an incomplete upload", async () => {
     const free = trackedFreeProvider();
+    const forbiddenPorts = trackedFreeForbiddenPorts();
     const probeInputs: Array<Readonly<{ magicContainer: string }>> = [];
     const fixture = await makeRoot({
       verifiedProvider: createDemoVisionProvider(),
       freeProvider: free.provider,
+      freeForbiddenPorts: forbiddenPorts.ports,
+      c4OperationObserver: Object.freeze({
+        onCalibration: forbiddenPorts.ports.forbidCalibration,
+        onRankedFinalization: forbiddenPorts.ports.forbidRankedFinalization,
+        onLeaderboardWrite: forbiddenPorts.ports.forbidLeaderboard,
+      }),
+      policyLookupObserver: Object.freeze({
+        beforeLookup: forbiddenPorts.ports.forbidPolicyLookup,
+      }),
+      verifiedIntegrityScoringObserver: Object.freeze({
+        beforeIntegrityScoring: forbiddenPorts.ports.forbidIntegrityScoring,
+      }),
       approvedPolicy: true,
       c5Mode: "free",
       c5Prober: {
@@ -247,7 +278,13 @@ describe("Core acceptance through the production Fastify seam", () => {
       },
     });
     try {
-      installFreeForbiddenPortGuards(fixture);
+      expect(
+        fixture.database.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM approved_competitive_model_policies WHERE active = 1",
+          )
+          .get(),
+      ).toEqual({ count: 1 });
       const created = await fixture.app.inject({
         method: "POST",
         url: "/v1/attempts",
@@ -343,6 +380,21 @@ describe("Core acceptance through the production Fastify seam", () => {
       ]);
       expect(free.freeCalls).toBe(128);
       expect(free.verifiedCalls).toBe(0);
+      expect(forbiddenPorts.freeTerminalPersistenceCalls).toBe(1);
+      expect(forbiddenPorts.calls).toEqual({
+        calibration: 0,
+        integrityScoring: 0,
+        policyLookup: 0,
+        rankedFinalization: 0,
+        leaderboard: 0,
+      });
+      expect(
+        fixture.database.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM approved_competitive_model_policies WHERE active = 1",
+          )
+          .get(),
+      ).toEqual({ count: 1 });
 
       expect(receipt).toMatchObject({
         kind: "c5-storage-extraction-receipt-v1",
@@ -686,21 +738,22 @@ describe("Core acceptance through the production Fastify seam", () => {
     }
   }, 30_000);
 
-  it("lets an independent HTTP delete win a blocked finalizer without restart resurrection", async () => {
-    const entered = deferred<void>();
+  it("coordinates C4 finalization and DELETE at transaction entry without restart resurrection", async () => {
+    const finalizationEntered = deferred<void>();
+    const tombstoneEntered = deferred<void>();
     const release = deferred<void>();
-    let gated = false;
+    const boundary = Object.freeze({
+      beforeEnter: async (input: Readonly<{ operation: string }>) => {
+        if (input.operation === "finalize") finalizationEntered.resolve();
+        if (input.operation === "tombstone") tombstoneEntered.resolve();
+        await release.promise;
+      },
+    });
     const primary = await makeRoot({
-      verifiedProvider: createVerifiedFixtureVisionProvider("roboflow", {
-        beforeWorkflowResponse: async (frameIndex) => {
-          if (frameIndex !== 639 || gated) return;
-          gated = true;
-          entered.resolve();
-          await release.promise;
-        },
-      }),
+      verifiedProvider: createVerifiedFixtureVisionProvider("roboflow"),
       approvedPolicy: true,
       c5Mode: "verified",
+      transactionBoundary: boundary,
     });
     let secondary: Awaited<ReturnType<typeof makeRoot>> | undefined;
     try {
@@ -712,15 +765,29 @@ describe("Core acceptance through the production Fastify seam", () => {
         root: primary.root,
         repositoryIdPrefix: "cccccccc",
         appIdPrefix: "eeeeeeee",
+        transactionBoundary: boundary,
       });
       const attempt = await createVerifiedAttempt(primary.app);
       const finalizer = runNext(primary.scheduler);
-      await entered.promise;
+      await waitForC4Boundary(finalizationEntered.promise, "finalization");
       const deleting = secondary.app.inject({
         method: "DELETE",
         url: `/v1/attempts/${attempt.attemptId}`,
         headers: athleteHeaders(),
       });
+      await waitForC4Boundary(tombstoneEntered.promise, "tombstone");
+      for (const table of [
+        "terminal_results",
+        "leaderboard_entries",
+        "canonical_observations",
+      ])
+        expect(
+          primary.database.raw
+            .prepare(
+              `SELECT COUNT(*) AS count FROM ${table} WHERE attempt_id = ?`,
+            )
+            .get(attempt.attemptId),
+        ).toEqual({ count: 0 });
       release.resolve();
       const [, deleted] = await Promise.all([finalizer, deleting]);
       expect(deleted.statusCode).toBe(204);
@@ -1669,7 +1736,7 @@ describe("Core acceptance through the production Fastify seam", () => {
     const cases: readonly Readonly<{
       name: string;
       activePolicy?: boolean;
-      receiptMutation?: "failed" | "stale";
+      receiptMutation?: "failed" | "stale" | "missing";
       invalidate?: boolean;
       provider?: VisionProvider;
       policyColumn?:
@@ -1683,6 +1750,8 @@ describe("Core acceptance through the production Fastify seam", () => {
     }>[] = [
       {
         name: "missing receipt",
+        activePolicy: true,
+        receiptMutation: "missing",
         expected: "experimental",
       },
       {
@@ -1811,6 +1880,29 @@ describe("Core acceptance through the production Fastify seam", () => {
               "2030-01-15T11:59:59.999Z",
               passingWorkflowBenchmarkReceiptFixture.id,
             );
+        if (scenario.receiptMutation === "missing") {
+          fixture.database.raw.pragma("foreign_keys = OFF");
+          fixture.database.raw
+            .prepare("DELETE FROM workflow_benchmark_receipts WHERE id = ?")
+            .run(passingWorkflowBenchmarkReceiptFixture.id);
+          fixture.database.raw.pragma("foreign_keys = ON");
+          expect(
+            fixture.database.raw
+              .prepare(
+                "SELECT COUNT(*) AS count FROM approved_competitive_model_policies WHERE id = ?",
+              )
+              .get("99999999-9999-4999-8999-999999999999"),
+            `${scenario.name}: only the receipt is removed`,
+          ).toEqual({ count: 1 });
+          expect(
+            fixture.database.raw
+              .prepare(
+                "SELECT COUNT(*) AS count FROM workflow_benchmark_receipts WHERE id = ?",
+              )
+              .get(passingWorkflowBenchmarkReceiptFixture.id),
+            `${scenario.name}: receipt is removed`,
+          ).toEqual({ count: 0 });
+        }
         if (scenario.invalidate) {
           if (!fixture.policy)
             throw new Error("C10 invalidation fixture requires a policy");
@@ -1930,6 +2022,26 @@ async function makeRoot(
     c5Runner?: BoundedFrameProcessRunner;
     c5Renamer?: AtomicMediaRenamer;
     verifiedScheduler?: VisionBatchScheduler;
+    freeForbiddenPorts?: Readonly<{
+      forbidCalibration(): never;
+      forbidIntegrityScoring(): never;
+      forbidPolicyLookup(): never;
+      forbidRankedFinalization(): never;
+      forbidLeaderboard(): never;
+      allowFreeTerminalPersistence(): void;
+    }>;
+    c4OperationObserver?: Readonly<{
+      onCalibration(): never;
+      onRankedFinalization(): never;
+      onLeaderboardWrite(): never;
+    }>;
+    policyLookupObserver?: Readonly<{ beforeLookup(): never }>;
+    verifiedIntegrityScoringObserver?: Readonly<{
+      beforeIntegrityScoring(): never;
+    }>;
+    transactionBoundary?: Readonly<{
+      beforeEnter(input: Readonly<{ operation: string }>): Promise<void>;
+    }>;
     logs?: unknown[];
     root?: string;
     activatePolicy?: boolean;
@@ -1969,12 +2081,15 @@ async function makeRoot(
       clock: { now: () => now },
       ids: { next: ids(input.repositoryIdPrefix ?? "aaaaaaaa") },
       handoffVerifier: c5.handoffVerifier,
+      transactionBoundary: input.transactionBoundary,
+      operationObserver: input.c4OperationObserver,
     });
     const retention = new SQLiteRetentionRepository({ database });
     if (input.approvedPolicy) {
       policy = new SQLiteCompetitivePolicyRepository({
         database,
         clock: { now: () => NOW },
+        lookupObserver: input.policyLookupObserver,
       });
       if (activatePolicy && input.approvedPolicy) {
         const receipt = WorkflowBenchmarkReceiptSchema.parse(
@@ -2025,9 +2140,11 @@ async function makeRoot(
       freeTraining: {
         provider: input.freeProvider ?? createDemoVisionProvider(),
         clock: { now: () => now },
+        forbiddenPorts: input.freeForbiddenPorts,
       },
       verifiedTraining: {
         provider: input.verifiedProvider,
+        integrityScoringObserver: input.verifiedIntegrityScoringObserver,
         ...(input.verifiedScheduler
           ? { scheduler: input.verifiedScheduler }
           : {}),
@@ -2126,6 +2243,39 @@ function trackedFreeProvider() {
     },
     get freeFrames() {
       return Object.freeze([...freeFrames]);
+    },
+  });
+}
+
+function trackedFreeForbiddenPorts() {
+  const calls = {
+    calibration: 0,
+    integrityScoring: 0,
+    policyLookup: 0,
+    rankedFinalization: 0,
+    leaderboard: 0,
+  };
+  let freeTerminalPersistenceCalls = 0;
+  const forbid = (port: keyof typeof calls): never => {
+    calls[port] += 1;
+    throw new Error(`Free training invoked forbidden ${port} port`);
+  };
+  return Object.freeze({
+    ports: Object.freeze({
+      forbidCalibration: () => forbid("calibration"),
+      forbidIntegrityScoring: () => forbid("integrityScoring"),
+      forbidPolicyLookup: () => forbid("policyLookup"),
+      forbidRankedFinalization: () => forbid("rankedFinalization"),
+      forbidLeaderboard: () => forbid("leaderboard"),
+      allowFreeTerminalPersistence: () => {
+        freeTerminalPersistenceCalls += 1;
+      },
+    }),
+    get calls() {
+      return Object.freeze({ ...calls });
+    },
+    get freeTerminalPersistenceCalls() {
+      return freeTerminalPersistenceCalls;
     },
   });
 }
@@ -2339,6 +2489,8 @@ async function expectPrivateMediaTree(
     expect((await stat(directory)).mode & 0o777).toBe(0o700);
     expect((await lstat(directory)).isSymbolicLink()).toBe(false);
   }
+  expect(await readdir(originalDirectory)).toEqual(["payload"]);
+  await expect(lstat(join(originalDirectory, ".owner"))).rejects.toThrow();
   const payload = join(originalDirectory, "payload");
   expect((await stat(payload)).mode & 0o777).toBe(0o600);
   expect((await lstat(payload)).isSymbolicLink()).toBe(false);
@@ -2447,29 +2599,6 @@ function competitiveTuple() {
     challengeVersion: 1,
     ruleVersion: "wall-pass-v1-score-1",
   } as const;
-}
-
-function installFreeForbiddenPortGuards(
-  fixture: Awaited<ReturnType<typeof makeRoot>>,
-): void {
-  // The Free runtime has no calibration, integrity, policy, or ranking input.
-  // These real SQLite guards make any accidental write to those seams abort;
-  // removing the policy table also makes an accidental policy lookup fail.
-  fixture.database.raw.exec(`
-    CREATE TRIGGER c10_free_forbid_calibration
-    BEFORE INSERT ON calibration_sessions
-    BEGIN SELECT RAISE(ABORT, 'free calibration port invoked'); END;
-    CREATE TRIGGER c10_free_forbid_integrity
-    BEFORE INSERT ON canonical_observations
-    BEGIN SELECT RAISE(ABORT, 'free integrity port invoked'); END;
-    CREATE TRIGGER c10_free_forbid_leaderboard
-    BEFORE INSERT ON leaderboard_entries
-    BEGIN SELECT RAISE(ABORT, 'free leaderboard port invoked'); END;
-    CREATE TRIGGER c10_free_forbid_rank_clock
-    BEFORE UPDATE ON leaderboard_commit_clock
-    BEGIN SELECT RAISE(ABORT, 'free ranking port invoked'); END;
-    DROP TABLE approved_competitive_model_policies;
-  `);
 }
 
 function multipartHeaders(boundary: string) {
