@@ -36,7 +36,9 @@ export function registerTestDiagnostic(
   diagnostic: TestDiagnostic,
 ): () => void {
   diagnostics.set(target, diagnostic);
-  return () => diagnostics.delete(target);
+  return () => {
+    if (diagnostics.get(target) === diagnostic) diagnostics.delete(target);
+  };
 }
 
 /** Diagnostic failures are deliberately unable to affect product behavior. */

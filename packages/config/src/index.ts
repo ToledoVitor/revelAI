@@ -145,6 +145,10 @@ function parseHttpUrl(value: string, variableName: string): URL {
     throw new Error(`${variableName} must be an absolute HTTP(S) URL`);
   }
 
+  if (url.username !== "" || url.password !== "") {
+    throw new Error(`${variableName} must not contain credentials`);
+  }
+
   return url;
 }
 
