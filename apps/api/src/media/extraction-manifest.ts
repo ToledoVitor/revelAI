@@ -481,11 +481,9 @@ function sameExtractionAuthority(
         legacyRawPreRollSha256(frames.slice(0, 40))
     )
       return false;
-    const { rawPreRollSha256: _leftDigest, ...leftWithoutDigest } = parsedLeft;
-    const { rawPreRollSha256: _rightDigest, ...rightWithoutDigest } =
-      parsedRight;
     return (
-      JSON.stringify(leftWithoutDigest) === JSON.stringify(rightWithoutDigest)
+      JSON.stringify({ ...parsedLeft, rawPreRollSha256: undefined }) ===
+      JSON.stringify({ ...parsedRight, rawPreRollSha256: undefined })
     );
   } catch {
     return false;
