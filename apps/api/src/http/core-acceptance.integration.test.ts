@@ -40,6 +40,7 @@ import { createC5PipelineTestSupport } from "../media/c5-pipeline-test-support.j
 import { SQLiteRetentionRepository } from "../media/sqlite-retention-repository.js";
 import { createVerifiedFixtureVisionProvider } from "../processing/c7-fixture.test-support.js";
 import {
+  emitTestDiagnostic,
   registerTestDiagnostic,
   type TestDiagnostic,
 } from "../internal/test-diagnostics.js";
@@ -1235,6 +1236,22 @@ describe("Core acceptance through the production Fastify seam", () => {
     } finally {
       await fixture.close();
     }
+  });
+
+  it("removes real root diagnostic registrations before close returns", async () => {
+    const events: string[] = [];
+    const fixture = await makeRoot({
+      verifiedProvider: createDemoVisionProvider(),
+      c5Mode: "verified",
+      diagnostics: Object.freeze({
+        onEvent: () => events.push("observed"),
+      }),
+    });
+
+    await fixture.close();
+    emitTestDiagnostic(fixture.repository, { kind: "policy-lookup" });
+
+    expect(events).toEqual([]);
   });
 
   it("contains real local-storage create, chmod, publication, traversal, and symlink failures", async () => {

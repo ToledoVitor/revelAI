@@ -8,17 +8,14 @@ describe("test diagnostic registrations", () => {
   it("keeps a replacement registration when stale cleanup runs first", () => {
     const target = {};
     const events: string[] = [];
-    const first = registerTestDiagnostic(target, {
-      onEvent: () => events.push("first"),
-    });
-    const replacement = registerTestDiagnostic(target, {
-      onEvent: () => events.push("replacement"),
-    });
+    const diagnostic = { onEvent: () => events.push("observed") };
+    const first = registerTestDiagnostic(target, diagnostic);
+    const replacement = registerTestDiagnostic(target, diagnostic);
 
     first();
     emitTestDiagnostic(target, { kind: "policy-lookup" });
 
-    expect(events).toEqual(["replacement"]);
+    expect(events).toEqual(["observed"]);
     replacement();
   });
 

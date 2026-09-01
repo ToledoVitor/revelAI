@@ -8,6 +8,7 @@ import {
 } from "../composition/local-demo-runtime.js";
 import {
   createConfiguredVisionProvider,
+  createHostFrameProcessRunner,
   preflightMediaBinaries,
   type LocalDemoProcessRunner,
 } from "./local-demo-support.js";
@@ -58,8 +59,18 @@ describe("local demo runtime", () => {
     const runner: LocalDemoProcessRunner = {
       run: async (command) =>
         command.executable === "ffprobe"
-          ? { exitCode: 1, stdout: "private path", stderr: "secret output" }
-          : { exitCode: 0, stdout: "showinfo metadata", stderr: "" },
+          ? {
+              exitCode: 1,
+              termination: "completed",
+              stdout: "private path",
+              stderr: "secret output",
+            }
+          : {
+              exitCode: 0,
+              termination: "completed",
+              stdout: " ... showinfo V->V\\n ... metadata V->V",
+              stderr: "",
+            },
     };
 
     await expect(
@@ -110,10 +121,11 @@ describe("local demo runtime", () => {
         calls.push(`${command.executable} ${command.arguments.join(" ")}`);
         return {
           exitCode: 0,
+          termination: "completed" as const,
           stdout: command.arguments.includes("-filters")
-            ? "showinfo metadata"
+            ? " ... showinfo V->V\n ... metadata V->V"
             : command.arguments.includes("-encoders")
-              ? "mjpeg"
+              ? " V..... mjpeg MJPEG (Motion JPEG)"
               : "",
           stderr: "",
         };
@@ -127,6 +139,86 @@ describe("local demo runtime", () => {
       "ffmpeg -hide_banner -encoders",
     ]);
   });
+
+  it.each([
+    [
+      "near-match filters",
+      " ... ashowinfo A->A\n ... ametadata V->V",
+      " V..... mjpeg MJPEG (Motion JPEG)",
+    ],
+    [
+      "near-match encoder",
+      " ... showinfo V->V\n ... metadata V->V",
+      " V..... mjpeg_qsv MJPEG (Quick Sync Video acceleration)",
+    ],
+  ])(
+    "rejects %s rather than accepting a substring",
+    async (_label, filters, encoders) => {
+      await expect(
+        preflightMediaBinaries({
+          run: async (command) => ({
+            exitCode: 0,
+            termination: "completed" as const,
+            stdout: command.arguments.includes("-filters")
+              ? filters
+              : command.arguments.includes("-encoders")
+                ? encoders
+                : "",
+            stderr: "",
+          }),
+        }),
+      ).rejects.toThrow("FFmpeg and FFprobe capabilities");
+    },
+  );
+
+  it.each(["timed_out", "terminated"] as const)(
+    "rejects a zero-exit %s media command",
+    async (termination) => {
+      await expect(
+        preflightMediaBinaries({
+          run: async (command) => ({
+            exitCode: 0,
+            termination,
+            stdout: command.arguments.includes("-filters")
+              ? " ... showinfo V->V\n ... metadata V->V"
+              : command.arguments.includes("-encoders")
+                ? " V..... mjpeg MJPEG (Motion JPEG)"
+                : "",
+            stderr: "",
+          }),
+        }),
+      ).rejects.toThrow("FFmpeg and FFprobe capabilities");
+    },
+  );
+
+  it.each(["timed_out", "terminated"] as const)(
+    "keeps a zero-exit %s host frame-process result visible to C5",
+    async (termination) => {
+      const runner = createHostFrameProcessRunner({
+        run: async () => ({
+          exitCode: 0,
+          termination,
+          stdout: "safe stdout",
+          stderr: "safe stderr",
+        }),
+      });
+
+      await expect(
+        runner.run({
+          executable: "ffmpeg",
+          arguments: [],
+          inputPath: "/private/input.mp4",
+          outputDirectory: "/private/frames",
+          timeoutMilliseconds: 1,
+          terminationGraceMilliseconds: 1,
+          maxStdoutBytes: 1,
+          maxStderrBytes: 1,
+          maxOutputBytes: 2,
+          evidenceFormat: "ffmpeg-showinfo-metadata-v1",
+        }),
+      ).resolves.toMatchObject({ exitCode: 0, termination });
+    },
+  );
 
   it("closes both app-owned workers before queue and database resources", async () => {
     const root = await fixtureRoot();
