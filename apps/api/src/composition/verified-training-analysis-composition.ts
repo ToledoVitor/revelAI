@@ -27,7 +27,6 @@ export type VerifiedTrainingProductionOptions = Readonly<{
   scheduler?: VisionBatchScheduler;
   clock?: Readonly<{ now(): string }>;
   policy?: SQLiteCompetitivePolicyRepository;
-  integrityScoringObserver?: Readonly<{ beforeIntegrityScoring(): void }>;
 }>;
 
 const noApprovedCompetitivePolicy: CompetitivePolicyLookup = Object.freeze({
@@ -53,7 +52,6 @@ export function createFactoryIssuedVerifiedTrainingRuntime(
   const scheduler = rawOptions.scheduler;
   const clock = rawOptions.clock;
   const rawPolicy = rawOptions.policy;
-  const integrityScoringObserver = rawOptions.integrityScoringObserver;
   return createFactoryIssuedVerifiedTrainingRuntimeFromResolvedQueue({
     repository,
     queue: resolveRequiredAnalysisQueuePort(rawQueue),
@@ -63,7 +61,6 @@ export function createFactoryIssuedVerifiedTrainingRuntime(
       scheduler,
       clock,
       policy: rawPolicy,
-      integrityScoringObserver,
     }),
   });
 }
@@ -84,7 +81,6 @@ export function createFactoryIssuedVerifiedTrainingRuntimeFromResolvedQueue(
   const scheduler = rawOptions.scheduler;
   const clock = rawOptions.clock;
   const policy = rawOptions.policy;
-  const integrityScoringObserver = rawOptions.integrityScoringObserver;
   const snapshot = Object.freeze({
     repository,
     queue,
@@ -94,7 +90,6 @@ export function createFactoryIssuedVerifiedTrainingRuntimeFromResolvedQueue(
       scheduler,
       clock,
       policy,
-      integrityScoringObserver,
     }),
   });
   assertFactoryIssuedVerifiedTrainingComposition({
@@ -162,7 +157,6 @@ export function createFactoryIssuedVerifiedTrainingRuntimeFromResolvedQueue(
         ? (activation) =>
             issueRankedPolicyFinalization(policyPort.finalization, activation)
         : undefined,
-      integrityScoringObserver: snapshot.options.integrityScoringObserver,
       clock: snapshot.options.clock ?? { now: () => new Date().toISOString() },
     },
   });

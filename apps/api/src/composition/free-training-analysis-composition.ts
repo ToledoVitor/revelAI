@@ -14,7 +14,6 @@ import {
   createFreeTrainingRuntime,
   type FreeTrainingRuntimeHandle,
 } from "../services/free-training-runtime.js";
-import type { FreeTrainingForbiddenPorts } from "../services/free-training-analysis.js";
 import {
   createFactoryIssuedMediaUploadService,
   createProductionAttemptApi,
@@ -25,7 +24,6 @@ export type FreeTrainingProductionOptions = Readonly<{
   provider: VisionProvider;
   scheduler?: VisionBatchScheduler;
   clock?: Readonly<{ now(): string }>;
-  forbiddenPorts?: FreeTrainingForbiddenPorts;
 }>;
 
 /**
@@ -47,12 +45,11 @@ export function createFactoryIssuedFreeTrainingRuntime(
   const provider = rawOptions.provider;
   const scheduler = rawOptions.scheduler;
   const clock = rawOptions.clock;
-  const forbiddenPorts = rawOptions.forbiddenPorts;
   const snapshot = Object.freeze({
     repository,
     queue: rawQueue,
     mediaPipeline,
-    options: Object.freeze({ provider, scheduler, clock, forbiddenPorts }),
+    options: Object.freeze({ provider, scheduler, clock }),
   });
   const queue = resolveRequiredAnalysisQueuePort(snapshot.queue);
   return createFactoryIssuedFreeTrainingRuntimeFromResolvedQueue({
@@ -77,12 +74,11 @@ export function createFactoryIssuedFreeTrainingRuntimeFromResolvedQueue(
   const provider = rawOptions.provider;
   const scheduler = rawOptions.scheduler;
   const clock = rawOptions.clock;
-  const forbiddenPorts = rawOptions.forbiddenPorts;
   const snapshot = Object.freeze({
     repository,
     queue: input.queue,
     mediaPipeline,
-    options: Object.freeze({ provider, scheduler, clock, forbiddenPorts }),
+    options: Object.freeze({ provider, scheduler, clock }),
   });
   assertFactoryIssuedFreeTrainingComposition(snapshot);
   const processing = resolveProductionSQLiteAttemptProcessingPort(
@@ -114,7 +110,6 @@ export function createFactoryIssuedFreeTrainingRuntimeFromResolvedQueue(
       scheduler: snapshot.options.scheduler,
       clock: snapshot.options.clock ?? { now: () => new Date().toISOString() },
     },
-    forbiddenPorts: snapshot.options.forbiddenPorts,
   });
 }
 
@@ -202,7 +197,6 @@ function snapshotFreeTrainingApiInput(
   const provider = rawFreeTraining.provider;
   const visionScheduler = rawFreeTraining.scheduler;
   const visionClock = rawFreeTraining.clock;
-  const forbiddenPorts = rawFreeTraining.forbiddenPorts;
   return Object.freeze({
     repository,
     retention,
@@ -222,7 +216,6 @@ function snapshotFreeTrainingApiInput(
       provider,
       scheduler: visionScheduler,
       clock: visionClock,
-      forbiddenPorts,
     }),
   });
 }

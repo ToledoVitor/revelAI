@@ -38,6 +38,7 @@ import {
   RetryableProcessingFailure,
   type AnalysisProcessor,
 } from "../workers/analysis-worker.js";
+import { emitTestDiagnostic } from "../internal/test-diagnostics.js";
 
 export type VerifiedTrainingAnalysisClock = Readonly<{ now(): string }>;
 
@@ -76,7 +77,6 @@ export type VerifiedTrainingAnalysisDependencies = Readonly<{
   issueRankedPolicyFinalization?(
     activation: CompetitivePolicyActivation,
   ): TransactionalRankedPolicyFinalizationAuthority | undefined;
-  integrityScoringObserver?: Readonly<{ beforeIntegrityScoring(): void }>;
   clock: VerifiedTrainingAnalysisClock;
 }>;
 
@@ -94,7 +94,6 @@ export function createVerifiedTrainingAnalysisProcessor(
   const scheduler = input.scheduler;
   const policy = input.policy;
   const issueRankedPolicy = input.issueRankedPolicyFinalization;
-  const integrityScoringObserver = input.integrityScoringObserver;
   const now = input.clock.now;
 
   return async ({ job, claim }) => {
@@ -131,7 +130,7 @@ export function createVerifiedTrainingAnalysisProcessor(
         throw configurationFailure(job.attemptId);
       }
 
-      integrityScoringObserver?.beforeIntegrityScoring();
+      emitTestDiagnostic(provider, { kind: "verified-integrity-scoring" });
       const integrity = evaluateVerifiedIntegrity({
         expected: {
           attemptId: job.attemptId,

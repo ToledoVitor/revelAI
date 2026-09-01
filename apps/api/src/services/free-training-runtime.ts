@@ -11,11 +11,10 @@ import {
   type RetryWaiter,
   type UnexpectedRetryPolicy,
 } from "../workers/analysis-worker.js";
+import { emitTestDiagnostic } from "../internal/test-diagnostics.js";
 import {
   createFreeTrainingAnalysisProcessor,
-  defaultFreeTrainingForbiddenPorts,
   type FreeTrainingAnalysisDependencies,
-  type FreeTrainingForbiddenPorts,
 } from "./free-training-analysis.js";
 
 export type FreeTrainingRuntimeHandle = Readonly<{
@@ -39,18 +38,12 @@ export function createFreeTrainingRuntime(
     analysis: FreeTrainingAnalysisDependencies;
     retryPolicy?: UnexpectedRetryPolicy;
     retryWaiter?: RetryWaiter;
-    forbiddenPorts?: FreeTrainingForbiddenPorts;
   }>,
 ): FreeTrainingRuntimeHandle {
-  const forbiddenPorts =
-    input.forbiddenPorts ?? defaultFreeTrainingForbiddenPorts;
   const worker = new AnalysisWorker({
     queue: input.queue,
-    repository: guardFreeTerminalPersistence(input.repository, forbiddenPorts),
-    process: createFreeTrainingAnalysisProcessor({
-      ...input.analysis,
-      forbiddenPorts,
-    }),
+    repository: guardFreeTerminalPersistence(input.repository),
+    process: createFreeTrainingAnalysisProcessor(input.analysis),
     mode: "free",
     unexpectedRetryPolicy: input.retryPolicy ?? defaultRetryPolicy,
     retryWaiter: input.retryWaiter,
@@ -61,16 +54,15 @@ export function createFreeTrainingRuntime(
 
 function guardFreeTerminalPersistence(
   repository: ProcessingRepository,
-  forbiddenPorts: FreeTrainingForbiddenPorts,
 ): ProcessingRepository {
   const finalizeTerminalResult = repository.finalizeTerminalResult;
   return Object.freeze({
     ...repository,
     finalizeTerminalResult: async (input) => {
-      assertFreeTerminalCandidate(input.candidate, forbiddenPorts);
-      forbiddenPorts.allowFreeTerminalPersistence();
+      assertFreeTerminalCandidate(input.candidate, repository);
+      emitTestDiagnostic(repository, { kind: "free-terminal-persistence" });
       const finalization = await finalizeTerminalResult(input);
-      assertFreeFinalization(finalization, forbiddenPorts);
+      assertFreeFinalization(finalization, repository);
       return finalization;
     },
   });
@@ -78,7 +70,7 @@ function guardFreeTerminalPersistence(
 
 function assertFreeTerminalCandidate(
   candidate: TerminalCandidate,
-  forbiddenPorts: FreeTrainingForbiddenPorts,
+  diagnosticTarget: object,
 ): void {
   if (candidate.state === "valid" && candidate.result.kind === "free-insight")
     return;
@@ -87,16 +79,33 @@ function assertFreeTerminalCandidate(
     candidate.state === "valid" &&
     candidate.result.kind === "verified-result" &&
     candidate.result.competitiveStatus === "ranked"
-  )
-    forbiddenPorts.forbidRankedFinalization();
-  if (candidate.state === "valid") forbiddenPorts.forbidIntegrityScoring();
-  if (candidate.mode === "verified") forbiddenPorts.forbidPolicyLookup();
-  forbiddenPorts.forbidLeaderboard();
+  ) {
+    emitTestDiagnostic(diagnosticTarget, {
+      kind: "free-forbidden-ranked-finalization",
+    });
+    throw new Error("Free processing cannot finalize a ranked result.");
+  }
+  if (candidate.state === "valid") {
+    emitTestDiagnostic(diagnosticTarget, {
+      kind: "free-forbidden-integrity-scoring",
+    });
+    throw new Error("Free processing cannot access integrity or scoring.");
+  }
+  if (candidate.mode === "verified") {
+    emitTestDiagnostic(diagnosticTarget, {
+      kind: "free-forbidden-policy-lookup",
+    });
+    throw new Error("Free processing cannot access competitive policy.");
+  }
+  emitTestDiagnostic(diagnosticTarget, {
+    kind: "free-forbidden-leaderboard",
+  });
+  throw new Error("Free processing cannot write a leaderboard entry.");
 }
 
 function assertFreeFinalization(
   finalization: FinalizeTerminalResultOutcome,
-  forbiddenPorts: FreeTrainingForbiddenPorts,
+  diagnosticTarget: object,
 ): void {
   if (finalization.kind === "lost-claim" || finalization.kind === "tombstoned")
     return;
@@ -106,7 +115,10 @@ function assertFreeFinalization(
     (outcome.state === "failed" && outcome.mode === "free")
   )
     return;
-  forbiddenPorts.forbidLeaderboard();
+  emitTestDiagnostic(diagnosticTarget, {
+    kind: "free-forbidden-finalization",
+  });
+  throw new Error("Free processing cannot retain a non-Free terminal result.");
 }
 
 function temporaryFailure(
