@@ -62,6 +62,18 @@ const LEASE_A = "77777777-7777-4777-8777-777777777777";
 const LEASE_B = "88888888-8888-4888-8888-888888888888";
 const ENTRY_A = "99999999-9999-4999-8999-999999999999";
 const ENTRY_B = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const migrationChildStartupTimeoutMs = 4_000;
+const migrationChildTerminationGraceMs = 250;
+const migrationStartupRounds = 3;
+const migrationStartupSourceCount = 2;
+const migrationStartupVerificationGraceMs = 2_000;
+const migrationStartupTestTimeoutMs =
+  migrationStartupSourceCount *
+    migrationStartupRounds *
+    (migrationChildStartupTimeoutMs + migrationChildTerminationGraceMs) +
+  migrationStartupVerificationGraceMs;
+const migrationChildStartupTimeoutError = "Database child startup timed out";
+const migrationChildReadyMarker = "REVELAI_CHILD_DATABASE_READY";
 
 class TestClock implements Clock {
   public current = "2030-01-15T12:00:00.000Z";
@@ -547,10 +559,18 @@ async function durableStartupStateForTest(filename: string): Promise<
   }
 }
 
+type DatabaseChildStartupOptions = Readonly<{
+  forceHang?: boolean;
+  onReady?: () => void;
+  timeoutMs?: number;
+}>;
+
 function openDatabaseInChild(
   filename: string,
+  options: DatabaseChildStartupOptions = {},
 ): Promise<Readonly<{ userVersion: unknown; migrationCount: unknown }>> {
   return new Promise((resolve, reject) => {
+    const timeoutMs = options.timeoutMs ?? migrationChildStartupTimeoutMs;
     const child = spawn(
       process.execPath,
       [
@@ -559,6 +579,11 @@ function openDatabaseInChild(
           const fs = require("node:fs");
           const Module = require("node:module");
           const ts = require("typescript");
+          if (process.env.REVELAI_CHILD_FORCE_HANG === "1") {
+            process.on("SIGTERM", () => undefined);
+            process.stdout.write("REVELAI_CHILD_DATABASE_READY\\n");
+            setInterval(() => undefined, 1_000);
+          } else {
           const originalResolveFilename = Module._resolveFilename;
           Module._resolveFilename = function (request, parent, isMain, options) {
             if (request === "@revelai/contracts") return process.env.REVELAI_CHILD_CONTRACTS_MODULE;
@@ -597,6 +622,7 @@ function openDatabaseInChild(
             process.stderr.write(error instanceof Error ? error.stack ?? error.message : String(error));
             process.exitCode = 1;
           }
+          }
         `,
       ],
       {
@@ -615,35 +641,95 @@ function openDatabaseInChild(
             process.cwd(),
             "../../packages/domain/src/index.ts",
           ),
+          ...(options.forceHang === true
+            ? { REVELAI_CHILD_FORCE_HANG: "1" }
+            : {}),
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.once("error", reject);
-    child.once("close", (exitCode) => {
-      if (exitCode !== 0) {
+    let settled = false;
+    let timedOut = false;
+    let ready = false;
+    let readinessOutput = "";
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearTimeout(killTimer);
+      callback();
+    };
+    const rejectTimeout = (signal: NodeJS.Signals | null = null) =>
+      settle(() =>
         reject(
-          new Error(
-            `Database child exited ${exitCode}: ${Buffer.concat(stderr).toString("utf8")}`,
+          Object.assign(new Error(migrationChildStartupTimeoutError), {
+            signal,
+          }),
+        ),
+      );
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout.push(chunk);
+      if (ready || options.onReady === undefined) return;
+      readinessOutput += chunk.toString("utf8");
+      if (!readinessOutput.includes(migrationChildReadyMarker)) return;
+      ready = true;
+      options.onReady();
+    });
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.once("error", (error) => {
+      if (timedOut) rejectTimeout();
+      else settle(() => reject(error));
+    });
+    child.once("close", (exitCode, signal) => {
+      if (timedOut) {
+        rejectTimeout(signal);
+        return;
+      }
+      if (exitCode !== 0) {
+        settle(() =>
+          reject(
+            new Error(
+              `Database child exited ${exitCode}: ${Buffer.concat(stderr).toString("utf8")}`,
+            ),
           ),
         );
         return;
       }
       try {
-        resolve(
-          JSON.parse(Buffer.concat(stdout).toString("utf8")) as Readonly<{
-            userVersion: unknown;
-            migrationCount: unknown;
-          }>,
+        settle(() =>
+          resolve(
+            JSON.parse(Buffer.concat(stdout).toString("utf8")) as Readonly<{
+              userVersion: unknown;
+              migrationCount: unknown;
+            }>,
+          ),
         );
       } catch (error) {
-        reject(error);
+        settle(() => reject(error));
       }
     });
+    timeout = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        rejectTimeout();
+        return;
+      }
+      killTimer = setTimeout(() => {
+        if (settled) return;
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          rejectTimeout();
+        }
+      }, migrationChildTerminationGraceMs);
+    }, timeoutMs);
   });
 }
 
@@ -4606,49 +4692,75 @@ describe("SQLiteAttemptRepository", () => {
     expect(await durableStartupStateForTest(filename)).toEqual(before);
   });
 
+  it("terminates a stalled migration child startup", async () => {
+    const filename = join(fixture.directory, "migration-child-timeout.sqlite");
+    let resolveReady!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      resolveReady = resolve;
+    });
+    const startup = openDatabaseInChild(filename, {
+      forceHang: true,
+      onReady: resolveReady,
+      timeoutMs: 250,
+    });
+    void startup.catch(() => undefined);
+
+    await expect(ready).resolves.toBeUndefined();
+    await expect(startup).rejects.toMatchObject({
+      message: migrationChildStartupTimeoutError,
+      signal: "SIGKILL",
+    });
+  });
+
   // This covers six rounds of four child Node/TypeScript migration startups.
-  it("serializes concurrent fresh and predecessor migration startup", async () => {
-    for (const source of [
-      {
-        label: "fresh",
-        prepare(): void {
-          // A missing file is the fresh predecessor.
+  it(
+    "serializes concurrent fresh and predecessor migration startup",
+    async () => {
+      for (const source of [
+        {
+          label: "fresh",
+          prepare(): void {
+            // A missing file is the fresh predecessor.
+          },
         },
-      },
-      {
-        label: "v20",
-        prepare(filename: string): void {
-          openSqliteDatabaseAtVersionForTest(filename, 20).close();
+        {
+          label: "v20",
+          prepare(filename: string): void {
+            openSqliteDatabaseAtVersionForTest(filename, 20).close();
+          },
         },
-      },
-    ]) {
-      for (const round of [1, 2, 3]) {
-        const filename = join(
-          fixture.directory,
-          `migration-concurrent-${source.label}-${round}.sqlite`,
-        );
-        source.prepare(filename);
-        await expect(
-          Promise.all(
-            Array.from({ length: 4 }, () => openDatabaseInChild(filename)),
-          ),
-        ).resolves.toEqual(
-          Array.from({ length: 4 }, () => ({
-            userVersion: 22,
-            migrationCount: 22,
-          })),
-        );
-        const reopened = openSqliteDatabase(filename);
-        expect(reopened.raw.pragma("user_version", { simple: true })).toBe(22);
-        expect(
-          reopened.raw
-            .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
-            .get(),
-        ).toEqual({ count: 22 });
-        reopened.close();
+      ]) {
+        for (let round = 1; round <= migrationStartupRounds; round += 1) {
+          const filename = join(
+            fixture.directory,
+            `migration-concurrent-${source.label}-${round}.sqlite`,
+          );
+          source.prepare(filename);
+          await expect(
+            Promise.all(
+              Array.from({ length: 4 }, () => openDatabaseInChild(filename)),
+            ),
+          ).resolves.toEqual(
+            Array.from({ length: 4 }, () => ({
+              userVersion: 22,
+              migrationCount: 22,
+            })),
+          );
+          const reopened = openSqliteDatabase(filename);
+          expect(reopened.raw.pragma("user_version", { simple: true })).toBe(
+            22,
+          );
+          expect(
+            reopened.raw
+              .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+              .get(),
+          ).toEqual({ count: 22 });
+          reopened.close();
+        }
       }
-    }
-  }, 10_000);
+    },
+    migrationStartupTestTimeoutMs,
+  );
 
   it("backfills a live v17 delivery row with its exact durable frame batch once", () => {
     const filename = join(fixture.directory, "delivery-recovery-v17.sqlite");
