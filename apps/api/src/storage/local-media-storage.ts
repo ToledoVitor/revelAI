@@ -62,6 +62,7 @@ export type LocalMediaStorageInput = Readonly<{
   ids: OpaqueMediaIdGenerator;
   prober: LocalMediaProber;
   publisher?: NoReplacePublisher;
+  renamer?: AtomicMediaRenamer;
   cleanupLog?: UploadCleanupLog;
 }>;
 
@@ -135,6 +136,21 @@ export interface NoReplacePublisher {
     }>,
   ): Promise<void>;
 }
+
+/** Owns the atomic filesystem move used by the default local publisher. */
+export interface AtomicMediaRenamer {
+  rename(
+    input: Readonly<{ sourcePath: string; targetPath: string }>,
+  ): Promise<void>;
+}
+
+const defaultAtomicMediaRenamer: AtomicMediaRenamer = Object.freeze({
+  rename: async ({
+    sourcePath,
+    targetPath,
+  }: Readonly<{ sourcePath: string; targetPath: string }>) =>
+    rename(sourcePath, targetPath),
+});
 
 export type StoredLocalMedia = Readonly<{
   id: string;
@@ -210,6 +226,7 @@ class LocalMediaStorageImplementation {
   private readonly ids: OpaqueMediaIdGenerator;
   private readonly prober: LocalMediaProber;
   private readonly publisher: NoReplacePublisher;
+  private readonly renamer: AtomicMediaRenamer;
   private readonly cleanupLog: UploadCleanupLog | undefined;
 
   public constructor(input: LocalMediaStorageInput) {
@@ -219,7 +236,13 @@ class LocalMediaStorageImplementation {
     this.temporary = join(this.root, "temporary");
     this.ids = input.ids;
     this.prober = input.prober;
-    this.publisher = input.publisher ?? { publish: publishNoReplace };
+    this.renamer = input.renamer ?? defaultAtomicMediaRenamer;
+    this.publisher =
+      input.publisher ??
+      Object.freeze({
+        publish: (publication: Parameters<NoReplacePublisher["publish"]>[0]) =>
+          publishNoReplace(publication, this.renamer),
+      });
     this.cleanupLog = input.cleanupLog;
   }
 
@@ -574,6 +597,7 @@ async function publishNoReplace(
     payloadPath: string;
     ownerToken: string;
   }>,
+  renamer: AtomicMediaRenamer,
 ): Promise<void> {
   // mkdir is the exclusive ownership primitive. It never overwrites another
   // opaque media id; the payload move is then an atomic same-filesystem rename.
@@ -583,7 +607,10 @@ async function publishNoReplace(
     mode: 0o600,
     flag: "wx",
   });
-  await rename(input.temporaryPath, input.payloadPath);
+  await renamer.rename({
+    sourcePath: input.temporaryPath,
+    targetPath: input.payloadPath,
+  });
   await chmod(input.payloadPath, 0o600);
   await unlink(join(input.finalDirectory, ".owner"));
 }
