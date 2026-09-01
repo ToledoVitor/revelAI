@@ -1,7 +1,8 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
+import ts from "typescript";
 import {
   AttemptListResponseSchema,
   CalibrationSessionSchema,
@@ -28,7 +29,7 @@ import {
 } from "../composition/sqlite-media-upload-composition.js";
 import {
   createAttemptApi,
-  registerInternalComposedAttemptMediaUpload,
+  createInternallyComposedAttemptApi,
 } from "./attempt-api.js";
 
 const ATHLETE_A = "11111111-1111-4111-8111-111111111111";
@@ -44,28 +45,59 @@ afterEach(async () => {
 });
 
 describe("attempt HTTP foundation", () => {
-  it("keeps SQLite upload authority in the outer composition root", async () => {
-    const httpRoot = resolve(import.meta.dirname);
-    const [api, plugin, composition] = await Promise.all([
-      readFile(join(httpRoot, "attempt-api.ts"), "utf8"),
-      readFile(join(httpRoot, "attempt-media-upload-plugin.ts"), "utf8"),
-      readFile(
-        resolve(httpRoot, "../composition/sqlite-media-upload-composition.ts"),
-        "utf8",
+  it("enforces one compiler-resolved production upload-composition path", async () => {
+    await expect(
+      assertSingleProductionUploadCompositionPath(
+        resolve(import.meta.dirname, ".."),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects a second compiler-resolved production upload-composition import", async () => {
+    const root = await mkdtemp(join(tmpdir(), "revelai-upload-topology-"));
+    directories.push(root);
+    await Promise.all([
+      mkdir(join(root, "http"), { recursive: true }),
+      mkdir(join(root, "composition"), { recursive: true }),
+      mkdir(join(root, "workers"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(
+        join(root, "http", "attempt-api.ts"),
+        "export function createInternallyComposedAttemptApi(): void {}\n",
+      ),
+      writeFile(
+        join(root, "composition", "sqlite-media-upload-composition.ts"),
+        [
+          'import { createInternallyComposedAttemptApi } from "../http/attempt-api.js";',
+          "createInternallyComposedAttemptApi();",
+          "",
+        ].join("\n"),
       ),
     ]);
-    expect(api).not.toContain("sqlite-media-upload-composition");
-    expect(api).not.toContain("mediaUpload?:");
-    expect(plugin).not.toContain("sqlite-media-upload-composition");
-    expect(composition).toContain("createProductionAttemptApi");
-    expect(composition).toContain("createFactoryIssuedMediaUploadService");
-    expect(composition).toContain("registerInternalComposedAttemptMediaUpload");
-    expect(
-      api.match(/registerInternalComposedAttemptMediaUpload/g)?.length,
-    ).toBe(1);
-    expect(
-      composition.match(/registerInternalComposedAttemptMediaUpload/g)?.length,
-    ).toBe(2);
+    await expect(
+      assertSingleProductionUploadCompositionPath(root),
+    ).resolves.toBeUndefined();
+
+    await writeFile(
+      join(root, "workers", "forged-upload-composition.ts"),
+      [
+        'import * as attemptApi from "../http/attempt-api.js";',
+        "void attemptApi;",
+        "",
+      ].join("\n"),
+    );
+    await expect(
+      assertSingleProductionUploadCompositionPath(root),
+    ).rejects.toThrow("exactly one production composition import and call");
+
+    await writeFile(
+      join(root, "workers", "forged-upload-composition.ts"),
+      'void import("../http/attempt-api.js");\n',
+    );
+    await expect(
+      assertSingleProductionUploadCompositionPath(root),
+    ).rejects.toThrow("exactly one production composition import and call");
   });
 
   it("refuses to compose read-only SQLite with a C5 media pipeline", async () => {
@@ -525,7 +557,7 @@ describe("attempt HTTP foundation", () => {
     }
   });
 
-  it("rejects a real factory upload handle from another API host", async () => {
+  it("rejects a cross-host upload handle before recovery can acquire a scheduler", async () => {
     const owner = await makeMediaApi();
     const other = await makeMediaApi();
     const ownerHandle = createFactoryIssuedMediaUploadService({
@@ -534,26 +566,38 @@ describe("attempt HTTP foundation", () => {
       queue: owner.queue,
       mediaPipeline: owner.c5.pipeline,
     });
+    const otherHandle = createFactoryIssuedMediaUploadService({
+      repository: other.repository,
+      retention: other.retention,
+      queue: other.queue,
+      mediaPipeline: other.c5.pipeline,
+    });
+    await owner.app.close();
     await other.app.close();
-    const otherApp = createAttemptApi({
+    const everyHour = vi.fn(() => ({ timer: 1 }));
+    const scheduler = { everyHour, cancel: () => undefined };
+    const input = {
       repository: other.repository,
       queue: other.queue,
       cleaner: createLocalC8AcceptedMediaCleaner({
         repository: other.repository,
         storage: other.c5.storage,
       }),
-      scheduler: { everyHour: () => 1, cancel: () => undefined },
-    });
+      scheduler,
+    };
     try {
       expect(() =>
-        registerInternalComposedAttemptMediaUpload(otherApp, ownerHandle),
+        createInternallyComposedAttemptApi(input, ownerHandle),
       ).toThrow("does not match this attempt API host");
-      expect(
-        (await otherApp.inject({ method: "GET", url: "/v1/challenges" }))
-          .statusCode,
-      ).toBe(200);
-    } finally {
+      expect(everyHour).not.toHaveBeenCalled();
+
+      const otherApp = createInternallyComposedAttemptApi(input, otherHandle);
+      expect(everyHour).toHaveBeenCalledTimes(1);
+      await expect(
+        otherApp.inject({ method: "GET", url: "/v1/challenges" }),
+      ).resolves.toMatchObject({ statusCode: 200 });
       await otherApp.close();
+    } finally {
       await owner.close();
       await other.close();
     }
@@ -2035,4 +2079,156 @@ function chunked(
     index += 1;
   }
   return chunks;
+}
+
+const internalAttemptApiFactoryName = "createInternallyComposedAttemptApi";
+const expectedCompositionFile = join(
+  "composition",
+  "sqlite-media-upload-composition.ts",
+);
+const expectedAttemptApiFile = join("http", "attempt-api.ts");
+
+async function assertSingleProductionUploadCompositionPath(
+  sourceRoot: string,
+): Promise<void> {
+  const files = await productionTypeScriptFiles(sourceRoot);
+  const compilerOptions = {
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    noEmit: true,
+    target: ts.ScriptTarget.ES2023,
+  };
+  const program = ts.createProgram(files, compilerOptions);
+  const checker = program.getTypeChecker();
+  const apiFile = resolve(sourceRoot, expectedAttemptApiFile);
+  const compositionFile = resolve(sourceRoot, expectedCompositionFile);
+  const apiSource = program.getSourceFile(apiFile);
+  if (!apiSource)
+    throw new Error("Missing production attempt API composition entrypoint.");
+  const declarations = productionFactoryDeclarations(program, files);
+  if (
+    declarations.length !== 1 ||
+    declarations[0]!.getSourceFile() !== apiSource
+  )
+    throw new Error("Missing production upload-composition declaration.");
+  const declaration = declarations[0]!;
+  if (!declaration.name)
+    throw new Error("Missing production upload-composition declaration.");
+  const target = checker.getSymbolAtLocation(declaration.name);
+  if (!target) throw new Error("Missing production upload-composition symbol.");
+
+  const imports: string[] = [];
+  const calls: string[] = [];
+  for (const file of program.getSourceFiles()) {
+    if (!files.includes(file.fileName)) continue;
+    visit(file);
+  }
+  if (
+    imports.length !== 1 ||
+    calls.length !== 1 ||
+    imports[0] !== compositionFile ||
+    calls[0] !== compositionFile
+  )
+    throw new Error(
+      "C8 requires exactly one production composition import and call for its internal upload API.",
+    );
+
+  function visit(node: ts.Node): void {
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      resolvesModuleToAttemptApi(node)
+    )
+      imports.push(node.getSourceFile().fileName);
+    if (ts.isCallExpression(node) && resolvesDynamicImportToAttemptApi(node))
+      imports.push(node.getSourceFile().fileName);
+    if (ts.isCallExpression(node) && resolvesToTarget(node.expression))
+      calls.push(node.getSourceFile().fileName);
+    ts.forEachChild(node, visit);
+  }
+
+  function resolvesToTarget(node: ts.Node): boolean {
+    const symbol = checker.getSymbolAtLocation(node);
+    if (!symbol) return false;
+    const resolved =
+      symbol.flags & ts.SymbolFlags.Alias
+        ? checker.getAliasedSymbol(symbol)
+        : symbol;
+    return resolved === target;
+  }
+
+  function resolvesModuleToAttemptApi(
+    node: ts.ImportDeclaration | ts.ExportDeclaration,
+  ): boolean {
+    if (!node.moduleSpecifier || !ts.isStringLiteral(node.moduleSpecifier))
+      return false;
+    return resolvesModuleSpecifier(
+      node.moduleSpecifier.text,
+      node.getSourceFile().fileName,
+    );
+  }
+
+  function resolvesDynamicImportToAttemptApi(node: ts.CallExpression): boolean {
+    if (node.expression.kind !== ts.SyntaxKind.ImportKeyword) return false;
+    const moduleSpecifier = node.arguments[0];
+    if (!moduleSpecifier || !ts.isStringLiteral(moduleSpecifier)) return false;
+    return resolvesModuleSpecifier(
+      moduleSpecifier.text,
+      node.getSourceFile().fileName,
+    );
+  }
+
+  function resolvesModuleSpecifier(
+    moduleSpecifier: string,
+    containingFile: string,
+  ): boolean {
+    const result = ts.resolveModuleName(
+      moduleSpecifier,
+      containingFile,
+      compilerOptions,
+      ts.sys,
+    ).resolvedModule;
+    return result !== undefined && resolve(result.resolvedFileName) === apiFile;
+  }
+}
+
+function productionFactoryDeclarations(
+  program: ts.Program,
+  files: readonly string[],
+): ts.FunctionDeclaration[] {
+  const declarations: ts.FunctionDeclaration[] = [];
+  for (const source of program.getSourceFiles()) {
+    if (!files.includes(source.fileName)) continue;
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isFunctionDeclaration(node) &&
+        node.name?.text === internalAttemptApiFactoryName
+      )
+        declarations.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  return declarations;
+}
+
+async function productionTypeScriptFiles(root: string): Promise<string[]> {
+  const files: string[] = [];
+  async function visit(directory: string): Promise<void> {
+    const entries = await readdir(directory, { withFileTypes: true });
+    await Promise.all(
+      entries.map(async (entry) => {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          if (["dist", "fixtures", "node_modules"].includes(entry.name)) return;
+          await visit(path);
+          return;
+        }
+        if (entry.isFile() && entry.name.endsWith(".ts")) {
+          if (!entry.name.endsWith(".test.ts")) files.push(resolve(path));
+        }
+      }),
+    );
+  }
+  await visit(root);
+  return files.sort();
 }

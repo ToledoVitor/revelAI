@@ -45,7 +45,10 @@ import {
   type OpaqueAcceptedMediaCleaner,
 } from "../services/media-attachment-recovery.js";
 import { MultipartParserError } from "./streamed-multipart.js";
-import { type BoundMediaUploadService } from "../services/media-upload-service.js";
+import {
+  type BoundMediaUploadService,
+  type MediaUploadService,
+} from "../services/media-upload-service.js";
 import { registerAttemptMediaUploadPlugin } from "./attempt-media-upload-plugin.js";
 
 type AttemptHttpRepository = AttemptRepository &
@@ -54,6 +57,18 @@ type AttemptHttpRepository = AttemptRepository &
 type AttemptApiClock = Readonly<{ now(): string }>;
 type AttemptApiIdGenerator = Readonly<{ next(): string }>;
 type AttemptUploadQueue = Pick<AnalysisQueue, "isAvailable" | "enqueue">;
+type AttemptApiInput = Readonly<{
+  repository: AttemptHttpRepository;
+  queue: AttemptUploadQueue;
+  cleaner: OpaqueAcceptedMediaCleaner;
+  maxUploadBytes?: number;
+  scheduler?: HourlyRecoveryScheduler;
+  recoveryBatchLimit?: number;
+  clock?: AttemptApiClock;
+  ids?: AttemptApiIdGenerator;
+  nonce?: () => string;
+  log?: MediaAttachmentRecoveryLog;
+}>;
 
 const RECOVERY_BATCH_LIMIT = 100;
 const HOUR_MILLISECONDS = 60 * 60 * 1_000;
@@ -68,17 +83,12 @@ const badUrlBody = JSON.stringify(
   }),
 );
 type AttemptMediaUploadRegistration = Readonly<{
-  host: Readonly<{ repository: object; queue: object }>;
   maxUploadBytes: number;
   maxMultipartBytes: number;
   requiredAthleteId(request: FastifyRequest): string;
   attemptId(request: FastifyRequest): string;
   sendAccepted(reply: FastifyReply, value: unknown): unknown;
 }>;
-const attemptMediaUploadRegistrations = new WeakMap<
-  FastifyInstance,
-  AttemptMediaUploadRegistration
->();
 
 const processHourlyRecoveryScheduler: HourlyRecoveryScheduler = Object.freeze({
   everyHour: (task: () => void): NodeJS.Timeout => {
@@ -94,19 +104,29 @@ const processHourlyRecoveryScheduler: HourlyRecoveryScheduler = Object.freeze({
  * auto-starts C8 recovery and app close awaits its drain; HTTP handlers only
  * use the C4 repository port and C2 contracts.
  */
-export function createAttemptApi(
-  input: Readonly<{
-    repository: AttemptHttpRepository;
-    queue: AttemptUploadQueue;
-    cleaner: OpaqueAcceptedMediaCleaner;
-    maxUploadBytes?: number;
-    scheduler?: HourlyRecoveryScheduler;
-    recoveryBatchLimit?: number;
-    clock?: AttemptApiClock;
-    ids?: AttemptApiIdGenerator;
-    nonce?: () => string;
-    log?: MediaAttachmentRecoveryLog;
-  }>,
+export function createAttemptApi(input: AttemptApiInput): FastifyInstance {
+  return createAttemptApiInternal(input, undefined);
+}
+
+/**
+ * Internal outer-composition entrypoint. It resolves the factory-issued
+ * service against the exact C4/queue host before Fastify or C8 recovery exist.
+ */
+export function createInternallyComposedAttemptApi(
+  input: AttemptApiInput,
+  mediaUpload: BoundMediaUploadService,
+): FastifyInstance {
+  const service = mediaUpload.forHost(
+    Object.freeze({ repository: input.repository, queue: input.queue }),
+  );
+  if (!service)
+    throw new Error("C8 media upload does not match this attempt API host.");
+  return createAttemptApiInternal(input, service);
+}
+
+function createAttemptApiInternal(
+  input: AttemptApiInput,
+  mediaUpload: MediaUploadService | undefined,
 ): FastifyInstance {
   const maxUploadBytes = input.maxUploadBytes ?? MAX_UPLOAD_BYTES;
   const maxMultipartBytes =
@@ -129,40 +149,26 @@ export function createAttemptApi(
   const nonce = input.nonce ?? (() => randomBytes(32).toString("base64url"));
   let recovery: C8RecoveryRuntimeHandle | undefined;
   try {
-    recovery = createC8RecoveryRuntime({
-      repository: input.repository,
-      queue: input.queue,
-      cleaner: input.cleaner,
-      log: input.log ?? silentRecoveryLog,
-      scheduler: input.scheduler ?? processHourlyRecoveryScheduler,
-      maxBatchSize: input.recoveryBatchLimit ?? RECOVERY_BATCH_LIMIT,
-      now: () => clock.now(),
-    });
-    app.addHook("onClose", async () => {
-      await recovery?.stop();
-    });
     app.addHook("onRequest", async (request) => {
       if (isPublicChallengeRequest(request)) return;
       const athleteId = parseAthleteIdentity(request);
       if (!athleteId) throw new AttemptRouteError("invalid_athlete_identity");
       athleteIds.set(request, athleteId);
     });
-    attemptMediaUploadRegistrations.set(
-      app,
-      Object.freeze({
-        host: Object.freeze({
-          repository: input.repository,
-          queue: input.queue,
-        }),
-        maxUploadBytes,
-        maxMultipartBytes,
-        requiredAthleteId: (request) => requiredAthleteId(athleteIds, request),
-        attemptId: (request) =>
-          parseRequest(AttemptIdPathParamsSchema, request.params).id,
-        sendAccepted: (reply, value) =>
-          sendResponse(reply, 202, MediaUploadAcceptedSchema, value),
-      }),
-    );
+    const mediaRegistration: AttemptMediaUploadRegistration = Object.freeze({
+      maxUploadBytes,
+      maxMultipartBytes,
+      requiredAthleteId: (request) => requiredAthleteId(athleteIds, request),
+      attemptId: (request) =>
+        parseRequest(AttemptIdPathParamsSchema, request.params).id,
+      sendAccepted: (reply, value) =>
+        sendResponse(reply, 202, MediaUploadAcceptedSchema, value),
+    });
+    if (mediaUpload)
+      registerAttemptMediaUploadPlugin(app, {
+        mediaUpload,
+        ...mediaRegistration,
+      });
 
     app.get("/v1/challenges", async (request, reply) => {
       assertNoQuery(request.query);
@@ -256,32 +262,24 @@ export function createAttemptApi(
     app.setErrorHandler((error, _request, reply) =>
       sendRouteError(reply, routeErrorCode(error)),
     );
+    recovery = createC8RecoveryRuntime({
+      repository: input.repository,
+      queue: input.queue,
+      cleaner: input.cleaner,
+      log: input.log ?? silentRecoveryLog,
+      scheduler: input.scheduler ?? processHourlyRecoveryScheduler,
+      maxBatchSize: input.recoveryBatchLimit ?? RECOVERY_BATCH_LIMIT,
+      now: () => clock.now(),
+    });
+    app.addHook("onClose", async () => {
+      await recovery?.stop();
+    });
     return app;
   } catch (error) {
     void recovery?.stop();
     void app.close().catch(() => undefined);
     throw error;
   }
-}
-
-/**
- * Internal outer-composition seam. The production root invokes this only
- * after it has authenticated exact C4/C5/retention adapters.
- */
-export function registerInternalComposedAttemptMediaUpload(
-  app: FastifyInstance,
-  mediaUpload: BoundMediaUploadService,
-): void {
-  const registration = attemptMediaUploadRegistrations.get(app);
-  if (!registration)
-    throw new Error("C8 media upload must attach to an attempt API instance.");
-  const service = mediaUpload.forHost(registration.host);
-  if (!service)
-    throw new Error("C8 media upload does not match this attempt API host.");
-  registerAttemptMediaUploadPlugin(app, {
-    mediaUpload: service,
-    ...registration,
-  });
 }
 
 class AttemptRouteError extends Error {

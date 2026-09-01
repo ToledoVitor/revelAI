@@ -15,10 +15,7 @@ import {
   createMediaUploadService,
   type BoundMediaUploadService,
 } from "../services/media-upload-service.js";
-import {
-  createAttemptApi,
-  registerInternalComposedAttemptMediaUpload,
-} from "../http/attempt-api.js";
+import { createInternallyComposedAttemptApi } from "../http/attempt-api.js";
 
 /**
  * The outer production composition root joins exact C4/C5 SQLite facades,
@@ -84,7 +81,10 @@ export function createFactoryIssuedMediaUploadService(
 /** Official production root: verified adapters compose before HTTP wiring. */
 export function createProductionAttemptApi(
   input: Readonly<
-    Omit<Parameters<typeof createAttemptApi>[0], "repository"> & {
+    Omit<
+      Parameters<typeof createInternallyComposedAttemptApi>[0],
+      "repository"
+    > & {
       repository: SQLiteAttemptRepository;
       retention: SQLiteRetentionRepository;
       mediaPipeline: C5MediaPipeline;
@@ -98,7 +98,5 @@ export function createProductionAttemptApi(
     queue: api.queue,
     mediaPipeline,
   });
-  const app = createAttemptApi(api);
-  registerInternalComposedAttemptMediaUpload(app, mediaUpload);
-  return app;
+  return createInternallyComposedAttemptApi(api, mediaUpload);
 }
