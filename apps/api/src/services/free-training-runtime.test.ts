@@ -61,35 +61,38 @@ describe("Free Training fail-closed terminal boundary", () => {
       "free-forbidden-leaderboard",
     ],
   ] as const)(
-    "replaces a %s with one safe Free terminal fact",
+    "turns a malformed %s candidate into one safe Free terminal fact",
     async (_label, malformed, expectedDiagnostic) => {
       const fixture = createRuntimeFixture({
         candidate: malformed as unknown as TerminalCandidate,
       });
+      try {
+        await fixture.queue.deliver(JOB);
 
-      await fixture.queue.deliver(JOB);
-      await fixture.runtime.stop();
-
-      expect(fixture.events).toEqual([
-        expectedDiagnostic,
-        "free-terminal-persistence",
-      ]);
-      expect(fixture.finalizations).toEqual([
-        expect.objectContaining({
-          candidate: {
-            state: "failed",
-            attemptId: JOB.attemptId,
-            mode: "free",
-            code: "analysis_internal_error",
-            message: FailureMessageByCode.analysis_internal_error,
-            retryable: false,
-          },
-        }),
-      ]);
+        expect(fixture.events).toEqual([
+          expectedDiagnostic,
+          "free-terminal-persistence",
+        ]);
+        expect(fixture.finalizations).toEqual([
+          expect.objectContaining({
+            candidate: {
+              state: "failed",
+              attemptId: JOB.attemptId,
+              mode: "free",
+              code: "analysis_internal_error",
+              message: FailureMessageByCode.analysis_internal_error,
+              retryable: false,
+            },
+          }),
+        ]);
+      } finally {
+        fixture.cleanupDiagnostic();
+        await fixture.runtime.stop();
+      }
     },
   );
 
-  it("replaces an invalid persisted finalization with one safe Free terminal fact", async () => {
+  it("retries its safe fallback when a stateless fake returns an unsafe terminal outcome", async () => {
     const fixture = createRuntimeFixture({
       candidate: {
         state: "valid",
@@ -107,24 +110,28 @@ describe("Free Training fail-closed terminal boundary", () => {
       }),
     });
 
-    await fixture.queue.deliver(JOB);
-    await fixture.runtime.stop();
+    try {
+      await fixture.queue.deliver(JOB);
 
-    expect(fixture.events).toEqual([
-      "free-terminal-persistence",
-      "free-forbidden-finalization",
-      "free-terminal-persistence",
-    ]);
-    expect(fixture.finalizations).toHaveLength(2);
-    expect(fixture.finalizations[1]).toEqual(
-      expect.objectContaining({
-        candidate: expect.objectContaining({
-          state: "failed",
-          mode: "free",
-          code: "analysis_internal_error",
+      expect(fixture.events).toEqual([
+        "free-terminal-persistence",
+        "free-forbidden-finalization",
+        "free-terminal-persistence",
+      ]);
+      expect(fixture.finalizations).toHaveLength(2);
+      expect(fixture.finalizations[1]).toEqual(
+        expect.objectContaining({
+          candidate: expect.objectContaining({
+            state: "failed",
+            mode: "free",
+            code: "analysis_internal_error",
+          }),
         }),
-      }),
-    );
+      );
+    } finally {
+      fixture.cleanupDiagnostic();
+      await fixture.runtime.stop();
+    }
   });
 });
 
@@ -161,7 +168,7 @@ function createRuntimeFixture(
       );
     },
   });
-  registerTestDiagnostic(
+  const cleanupDiagnostic = registerTestDiagnostic(
     repository,
     Object.freeze({
       onEvent: (event) => events.push(event.kind),
@@ -186,7 +193,13 @@ function createRuntimeFixture(
       clock: Object.freeze({ now: () => "2030-01-15T12:00:00.000Z" }),
     },
   });
-  return Object.freeze({ queue, runtime, events, finalizations });
+  return Object.freeze({
+    queue,
+    runtime,
+    events,
+    finalizations,
+    cleanupDiagnostic,
+  });
 }
 
 class ManualQueue implements AnalysisQueue {

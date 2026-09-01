@@ -2180,6 +2180,10 @@ async function makeRoot(
   let closed = false;
   let now = NOW;
   const freeProvider = input.freeProvider ?? createDemoVisionProvider();
+  const diagnosticCleanups: Array<() => void> = [];
+  const cleanupDiagnostics = () => {
+    for (const cleanup of diagnosticCleanups.splice(0).reverse()) cleanup();
+  };
 
   const start = async (activatePolicy: boolean): Promise<void> => {
     const c5 = createC5PipelineTestSupport({
@@ -2196,11 +2200,15 @@ async function makeRoot(
       handoffVerifier: c5.handoffVerifier,
     });
     if (input.diagnostics) {
-      registerTestDiagnostic(repository, input.diagnostics);
+      diagnosticCleanups.push(
+        registerTestDiagnostic(repository, input.diagnostics),
+      );
       const processing =
         resolveProductionSQLiteAttemptProcessingPort(repository);
       if (processing)
-        registerTestDiagnostic(processing.processing, input.diagnostics);
+        diagnosticCleanups.push(
+          registerTestDiagnostic(processing.processing, input.diagnostics),
+        );
     }
     const retention = new SQLiteRetentionRepository({ database });
     if (input.approvedPolicy) {
@@ -2208,7 +2216,10 @@ async function makeRoot(
         database,
         clock: { now: () => NOW },
       });
-      if (input.diagnostics) registerTestDiagnostic(policy, input.diagnostics);
+      if (input.diagnostics)
+        diagnosticCleanups.push(
+          registerTestDiagnostic(policy, input.diagnostics),
+        );
       if (activatePolicy && input.approvedPolicy) {
         const receipt = WorkflowBenchmarkReceiptSchema.parse(
           passingWorkflowBenchmarkReceiptFixture,
@@ -2269,8 +2280,10 @@ async function makeRoot(
       },
     });
     if (input.diagnostics) {
-      registerTestDiagnostic(freeProvider, input.diagnostics);
-      registerTestDiagnostic(input.verifiedProvider, input.diagnostics);
+      diagnosticCleanups.push(
+        registerTestDiagnostic(freeProvider, input.diagnostics),
+        registerTestDiagnostic(input.verifiedProvider, input.diagnostics),
+      );
     }
   };
   await start(input.activatePolicy ?? true);
@@ -2296,6 +2309,7 @@ async function makeRoot(
     },
     restart: async () => {
       if (closed) throw new Error("C10 root is closed");
+      cleanupDiagnostics();
       await app.close();
       database.close();
       database = openSqliteDatabase(join(root, "api.sqlite"));
@@ -2308,6 +2322,7 @@ async function makeRoot(
     close: async () => {
       if (closed) return;
       closed = true;
+      cleanupDiagnostics();
       await scheduler.runAll();
       if (scheduler.tasks.length !== 0)
         throw new Error("C10 queue deliveries did not settle");

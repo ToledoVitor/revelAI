@@ -112,6 +112,37 @@ describe("parseApiEnv", () => {
     ).toThrow("HTTPS");
   });
 
+  it.each([
+    "https://operator@inference.example.test",
+    "https://:credential@inference.example.test",
+    "https://operator:credential@inference.example.test",
+    "https://oper%61tor:cred%65ntial@inference.example.test/private?token=raw",
+  ])(
+    "rejects provider URL userinfo without reflecting the configured value",
+    (apiUrl) => {
+      const source = {
+        ROBOFLOW_API_URL: apiUrl,
+        ROBOFLOW_WORKSPACE_ID: "workspace",
+        ROBOFLOW_WORKFLOW_VERSION: "1.0.0" as const,
+        ROBOFLOW_WALL_PASS_WORKFLOW_ID:
+          "revelai-wall-pass-geometry-v1" as const,
+        ROBOFLOW_WALL_PASS_MODEL_BUNDLE_ID: "wall-pass-bundle-v1",
+        ROBOFLOW_FREE_WORKFLOW_ID: "revelai-free-training-v1" as const,
+        ROBOFLOW_FREE_MODEL_BUNDLE_ID: "free-training-bundle-v1",
+      };
+
+      let message = "";
+      try {
+        parseApiEnv(source);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+
+      expect(message).toBe("ROBOFLOW_API_URL must not contain credentials");
+      expect(message).not.toMatch(/operator|private|token|raw|example/i);
+    },
+  );
+
   it("does not treat a DNS name beginning with 127 as a loopback provider", () => {
     expect(() =>
       parseApiEnv({

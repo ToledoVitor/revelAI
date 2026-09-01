@@ -53,7 +53,7 @@ describe("Free Training analysis", () => {
   it("fails closed when malformed Free durable context carries calibration", async () => {
     const provider = {} as never;
     const events: string[] = [];
-    registerTestDiagnostic(
+    const cleanupDiagnostic = registerTestDiagnostic(
       provider,
       Object.freeze({
         onEvent: (event) => events.push(event.kind),
@@ -77,17 +77,21 @@ describe("Free Training analysis", () => {
       clock: Object.freeze({ now: () => NOW }),
     });
 
-    await expect(
-      process({
-        job: { attemptId: ATTEMPT_ID, generation: 1, mode: "free" },
-        claim: {
-          leaseId: "55555555-5555-4555-8555-555555555555",
-          generation: 1,
-          mode: "free",
-        },
-      }),
-    ).rejects.toThrow("Free processing cannot access calibration.");
-    expect(events).toEqual(["free-forbidden-calibration"]);
+    try {
+      await expect(
+        process({
+          job: { attemptId: ATTEMPT_ID, generation: 1, mode: "free" },
+          claim: {
+            leaseId: "55555555-5555-4555-8555-555555555555",
+            generation: 1,
+            mode: "free",
+          },
+        }),
+      ).rejects.toThrow("Free processing cannot access calibration.");
+      expect(events).toEqual(["free-forbidden-calibration"]);
+    } finally {
+      cleanupDiagnostic();
+    }
   });
 
   it("claims a C5-backed Free job and durably finalizes only a parsed FreeInsight", async () => {
