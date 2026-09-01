@@ -214,6 +214,62 @@ describe("operability routes", () => {
     ]);
   });
 
+  it("responds at its deadline and drains an uncooperative probe during close", async () => {
+    let expire: (() => void) | undefined;
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let release: ((reason?: unknown) => void) | undefined;
+    const straggler = new Promise<void>((_resolve, reject) => {
+      release = reject;
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    const app = Fastify();
+    apps.push(app);
+    let closeFinished = false;
+    try {
+      registerOperabilityRoutes(app, {
+        readiness: {
+          database: async () => {
+            markStarted?.();
+            await straggler;
+          },
+          storage: async () => undefined,
+          queue: async () => true,
+        },
+        deadlineMs: 10,
+        clock: {
+          setTimeout: (callback) => {
+            expire = callback;
+            return callback;
+          },
+          clearTimeout: () => undefined,
+        },
+      });
+
+      const responsePromise = app.inject({ method: "GET", url: "/ready" });
+      await started;
+      expire?.();
+
+      await expect(responsePromise).resolves.toMatchObject({ statusCode: 503 });
+      const closing = app.close().then(() => {
+        closeFinished = true;
+      });
+      await Promise.resolve();
+      expect(closeFinished).toBe(false);
+
+      release?.(new Error("late readiness failure"));
+      await closing;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   it("returns one safe error when multiple readiness dependencies fail", async () => {
     const app = Fastify();
     apps.push(app);

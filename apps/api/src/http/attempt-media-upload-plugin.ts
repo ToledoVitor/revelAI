@@ -1,7 +1,11 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { MediaUploadContext } from "../repositories/attempt-repository.js";
 import type { MediaUploadService } from "../services/media-upload-service.js";
-import { fastifyRoutePath, type ApiRouteContract } from "./openapi.js";
+import {
+  fastifyRouteRegistration,
+  resolveMultipartWire,
+  type ApiRouteContract,
+} from "./openapi.js";
 import {
   createStreamingMultipartIntake,
   drainMediaUploadRequest,
@@ -29,20 +33,18 @@ export function registerAttemptMediaUploadPlugin(
 ): void {
   const mediaUpload = input.mediaUpload;
   const route = input.route;
-  if (!route.multipart)
-    throw new Error("C2 media upload route requires multipart wire contract.");
+  const multipart = resolveMultipartWire(route);
   app.register((mediaApp, _options, done) => {
     const mediaUploads = new WeakMap<FastifyRequest, MediaUploadContext>();
     mediaApp.addContentTypeParser(
-      "multipart/form-data",
+      multipart.contentType,
       (_request, _payload, callback) => callback(null, undefined),
     );
     mediaApp.addHook("onResponse", async (request) => {
       drainMediaUploadRequest(request, input.maxMultipartBytes);
     });
     mediaApp.route({
-      method: "POST",
-      url: fastifyRoutePath(route),
+      ...fastifyRouteRegistration(route),
       onRequest: async (request) => {
         const upload = await mediaUpload.preflight({
           attemptId: input.attemptId(request),
@@ -51,6 +53,7 @@ export function registerAttemptMediaUploadPlugin(
         prepareMediaMultipartRequest(request, {
           maxUploadBytes: input.maxUploadBytes,
           maxMultipartBytes: input.maxMultipartBytes,
+          contentType: multipart.contentType,
         });
         mediaUploads.set(request, upload);
       },
@@ -66,7 +69,10 @@ export function registerAttemptMediaUploadPlugin(
         if (!upload) throw new MultipartParserError();
         const accepted = await mediaUpload.accept({
           context: upload,
-          multipart: createStreamingMultipartIntake(request),
+          multipart: createStreamingMultipartIntake(
+            request,
+            multipart.fieldName,
+          ),
         });
         return input.sendAccepted(reply, accepted);
       },

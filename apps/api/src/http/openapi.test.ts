@@ -1,9 +1,15 @@
 import { readFile } from "node:fs/promises";
+import Fastify from "fastify";
+import { mediaUploadFixtures } from "@revelai/contracts";
 import { describe, expect, it } from "vitest";
 import {
+  apiRoute,
+  apiRouteForFastifyRequest,
   apiRouteRegistry,
   generateOpenApiDocument,
+  registerApiRoute,
   renderOpenApiDocument,
+  sendApiRouteResponse,
 } from "./openapi.js";
 
 describe("generated OpenAPI", () => {
@@ -97,5 +103,63 @@ describe("generated OpenAPI", () => {
         default: "20",
       },
     });
+  });
+
+  it("drives runtime method, response, auth metadata, and multipart wire from one descriptor", async () => {
+    const source = apiRoute("uploadAttemptMedia");
+    const accepted = mediaUploadFixtures.accepted.expected;
+    if (accepted.kind !== "accepted")
+      throw new Error("C2 accepted upload fixture is required.");
+    const route = Object.freeze({
+      ...source,
+      method: "get" as const,
+      path: "/descriptor-runtime",
+      operationId: "descriptorRuntime",
+    });
+    const app = Fastify();
+    app.addHook("onRequest", async (request, reply) => {
+      const matched = apiRouteForFastifyRequest(
+        { method: request.method, routePath: request.routeOptions.url },
+        [route],
+      );
+      if (matched?.authenticated && request.headers["x-test-auth"] !== "yes")
+        return reply.code(401).send();
+    });
+    registerApiRoute(app, route, async (_request, reply) =>
+      sendApiRouteResponse(reply, route, 202, accepted.body),
+    );
+
+    try {
+      await expect(
+        app.inject({ method: "POST", url: "/descriptor-runtime" }),
+      ).resolves.toMatchObject({ statusCode: 404 });
+      await expect(
+        app.inject({ method: "GET", url: "/descriptor-runtime" }),
+      ).resolves.toMatchObject({ statusCode: 401 });
+      await expect(
+        app.inject({
+          method: "GET",
+          url: "/descriptor-runtime",
+          headers: { "x-test-auth": "yes" },
+        }),
+      ).resolves.toMatchObject({ statusCode: 202 });
+      expect(
+        generateOpenApiDocument([route]).paths["/descriptor-runtime"]?.get,
+      ).toMatchObject({
+        security: [{ AthleteIdentity: [] }],
+        requestBody: {
+          content: {
+            "multipart/form-data": {
+              schema: {
+                required: ["media"],
+                properties: { media: { type: "string", format: "binary" } },
+              },
+            },
+          },
+        },
+      });
+    } finally {
+      await app.close();
+    }
   });
 });

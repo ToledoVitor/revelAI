@@ -62,6 +62,8 @@ export type MultipartIntake = Readonly<{
   parts: AsyncIterable<MultipartPart>;
   maxUploadBytes: number;
   maxMultipartBytes: number;
+  /** HTTP supplies the C2 route descriptor's single required file field. */
+  requiredFileFieldName?: string;
   /** The parser receives only raw bytes emitted by this live counter. */
   rawBody: RawMultipartByteCounter;
   /** Advisory only; actual measured bytes always decide acceptance. */
@@ -92,12 +94,13 @@ export async function acceptSingleMediaPart(
     throw new MediaPipelineError("multipart_body_too_large");
 
   let stage: MediaUploadStage | undefined;
+  const requiredFileFieldName = input.requiredFileFieldName ?? "media";
   try {
     let accepted: AcceptedMultipartMedia | undefined;
     for await (const part of input.parts) {
       if (part.kind === "field")
         throw new MediaPipelineError("multipart_extra_part_forbidden");
-      if (part.name !== "media") {
+      if (part.name !== requiredFileFieldName) {
         throw new MediaPipelineError("multipart_extra_part_forbidden");
       }
       if (accepted) throw new MediaPipelineError("media_part_count_invalid");

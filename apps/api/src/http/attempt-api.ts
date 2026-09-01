@@ -8,22 +8,13 @@ import {
   AthleteIdentityHeaderSchema,
   AttemptIdPathParamsSchema,
   AttemptListQuerySchema,
-  AttemptListResponseSchema,
-  AttemptReadResponseSchema,
-  AttemptResultResponseSchema,
   CalibrationSessionCreateInputSchema,
   CalibrationSessionIdPathParamsSchema,
   CalibrationSessionReadyInputSchema,
-  CalibrationSessionSchema,
-  ChallengeListResponseSchema,
   CreateAttemptInputSchema,
-  DeleteAttemptResponseSchema,
   LeaderboardQuerySchema,
-  LeaderboardResponseSchema,
-  CreateAttemptResponseSchema,
   MAX_MULTIPART_ENVELOPE_BYTES,
   MAX_UPLOAD_BYTES,
-  MediaUploadAcceptedSchema,
   RouteErrorMessageByCode,
   RouteErrorRetryabilityByCode,
   RouteErrorSchema,
@@ -62,7 +53,9 @@ import {
 } from "./operability-routes.js";
 import {
   apiRoute,
-  fastifyRoutePath,
+  apiRouteForFastifyRequest,
+  registerApiRoute,
+  sendApiRouteResponse,
   type ApiRouteContract,
 } from "./openapi.js";
 
@@ -93,10 +86,12 @@ type AttemptApiInput = Readonly<{
 
 const RECOVERY_BATCH_LIMIT = 100;
 const HOUR_MILLISECONDS = 60 * 60 * 1_000;
-const LEADERBOARD_NAMESPACE_PATH = "/v1/leaderboards";
-const LIVE_LEADERBOARD_PATH = apiRoute("getWallPassLeaderboard").path;
 const challengeRoute = apiRoute("listChallenges");
 const leaderboardRoute = apiRoute("getWallPassLeaderboard");
+const LEADERBOARD_NAMESPACE_PATH = leaderboardRoute.path.slice(
+  0,
+  leaderboardRoute.path.lastIndexOf("/"),
+);
 const createCalibrationRoute = apiRoute("createCalibrationSession");
 const readyCalibrationRoute = apiRoute("readyCalibrationSession");
 const createAttemptRoute = apiRoute("createAttempt");
@@ -215,13 +210,7 @@ function createAttemptApiInternal(
       attemptId: (request) =>
         parseRequest(AttemptIdPathParamsSchema, request.params).id,
       sendAccepted: (reply, value) =>
-        sendResponse(
-          reply,
-          uploadAttemptMediaRoute,
-          202,
-          MediaUploadAcceptedSchema,
-          value,
-        ),
+        sendResponse(reply, uploadAttemptMediaRoute, 202, value),
     });
     if (mediaUpload)
       registerAttemptMediaUploadPlugin(app, {
@@ -230,36 +219,30 @@ function createAttemptApiInternal(
         ...mediaRegistration,
       });
 
-    app.get(fastifyRoutePath(challengeRoute), async (request, reply) => {
+    registerApiRoute(app, challengeRoute, async (request, reply) => {
       assertNoQuery(request.query);
-      return sendResponse(
-        reply,
-        challengeRoute,
-        200,
-        ChallengeListResponseSchema,
-        {
-          items: [
-            {
-              id: "wall-pass",
-              version: 1,
-              sport: "futsal",
-              activeDurationSeconds: 60,
-              calibrationPreRollSeconds: 4,
-              requiredGates: [
-                "device",
-                "space",
-                "athlete",
-                "rehearsal",
-                "record",
-              ],
-            },
-          ],
-        },
-      );
+      return sendResponse(reply, challengeRoute, 200, {
+        items: [
+          {
+            id: "wall-pass",
+            version: 1,
+            sport: "futsal",
+            activeDurationSeconds: 60,
+            calibrationPreRollSeconds: 4,
+            requiredGates: [
+              "device",
+              "space",
+              "athlete",
+              "rehearsal",
+              "record",
+            ],
+          },
+        ],
+      });
     });
 
-    app.get(fastifyRoutePath(leaderboardRoute), async (request, reply) => {
-      if (!hasExactPublicPath(request, LIVE_LEADERBOARD_PATH))
+    registerApiRoute(app, leaderboardRoute, async (request, reply) => {
+      if (!hasExactPublicPath(request, leaderboardRoute))
         throw new AttemptRouteError("invalid_request");
       const query = parseRequest(LeaderboardQuerySchema, request.query);
       const page = await listLiveLeaderboard({
@@ -271,72 +254,54 @@ function createAttemptApiInternal(
         limit: query.limit,
         ...(query.cursor ? { cursor: query.cursor } : {}),
       });
-      return sendResponse(
-        reply,
-        leaderboardRoute,
-        200,
-        LeaderboardResponseSchema,
-        {
-          view: "live",
-          challengeId: "wall-pass",
-          challengeVersion: query.version,
-          ruleVersion: query.ruleVersion,
-          calculatedAt: page.calculatedAt,
-          cohortSize: page.cohortSize,
-          entries: page.entries,
-          nextCursor: page.nextCursor,
-        },
-      );
+      return sendResponse(reply, leaderboardRoute, 200, {
+        view: "live",
+        challengeId: "wall-pass",
+        challengeVersion: query.version,
+        ruleVersion: query.ruleVersion,
+        calculatedAt: page.calculatedAt,
+        cohortSize: page.cohortSize,
+        entries: page.entries,
+        nextCursor: page.nextCursor,
+      });
     });
 
-    app.post(
-      fastifyRoutePath(createCalibrationRoute),
-      async (request, reply) => {
-        const body = parseRequest(
-          CalibrationSessionCreateInputSchema,
-          request.body,
-        );
-        const athleteId = requiredAthleteId(athleteIds, request);
-        const sessionId = requiredGeneratedUuid(ids.next());
-        const sessionNonce = requiredGeneratedNonce(nonce());
-        const session = await input.repository.issueCalibrationSession({
-          id: sessionId,
-          athleteId,
-          nonce: sessionNonce,
-          challengeId: body.challengeId,
-          challengeVersion: body.challengeVersion,
-        });
-        return sendResponse(
-          reply,
-          createCalibrationRoute,
-          201,
-          CalibrationSessionSchema,
-          session,
-        );
-      },
-    );
+    registerApiRoute(app, createCalibrationRoute, async (request, reply) => {
+      const body = parseRequest(
+        CalibrationSessionCreateInputSchema,
+        request.body,
+      );
+      const athleteId = requiredAthleteId(athleteIds, request);
+      const sessionId = requiredGeneratedUuid(ids.next());
+      const sessionNonce = requiredGeneratedNonce(nonce());
+      const session = await input.repository.issueCalibrationSession({
+        id: sessionId,
+        athleteId,
+        nonce: sessionNonce,
+        challengeId: body.challengeId,
+        challengeVersion: body.challengeVersion,
+      });
+      return sendResponse(reply, createCalibrationRoute, 201, session);
+    });
 
-    app.post(
-      fastifyRoutePath(readyCalibrationRoute),
-      async (request, reply) => {
-        const params = parseRequest(
-          CalibrationSessionIdPathParamsSchema,
-          request.params,
-        );
-        const body = parseRequest(
-          CalibrationSessionReadyInputSchema,
-          request.body,
-        );
-        await input.repository.readyCalibrationSession({
-          id: params.id,
-          athleteId: requiredAthleteId(athleteIds, request),
-          requiredGates: body.requiredGates,
-        });
-        return reply.code(204).send();
-      },
-    );
+    registerApiRoute(app, readyCalibrationRoute, async (request, reply) => {
+      const params = parseRequest(
+        CalibrationSessionIdPathParamsSchema,
+        request.params,
+      );
+      const body = parseRequest(
+        CalibrationSessionReadyInputSchema,
+        request.body,
+      );
+      await input.repository.readyCalibrationSession({
+        id: params.id,
+        athleteId: requiredAthleteId(athleteIds, request),
+        requiredGates: body.requiredGates,
+      });
+      return sendResponse(reply, readyCalibrationRoute, 204);
+    });
 
-    app.post(fastifyRoutePath(createAttemptRoute), async (request, reply) => {
+    registerApiRoute(app, createAttemptRoute, async (request, reply) => {
       const body = parseRequest(CreateAttemptInputSchema, request.body);
       const attemptId = requiredGeneratedUuid(ids.next());
       const attempt = await input.repository.createAttempt({
@@ -348,50 +313,37 @@ function createAttemptApiInternal(
         reply,
         createAttemptRoute,
         201,
-        CreateAttemptResponseSchema,
         projectAttempt(attempt),
       );
     });
 
-    app.delete(fastifyRoutePath(deleteAttemptRoute), async (request, reply) => {
+    registerApiRoute(app, deleteAttemptRoute, async (request, reply) => {
       assertNoQuery(request.query);
       assertNoBody(request.body);
       await tombstoneAttempt({
-        attemptId: requiredCanonicalAttemptId(request),
+        attemptId: requiredCanonicalAttemptId(request, deleteAttemptRoute),
         athleteId: requiredAthleteId(athleteIds, request),
       });
-      return sendResponse(
-        reply,
-        deleteAttemptRoute,
-        204,
-        DeleteAttemptResponseSchema,
-        undefined,
-      );
+      return sendResponse(reply, deleteAttemptRoute, 204);
     });
 
-    app.get(fastifyRoutePath(listAttemptsRoute), async (request, reply) => {
+    registerApiRoute(app, listAttemptsRoute, async (request, reply) => {
       const query = parseRequest(AttemptListQuerySchema, request.query);
       const page = await input.repository.listAttempts({
         athleteId: requiredAthleteId(athleteIds, request),
         limit: query.limit,
         ...(query.cursor ? { cursor: query.cursor } : {}),
       });
-      return sendResponse(
-        reply,
-        listAttemptsRoute,
-        200,
-        AttemptListResponseSchema,
-        {
-          items: page.items.map(projectAttempt),
-          nextCursor: page.nextCursor,
-        },
-      );
+      return sendResponse(reply, listAttemptsRoute, 200, {
+        items: page.items.map(projectAttempt),
+        nextCursor: page.nextCursor,
+      });
     });
 
-    app.get(fastifyRoutePath(getAttemptResultRoute), async (request, reply) => {
+    registerApiRoute(app, getAttemptResultRoute, async (request, reply) => {
       assertNoQuery(request.query);
       const outcome = await attemptRead.result({
-        attemptId: requiredCanonicalAttemptId(request),
+        attemptId: requiredCanonicalAttemptId(request, getAttemptResultRoute),
         athleteId: requiredAthleteId(athleteIds, request),
       });
       if (!outcome) throw new AttemptRouteError("attempt_not_found");
@@ -399,25 +351,18 @@ function createAttemptApiInternal(
         reply,
         getAttemptResultRoute,
         outcome.state === "pending" ? 202 : 200,
-        AttemptResultResponseSchema,
         outcome,
       );
     });
 
-    app.get(fastifyRoutePath(getAttemptRoute), async (request, reply) => {
+    registerApiRoute(app, getAttemptRoute, async (request, reply) => {
       assertNoQuery(request.query);
       const attempt = await attemptRead.read({
-        attemptId: requiredCanonicalAttemptId(request),
+        attemptId: requiredCanonicalAttemptId(request, getAttemptRoute),
         athleteId: requiredAthleteId(athleteIds, request),
       });
       if (!attempt) throw new AttemptRouteError("attempt_not_found");
-      return sendResponse(
-        reply,
-        getAttemptRoute,
-        200,
-        AttemptReadResponseSchema,
-        attempt,
-      );
+      return sendResponse(reply, getAttemptRoute, 200, attempt);
     });
 
     app.setNotFoundHandler((_request, reply) =>
@@ -497,31 +442,14 @@ function assertNoBody(body: unknown): void {
   if (body !== undefined) throw new AttemptRouteError("invalid_request");
 }
 
-function sendResponse<Output>(
+function sendResponse(
   reply: FastifyReply,
   route: ApiRouteContract,
   statusCode: number,
-  schema: Readonly<{ parse(value: unknown): Output }>,
-  value: unknown,
-): Output {
+  value?: unknown,
+): FastifyReply {
   try {
-    if (
-      !route.responses.some(
-        (definition) =>
-          definition.status === statusCode && definition.schema === schema,
-      ) &&
-      !(
-        statusCode === 204 &&
-        route.responses.some(
-          (definition) =>
-            definition.status === statusCode && definition.schema === undefined,
-        )
-      )
-    )
-      throw new Error(
-        "C2 route response is not declared by its shared contract.",
-      );
-    return reply.code(statusCode).send(schema.parse(value)) as Output;
+    return sendApiRouteResponse(reply, route, statusCode, value);
   } catch {
     throw new AttemptRouteError("service_not_ready");
   }
@@ -540,13 +468,13 @@ function sendRouteError(
 }
 
 function isPublicRouteRequest(request: FastifyRequest): boolean {
-  return (
-    request.routeOptions.url === "/health" ||
-    request.routeOptions.url === "/ready" ||
-    request.routeOptions.url === "/v1/challenges" ||
-    request.routeOptions.url === LIVE_LEADERBOARD_PATH ||
-    isPublicLeaderboardPathCandidate(publicRoutePath(request))
-  );
+  const route = apiRouteForFastifyRequest({
+    method: request.method,
+    routePath: request.routeOptions.url,
+  });
+  return route
+    ? !route.authenticated
+    : isPublicLeaderboardPathCandidate(publicRoutePath(request));
 }
 
 /**
@@ -561,8 +489,11 @@ function isPublicLeaderboardPathCandidate(path: string | undefined): boolean {
   );
 }
 
-function hasExactPublicPath(request: FastifyRequest, path: string): boolean {
-  return publicRoutePath(request) === path;
+function hasExactPublicPath(
+  request: FastifyRequest,
+  route: ApiRouteContract,
+): boolean {
+  return publicRoutePath(request) === route.path;
 }
 
 function publicRoutePath(request: FastifyRequest): string | undefined {
@@ -597,29 +528,20 @@ function requiredAthleteId(
   return athleteId;
 }
 
-function requiredCanonicalAttemptId(request: FastifyRequest): string {
+function requiredCanonicalAttemptId(
+  request: FastifyRequest,
+  route: ApiRouteContract,
+): string {
   const id = parseRequest(AttemptIdPathParamsSchema, request.params).id;
+  const rawUrl = request.raw.url;
   if (
-    !hasExactCanonicalAttemptPath(request, id) ||
+    rawUrl !== route.path.replace("{id}", id) ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
       id,
     )
   )
     throw new AttemptRouteError("invalid_request");
   return id;
-}
-
-/** C2 decodes/trims generic path strings; reads require literal canonical URI. */
-function hasExactCanonicalAttemptPath(
-  request: FastifyRequest,
-  attemptId: string,
-): boolean {
-  const rawUrl = request.raw.url;
-  if (typeof rawUrl !== "string") return false;
-  return (
-    rawUrl === `/v1/attempts/${attemptId}` ||
-    rawUrl === `/v1/attempts/${attemptId}/result`
-  );
 }
 
 function requiredGeneratedUuid(value: string): string {

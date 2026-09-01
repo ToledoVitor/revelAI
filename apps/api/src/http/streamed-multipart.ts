@@ -34,11 +34,18 @@ export class MultipartParserError extends Error {
  */
 export function prepareMediaMultipartRequest(
   request: FastifyRequest,
-  input: Readonly<{ maxUploadBytes: number; maxMultipartBytes: number }>,
+  input: Readonly<{
+    maxUploadBytes: number;
+    maxMultipartBytes: number;
+    contentType: string;
+  }>,
 ): void {
   if (preparedMultiparts.has(request)) return;
   preparedMultiparts.set(request, {
-    contentType: requiredMultipartContentType(request.headers["content-type"]),
+    contentType: requiredMultipartContentType(
+      request.headers["content-type"],
+      input.contentType,
+    ),
     rawBody: new RawMultipartByteCounter(input.maxMultipartBytes),
     maxUploadBytes: input.maxUploadBytes,
     maxMultipartBytes: input.maxMultipartBytes,
@@ -95,10 +102,12 @@ export function wrapMediaMultipartPayload(
  */
 export function createStreamingMultipartIntake(
   request: FastifyRequest,
+  requiredFileFieldName: string,
 ): Readonly<{
   parts: AsyncIterable<MultipartPart>;
   maxUploadBytes: number;
   maxMultipartBytes: number;
+  requiredFileFieldName: string;
   rawBody: RawMultipartByteCounter;
 }> {
   const prepared = requiredPreparedMultipart(request);
@@ -110,6 +119,7 @@ export function createStreamingMultipartIntake(
     }),
     maxUploadBytes: prepared.maxUploadBytes,
     maxMultipartBytes: prepared.maxMultipartBytes,
+    requiredFileFieldName,
     rawBody: prepared.rawBody,
   });
 }
@@ -141,10 +151,13 @@ function requiredPreparedMultipart(request: FastifyRequest): PreparedMultipart {
   return prepared;
 }
 
-function requiredMultipartContentType(value: unknown): string {
+function requiredMultipartContentType(
+  value: unknown,
+  expected: string,
+): string {
   if (typeof value !== "string") throw new MultipartParserError();
   const [mediaType, ...parameters] = value.split(";");
-  if (mediaType?.trim().toLowerCase() !== "multipart/form-data")
+  if (mediaType?.trim().toLowerCase() !== expected.toLowerCase())
     throw new MultipartParserError();
   const boundaryParameters = parameters.filter((parameter) =>
     /^\s*boundary\s*=/i.test(parameter),

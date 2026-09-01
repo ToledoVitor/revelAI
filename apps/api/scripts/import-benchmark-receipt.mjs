@@ -5,6 +5,12 @@ import { WorkflowBenchmarkReceiptSchema } from "@revelai/contracts";
 import { openSqliteDatabase } from "../dist/database/sqlite-database.js";
 import { SQLiteCompetitivePolicyRepository } from "../dist/repositories/sqlite-competitive-policy-repository.js";
 
+const {
+  REVELAI_BENCHMARK_RECEIPT_FILE: receiptFile,
+  REVELAI_ACTIVATE_COMPETITIVE_POLICY: activateCompetitivePolicy,
+  ...apiEnvironment
+} = process.env;
+
 if (process.argv.includes("--help")) {
   console.log(
     "Set REVELAI_BENCHMARK_RECEIPT_FILE and optionally REVELAI_ACTIVATE_COMPETITIVE_POLICY=true.",
@@ -12,19 +18,18 @@ if (process.argv.includes("--help")) {
 } else {
   let database;
   try {
-    const receiptFile = process.env.REVELAI_BENCHMARK_RECEIPT_FILE;
     if (!receiptFile) throw new Error("missing receipt");
     const receipt = WorkflowBenchmarkReceiptSchema.parse(
       JSON.parse(await readFile(receiptFile, "utf8")),
     );
-    const config = parseApiEnv(process.env);
+    const config = parseApiEnv(apiEnvironment);
     database = openSqliteDatabase(config.paths.databasePath);
     const policy = new SQLiteCompetitivePolicyRepository({
       database,
       clock: { now: () => new Date().toISOString() },
     });
     await policy.storeBenchmarkReceipt(receipt);
-    if (process.env.REVELAI_ACTIVATE_COMPETITIVE_POLICY === "true") {
+    if (activateCompetitivePolicy === "true") {
       await policy.activateCompetitivePolicy({
         id: randomUUID(),
         receiptId: receipt.id,

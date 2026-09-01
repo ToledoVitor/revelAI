@@ -25,6 +25,23 @@ describe("framework-neutral multipart intake", () => {
     expect(staged.bytes).toEqual([1, 2]);
   });
 
+  it("accepts the HTTP descriptor's one required file field", async () => {
+    const staged = new MemoryStage();
+
+    await expect(
+      acceptSingleMediaPart({
+        parts: parts(
+          file("capture", "attempt.mp4", "video/mp4", [Buffer.from([1])]),
+        ),
+        maxUploadBytes: 1,
+        maxMultipartBytes: 2,
+        requiredFileFieldName: "capture",
+        rawBody: measured(2, 2),
+        createStage: async () => staged,
+      }),
+    ).resolves.toMatchObject({ bytes: 1, stage: staged });
+  });
+
   it("rejects missing, repeated, wrong-name, text, and extra parts while aborting staged bytes", async () => {
     for (const supplied of [
       [],

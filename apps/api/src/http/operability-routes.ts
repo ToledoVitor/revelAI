@@ -1,13 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import {
-  HealthResponseSchema,
-  ReadinessResponseSchema,
   RouteErrorMessageByCode,
   RouteErrorRetryabilityByCode,
   RouteErrorSchema,
   RouteErrorStatusByCode,
 } from "@revelai/contracts";
-import { apiRoute, fastifyRoutePath } from "./openapi.js";
+import { apiRoute, registerApiRoute, sendApiRouteResponse } from "./openapi.js";
 
 export type ReadinessProbes = Readonly<{
   database(signal: AbortSignal): Promise<void>;
@@ -34,29 +32,30 @@ export function registerOperabilityRoutes(
     clock?: ReadinessClock;
   }>,
 ): void {
-  app.get(fastifyRoutePath(apiRoute("getHealth")), async (_request, reply) =>
-    reply.code(200).send(HealthResponseSchema.parse({ status: "ok" })),
+  const runtime = new ReadinessRuntime();
+  app.addHook("onClose", async () => runtime.close());
+  const healthRoute = apiRoute("getHealth");
+  const readinessRoute = apiRoute("getReadiness");
+  registerApiRoute(app, healthRoute, async (_request, reply) =>
+    sendApiRouteResponse(reply, healthRoute, 200, { status: "ok" }),
   );
-  app.get(
-    fastifyRoutePath(apiRoute("getReadiness")),
-    async (_request, reply) => {
-      try {
-        const queueAvailable = await runReadinessProbes(input);
-        if (!queueAvailable) throw new Error("queue unavailable");
-        return reply
-          .code(200)
-          .send(ReadinessResponseSchema.parse({ status: "ready" }));
-      } catch {
-        return reply.code(RouteErrorStatusByCode.service_not_ready).send(
-          RouteErrorSchema.parse({
-            code: "service_not_ready",
-            message: RouteErrorMessageByCode.service_not_ready,
-            retryable: RouteErrorRetryabilityByCode.service_not_ready,
-          }),
-        );
-      }
-    },
-  );
+  registerApiRoute(app, readinessRoute, async (_request, reply) => {
+    try {
+      const queueAvailable = await runReadinessProbes(input, runtime);
+      if (!queueAvailable) throw new Error("queue unavailable");
+      return sendApiRouteResponse(reply, readinessRoute, 200, {
+        status: "ready",
+      });
+    } catch {
+      return reply.code(RouteErrorStatusByCode.service_not_ready).send(
+        RouteErrorSchema.parse({
+          code: "service_not_ready",
+          message: RouteErrorMessageByCode.service_not_ready,
+          retryable: RouteErrorRetryabilityByCode.service_not_ready,
+        }),
+      );
+    }
+  });
 }
 
 async function runReadinessProbes(
@@ -65,6 +64,7 @@ async function runReadinessProbes(
     deadlineMs?: number;
     clock?: ReadinessClock;
   }>,
+  runtime: ReadinessRuntime,
 ): Promise<boolean> {
   const clock = input.clock ?? defaultClock;
   const deadlineMs = input.deadlineMs ?? DEFAULT_READINESS_DEADLINE_MS;
@@ -82,18 +82,55 @@ async function runReadinessProbes(
     Promise.resolve().then(() => input.readiness.queue(controller.signal)),
   ];
   const settled = Promise.allSettled(probes);
+  runtime.track(controller, settled);
 
   try {
     const first = await Promise.race([
       settled.then(() => "settled" as const),
       deadline,
     ]);
-    const results = await settled;
     if (first === "deadline") throw new Error("readiness timeout");
+    const results = await settled;
     if (results.some((result) => result.status === "rejected"))
       throw new Error("readiness probe failed");
     return results[2].status === "fulfilled" && results[2].value === true;
   } finally {
     clock.clearTimeout(timeout);
+  }
+}
+
+class ReadinessRuntime {
+  readonly #inFlight = new Set<
+    Readonly<{ controller: AbortController; settled: Promise<void> }>
+  >();
+  #closePromise: Promise<void> | undefined;
+  #closed = false;
+
+  public track(
+    controller: AbortController,
+    settled: Promise<PromiseSettledResult<unknown>[]>,
+  ): void {
+    if (this.#closed) {
+      controller.abort(new Error("readiness runtime closed"));
+      return;
+    }
+    const entry = Object.freeze({
+      controller,
+      settled: settled.then(() => undefined),
+    });
+    this.#inFlight.add(entry);
+    void entry.settled.then(() => this.#inFlight.delete(entry));
+  }
+
+  public close(): Promise<void> {
+    return (this.#closePromise ??= this.closeTrackedProbes());
+  }
+
+  private async closeTrackedProbes(): Promise<void> {
+    this.#closed = true;
+    const inFlight = [...this.#inFlight];
+    for (const entry of inFlight)
+      entry.controller.abort(new Error("readiness runtime closed"));
+    await Promise.all(inFlight.map((entry) => entry.settled));
   }
 }
