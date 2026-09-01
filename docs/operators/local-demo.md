@@ -10,41 +10,58 @@ service.
 ```sh
 corepack enable
 pnpm install --frozen-lockfile
-pnpm --filter @revelai/api run build
+pnpm --filter @revelai/api run demo:smoke
 pnpm --filter @revelai/api run openapi:check
-pnpm --filter @revelai/api exec vitest run src/http/operability-routes.test.ts src/startup.test.ts
+pnpm --filter @revelai/api run operator:receipt-smoke
 ```
 
-The C8/C9 API is intentionally exposed as a composed Fastify application for
-the local host. A local host starts it only after passing the parsed,
-secret-safe environment map through `startConfiguredApi`; the default parsed
-configuration is loopback `127.0.0.1`, SQLite/local storage, in-process queue,
-and demo vision. It needs no Roboflow key, receipt, or network connection.
-`GET /health` answers only process liveness. `GET /ready` concurrently checks
-SQLite `SELECT 1`, an opaque restrictive storage sentinel create/delete, and
-the queue; it is safe to use as the local startup probe.
+Start the executable local-only profile in one terminal. It parses the actual
+environment before binding, defaults to loopback `127.0.0.1:3000`, composes
+SQLite/local storage/an in-process queue, and prints only redacted startup
+messages. It needs no Roboflow key, receipt, or network connection.
 
-Once a local host is listening, its manual demo path is:
+```sh
+pnpm --filter @revelai/api run demo:start
+```
+
+In a second terminal, run this complete verified demo path. It uses only a
+locally generated athlete identifier; replace `./demo.mp4` with a local,
+eligible MP4/MOV/WebM. The local profile validates upload/retention and leaves
+the attempt pending because it does not claim a real provider result.
 
 ```sh
 api_base_url=http://127.0.0.1:3000
 athlete_id=$(node -e 'console.log(crypto.randomUUID())')
 curl --fail-with-body "$api_base_url/health"
 curl --fail-with-body "$api_base_url/ready"
-curl --fail-with-body -H "X-RevelAI-Athlete-Id: $athlete_id" \
+calibration_json=$(curl --fail-with-body -H "X-RevelAI-Athlete-Id: $athlete_id" \
   -H 'content-type: application/json' \
   --data '{"challengeId":"wall-pass","challengeVersion":1}' \
-  "$api_base_url/v1/calibration-sessions"
+  "$api_base_url/v1/calibration-sessions")
+calibration_id=$(node -e 'console.log(JSON.parse(process.argv[1]).id)' "$calibration_json")
+curl --fail-with-body -X POST -H "X-RevelAI-Athlete-Id: $athlete_id" \
+  -H 'content-type: application/json' \
+  --data '{"requiredGates":["device","space","athlete","rehearsal","record"]}' \
+  "$api_base_url/v1/calibration-sessions/$calibration_id/ready"
+attempt_json=$(curl --fail-with-body -H "X-RevelAI-Athlete-Id: $athlete_id" \
+  -H 'content-type: application/json' \
+  --data "{\"mode\":\"verified\",\"challengeId\":\"wall-pass\",\"challengeVersion\":1,\"calibrationSessionId\":\"$calibration_id\"}" \
+  "$api_base_url/v1/attempts")
+attempt_id=$(node -e 'console.log(JSON.parse(process.argv[1]).id)' "$attempt_json")
+curl --fail-with-body -X POST -H "X-RevelAI-Athlete-Id: $athlete_id" \
+  -F 'media=@./demo.mp4;type=video/mp4' \
+  "$api_base_url/v1/attempts/$attempt_id/media"
+curl --fail-with-body -H "X-RevelAI-Athlete-Id: $athlete_id" \
+  "$api_base_url/v1/attempts/$attempt_id/result"
+curl --fail-with-body "$api_base_url/v1/leaderboards/wall-pass?version=1&ruleVersion=wall-pass-v1-score-1"
 ```
 
-Use the returned calibration-session ID only in the next local commands;
-do not paste identities, URLs containing private paths, receipts, headers, or
-media bytes into tickets or logs. Mark the session ready with the five ordered
-gates (`device`, `space`, `athlete`, `rehearsal`, `record`), create a verified
-attempt, upload one `media` multipart field, and poll
-`GET /v1/attempts/:id/result`. Free attempts omit calibration and use the same
-single field. The demo leaderboard starts empty; demo and experimental results
-are never normal ranked entries.
+`GET /health` answers process liveness only. `GET /ready` checks SQLite
+`SELECT 1`, a private restrictive write/delete sentinel, and the queue under
+one bounded deadline. Use returned identifiers only in the next local command;
+do not paste identities, receipt JSON, headers, private paths, or media bytes
+into tickets or logs. The demo leaderboard starts empty; demo and experimental
+results are never normal ranked entries.
 
 ## Real Workflow experiment boundary
 
@@ -75,11 +92,25 @@ Accept: application/json
 The verified Workflow is `revelai-wall-pass-geometry-v1`, returning
 `wall-pass-geometry-v1`; the Free Workflow is `revelai-free-training-v1`,
 returning `free-training-v1`. Both emit parent-image `inference_pixels` on an
-exact 1280×720 letterboxed JPEG. The class map is `athlete`, `ball`,
-`left_foot`, `right_foot`, the eight fixed fiducial-corner labels, and one
-`wallFloorEdge` for the verified Workflow. Source coordinates are recovered
-from the same scale/padding transform; do not send an original path, URL, or
-multipart body to a provider.
+exact 1280×720 letterboxed JPEG. The verified output is one strict envelope:
+
+```text
+outputs[0] = {
+  kind: "wall-pass-geometry-v1",
+  image: { width: 1280, height: 720, coordinateSystem: "inference_pixels" },
+  workflow: { id, version: "1.0.0", modelBundleId, providerVersion },
+  detections: [athlete?, ball?],
+  keypoints: [left_foot, right_foot],
+  fiducials: [a-top-left, a-top-right, a-bottom-right, a-bottom-left,
+              b-top-left, b-top-right, b-bottom-right, b-bottom-left],
+  geometry: { wallFloorEdge: { x1, y1, x2, y2, confidence } }
+}
+```
+
+Each point/edge coordinate is an inference-pixel number in the 1280×720
+parent image and carries confidence. Source coordinates are recovered from the
+same scale/padding transform; do not send an original path, URL, or multipart
+body to a provider.
 
 ## Benchmark receipt and policy activation
 
@@ -92,12 +123,28 @@ pnpm --filter @revelai/api run benchmark:roboflow
 It writes a candidate receipt under
 `${REVELAI_BENCHMARK_RECEIPT_DIR:-var/revelai/operator/benchmark-receipts}`.
 That directory is an operator handoff, never a public route or runtime source
-of truth. Parse and import the candidate with `WorkflowBenchmarkReceiptSchema`;
-SQLite persists its canonical JSON, digest, status, expiry, and invalidation
-audit. A passing receipt is current only until `validUntil`, becomes invalid on
-tuple/manifest changes or operator revocation, and must exactly match the
-workspace/workflow/model/provider/scheduler/sampling/manifest tuple before an
-operator may activate a real competitive policy. Default demo operation never
+of truth. In an access-controlled shell, import a candidate into the same
+configured SQLite database without printing its path, contents, credentials,
+or provider output:
+
+```sh
+export REVELAI_BENCHMARK_RECEIPT_FILE=/secure/operator/receipt.json
+pnpm --filter @revelai/api run operator:receipt-import
+```
+
+The command parses `WorkflowBenchmarkReceiptSchema`, persists canonical JSON,
+digest, status, expiry, and invalidation audit, but does not activate policy.
+After an operator independently verifies a passed/current receipt and the
+workspace/workflow/model/provider/scheduler/sampling/manifest tuple, activate
+that exact stored receipt explicitly:
+
+```sh
+REVELAI_ACTIVATE_COMPETITIVE_POLICY=true \
+  pnpm --filter @revelai/api run operator:receipt-import
+```
+
+A passing receipt is current only until `validUntil` and becomes invalid on
+tuple/manifest changes or operator revocation. Default demo operation never
 reads a receipt or activates policy.
 
 If the five-batch p95 exceeds 900 ms or any batch exceeds 165 seconds, do not

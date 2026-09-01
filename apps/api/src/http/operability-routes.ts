@@ -7,11 +7,12 @@ import {
   RouteErrorSchema,
   RouteErrorStatusByCode,
 } from "@revelai/contracts";
+import { apiRoute, fastifyRoutePath } from "./openapi.js";
 
 export type ReadinessProbes = Readonly<{
-  database(): Promise<void>;
-  storage(): Promise<void>;
-  queue(): Promise<boolean>;
+  database(signal: AbortSignal): Promise<void>;
+  storage(signal: AbortSignal): Promise<void>;
+  queue(signal: AbortSignal): Promise<boolean>;
 }>;
 
 export type ReadinessClock = Readonly<{
@@ -33,26 +34,29 @@ export function registerOperabilityRoutes(
     clock?: ReadinessClock;
   }>,
 ): void {
-  app.get("/health", async (_request, reply) =>
+  app.get(fastifyRoutePath(apiRoute("getHealth")), async (_request, reply) =>
     reply.code(200).send(HealthResponseSchema.parse({ status: "ok" })),
   );
-  app.get("/ready", async (_request, reply) => {
-    try {
-      const queueAvailable = await runReadinessProbes(input);
-      if (!queueAvailable) throw new Error("queue unavailable");
-      return reply
-        .code(200)
-        .send(ReadinessResponseSchema.parse({ status: "ready" }));
-    } catch {
-      return reply.code(RouteErrorStatusByCode.service_not_ready).send(
-        RouteErrorSchema.parse({
-          code: "service_not_ready",
-          message: RouteErrorMessageByCode.service_not_ready,
-          retryable: RouteErrorRetryabilityByCode.service_not_ready,
-        }),
-      );
-    }
-  });
+  app.get(
+    fastifyRoutePath(apiRoute("getReadiness")),
+    async (_request, reply) => {
+      try {
+        const queueAvailable = await runReadinessProbes(input);
+        if (!queueAvailable) throw new Error("queue unavailable");
+        return reply
+          .code(200)
+          .send(ReadinessResponseSchema.parse({ status: "ready" }));
+      } catch {
+        return reply.code(RouteErrorStatusByCode.service_not_ready).send(
+          RouteErrorSchema.parse({
+            code: "service_not_ready",
+            message: RouteErrorMessageByCode.service_not_ready,
+            retryable: RouteErrorRetryabilityByCode.service_not_ready,
+          }),
+        );
+      }
+    },
+  );
 }
 
 async function runReadinessProbes(
@@ -64,22 +68,31 @@ async function runReadinessProbes(
 ): Promise<boolean> {
   const clock = input.clock ?? defaultClock;
   const deadlineMs = input.deadlineMs ?? DEFAULT_READINESS_DEADLINE_MS;
+  const controller = new AbortController();
   let timeout: unknown;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timeout = clock.setTimeout(
-      () => reject(new Error("readiness timeout")),
-      deadlineMs,
-    );
+  const deadline = new Promise<"deadline">((resolve) => {
+    timeout = clock.setTimeout(() => {
+      controller.abort(new Error("readiness timeout"));
+      resolve("deadline");
+    }, deadlineMs);
   });
-  const probes = Promise.all([
-    Promise.resolve().then(() => input.readiness.database()),
-    Promise.resolve().then(() => input.readiness.storage()),
-    Promise.resolve().then(() => input.readiness.queue()),
-  ]);
+  const probes = [
+    Promise.resolve().then(() => input.readiness.database(controller.signal)),
+    Promise.resolve().then(() => input.readiness.storage(controller.signal)),
+    Promise.resolve().then(() => input.readiness.queue(controller.signal)),
+  ];
+  const settled = Promise.allSettled(probes);
 
   try {
-    const results = await Promise.race([probes, deadline]);
-    return results[2] === true;
+    const first = await Promise.race([
+      settled.then(() => "settled" as const),
+      deadline,
+    ]);
+    const results = await settled;
+    if (first === "deadline") throw new Error("readiness timeout");
+    if (results.some((result) => result.status === "rejected"))
+      throw new Error("readiness probe failed");
+    return results[2].status === "fulfilled" && results[2].value === true;
   } finally {
     clock.clearTimeout(timeout);
   }

@@ -73,6 +73,26 @@ describe("LocalMediaStorage", () => {
     expect((await lstat(join(root, "temporary"))).mode & 0o777).toBe(0o700);
   });
 
+  it("honors a cancelled readiness probe without leaving a sentinel behind", async () => {
+    const root = await temporaryRoot(directories);
+    const storage = createLocalMediaStorage({
+      root,
+      ids: { next: () => MEDIA_ID },
+      prober: { probe: async () => probe },
+    });
+    const readiness = resolveLocalMediaStorageReadinessProbe(storage);
+    const controller = new AbortController();
+    controller.abort(new Error("operator deadline"));
+
+    if (!readiness)
+      throw new Error("Expected a factory-issued readiness probe");
+    await expect(readiness.probe(controller.signal)).rejects.toThrow(
+      "operator deadline",
+    );
+    await storage.initialize();
+    expect(await readdir(join(root, "temporary"))).toEqual([]);
+  });
+
   it("writes only an opaque 0600 final after streaming, sniffing, and probing", async () => {
     const root = await temporaryRoot(directories);
     const storage = createLocalMediaStorage({

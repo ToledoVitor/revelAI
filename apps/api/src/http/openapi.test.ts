@@ -6,34 +6,19 @@ import {
   renderOpenApiDocument,
 } from "./openapi.js";
 
-const c8Routes = [
-  ["/health", "get"],
-  ["/ready", "get"],
-  ["/v1/challenges", "get"],
-  ["/v1/calibration-sessions", "post"],
-  ["/v1/calibration-sessions/{id}/ready", "post"],
-  ["/v1/attempts", "get"],
-  ["/v1/attempts", "post"],
-  ["/v1/attempts/{id}", "get"],
-  ["/v1/attempts/{id}", "delete"],
-  ["/v1/attempts/{id}/result", "get"],
-  ["/v1/attempts/{id}/media", "post"],
-  ["/v1/leaderboards/wall-pass", "get"],
-] as const;
-
 describe("generated OpenAPI", () => {
-  it("documents every implemented C8 route exactly once from the shared registry", () => {
+  it("documents every shared C2 route exactly once", () => {
     const document = generateOpenApiDocument();
+    const contractKeys = apiRouteRegistry.map(
+      (route) => `${route.method} ${route.path}`,
+    );
+    const documentKeys = Object.entries(document.paths).flatMap(
+      ([path, pathItem]) =>
+        Object.keys(pathItem).map((method) => `${method} ${path}`),
+    );
 
-    expect(apiRouteRegistry).toHaveLength(c8Routes.length);
-    for (const [path, method] of c8Routes) {
-      expect(document.paths[path]?.[method]).toBeDefined();
-      expect(
-        apiRouteRegistry.filter(
-          (route) => route.path === path && route.method === method,
-        ),
-      ).toHaveLength(1);
-    }
+    expect(new Set(contractKeys).size).toBe(contractKeys.length);
+    expect(documentKeys.sort()).toEqual(contractKeys.sort());
   });
 
   it("keeps the committed artifact synchronized with the shared-schema generator", async () => {
@@ -75,5 +60,42 @@ describe("generated OpenAPI", () => {
     expect(JSON.stringify(document)).not.toMatch(
       /repository|receipt|evidence|media[_-]?key|provider[_-]?payload/i,
     );
+  });
+
+  it("documents C2 query inputs with their literal wire types, optionality, and defaults", () => {
+    const document = generateOpenApiDocument();
+    const attempts = document.paths["/v1/attempts"]?.get as {
+      parameters: Array<Record<string, unknown>>;
+    };
+    const leaderboard = document.paths["/v1/leaderboards/wall-pass"]?.get as {
+      parameters: Array<Record<string, unknown>>;
+    };
+    const parameter = (
+      operation: { parameters: Array<Record<string, unknown>> },
+      name: string,
+    ) => operation.parameters.find((value) => value.name === name);
+
+    expect(parameter(attempts, "limit")).toEqual({
+      name: "limit",
+      in: "query",
+      required: false,
+      schema: { default: 20, type: "integer", minimum: 1, maximum: 50 },
+    });
+    expect(parameter(leaderboard, "version")).toEqual({
+      name: "version",
+      in: "query",
+      required: true,
+      schema: { type: "string", const: "1" },
+    });
+    expect(parameter(leaderboard, "limit")).toEqual({
+      name: "limit",
+      in: "query",
+      required: false,
+      schema: {
+        type: "string",
+        pattern: "^(?:[1-9]|[1-4][0-9]|50)$",
+        default: "20",
+      },
+    });
   });
 });

@@ -25,6 +25,16 @@ describe("parseApiEnv", () => {
     ).toThrow("Unrecognized key");
   });
 
+  it("accepts the real process environment while rejecting unknown app-prefixed settings", () => {
+    expect(() => parseApiEnv(process.env)).not.toThrow();
+    expect(() =>
+      parseApiEnv({
+        ...process.env,
+        ROBOFLOW_UNEXPECTED_SETTING: "enabled",
+      }),
+    ).toThrow("Unrecognized key");
+  });
+
   it("normalizes local storage and database locations before composition", () => {
     expect(
       parseApiEnv({
@@ -77,6 +87,21 @@ describe("parseApiEnv", () => {
       parseApiEnv({
         ROBOFLOW_API_KEY: "test-key",
         ROBOFLOW_API_URL: "http://inference.example.test",
+        ROBOFLOW_WORKSPACE_ID: "workspace",
+        ROBOFLOW_WORKFLOW_VERSION: "1.0.0",
+        ROBOFLOW_WALL_PASS_WORKFLOW_ID: "revelai-wall-pass-geometry-v1",
+        ROBOFLOW_WALL_PASS_MODEL_BUNDLE_ID: "wall-pass-bundle-v1",
+        ROBOFLOW_FREE_WORKFLOW_ID: "revelai-free-training-v1",
+        ROBOFLOW_FREE_MODEL_BUNDLE_ID: "free-training-bundle-v1",
+      }),
+    ).toThrow("HTTPS");
+  });
+
+  it("rejects a key-bearing loopback HTTP provider URL", () => {
+    expect(() =>
+      parseApiEnv({
+        ROBOFLOW_API_KEY: "test-key",
+        ROBOFLOW_API_URL: "http://127.0.0.1:9001",
         ROBOFLOW_WORKSPACE_ID: "workspace",
         ROBOFLOW_WORKFLOW_VERSION: "1.0.0",
         ROBOFLOW_WALL_PASS_WORKFLOW_ID: "revelai-wall-pass-geometry-v1",

@@ -100,25 +100,28 @@ describe("operability routes", () => {
         probeStarted = resolve;
       });
       const calls: string[] = [];
-      const waitForever = async (): Promise<void> => {
+      const waitForever = async (signal: AbortSignal): Promise<void> => {
         probeStarted?.();
-        await new Promise<void>(() => undefined);
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        throw signal.reason;
       };
       const app = Fastify();
       apps.push(app);
       registerOperabilityRoutes(app, {
         readiness: {
-          database: async () => {
+          database: async (signal) => {
             calls.push("database");
-            if (timedOutProbe === "database") await waitForever();
+            if (timedOutProbe === "database") await waitForever(signal);
           },
-          storage: async () => {
+          storage: async (signal) => {
             calls.push("storage");
-            if (timedOutProbe === "storage") await waitForever();
+            if (timedOutProbe === "storage") await waitForever(signal);
           },
-          queue: async () => {
+          queue: async (signal) => {
             calls.push("queue");
-            if (timedOutProbe === "queue") await waitForever();
+            if (timedOutProbe === "queue") await waitForever(signal);
             return true;
           },
         },
@@ -144,6 +147,72 @@ describe("operability routes", () => {
       );
     },
   );
+
+  it("aborts and drains every in-flight probe before returning a timed-out readiness response", async () => {
+    let expire: (() => void) | undefined;
+    const events: string[] = [];
+    let resolveStarted: (() => void) | undefined;
+    const allStarted = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    let starts = 0;
+    const waitForAbort =
+      (name: string) =>
+      async (signal: AbortSignal): Promise<void> => {
+        events.push(`${name}:start`);
+        starts += 1;
+        if (starts === 3) resolveStarted?.();
+        await new Promise<void>((resolve) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              events.push(`${name}:abort`);
+              resolve();
+            },
+            { once: true },
+          );
+        });
+        events.push(`${name}:settled`);
+      };
+    const app = Fastify();
+    apps.push(app);
+    registerOperabilityRoutes(app, {
+      readiness: {
+        database: waitForAbort("database"),
+        storage: waitForAbort("storage"),
+        queue: async (signal: AbortSignal) => {
+          await waitForAbort("queue")(signal);
+          return true;
+        },
+      } as never,
+      deadlineMs: 10,
+      clock: {
+        setTimeout: (callback) => {
+          expire = callback;
+          return callback;
+        },
+        clearTimeout: () => undefined,
+      },
+    });
+
+    const responsePromise = app.inject({ method: "GET", url: "/ready" });
+    await allStarted;
+    expire?.();
+    const response = await responsePromise;
+
+    expect(response.statusCode).toBe(503);
+    expect(events).toEqual([
+      "database:start",
+      "storage:start",
+      "queue:start",
+      "database:abort",
+      "storage:abort",
+      "queue:abort",
+      "database:settled",
+      "storage:settled",
+      "queue:settled",
+    ]);
+  });
 
   it("returns one safe error when multiple readiness dependencies fail", async () => {
     const app = Fastify();

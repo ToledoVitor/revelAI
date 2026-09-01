@@ -60,6 +60,11 @@ import {
   registerOperabilityRoutes,
   type ReadinessProbes,
 } from "./operability-routes.js";
+import {
+  apiRoute,
+  fastifyRoutePath,
+  type ApiRouteContract,
+} from "./openapi.js";
 
 type AttemptHttpRepository = AttemptRepository &
   MediaAttachmentRecoveryRepository &
@@ -89,7 +94,17 @@ type AttemptApiInput = Readonly<{
 const RECOVERY_BATCH_LIMIT = 100;
 const HOUR_MILLISECONDS = 60 * 60 * 1_000;
 const LEADERBOARD_NAMESPACE_PATH = "/v1/leaderboards";
-const LIVE_LEADERBOARD_PATH = "/v1/leaderboards/wall-pass";
+const LIVE_LEADERBOARD_PATH = apiRoute("getWallPassLeaderboard").path;
+const challengeRoute = apiRoute("listChallenges");
+const leaderboardRoute = apiRoute("getWallPassLeaderboard");
+const createCalibrationRoute = apiRoute("createCalibrationSession");
+const readyCalibrationRoute = apiRoute("readyCalibrationSession");
+const createAttemptRoute = apiRoute("createAttempt");
+const deleteAttemptRoute = apiRoute("deleteAttempt");
+const listAttemptsRoute = apiRoute("listAttempts");
+const getAttemptResultRoute = apiRoute("getAttemptResult");
+const getAttemptRoute = apiRoute("getAttempt");
+const uploadAttemptMediaRoute = apiRoute("uploadAttemptMedia");
 const silentRecoveryLog: MediaAttachmentRecoveryLog = Object.freeze({
   event: () => undefined,
 });
@@ -200,37 +215,50 @@ function createAttemptApiInternal(
       attemptId: (request) =>
         parseRequest(AttemptIdPathParamsSchema, request.params).id,
       sendAccepted: (reply, value) =>
-        sendResponse(reply, 202, MediaUploadAcceptedSchema, value),
+        sendResponse(
+          reply,
+          uploadAttemptMediaRoute,
+          202,
+          MediaUploadAcceptedSchema,
+          value,
+        ),
     });
     if (mediaUpload)
       registerAttemptMediaUploadPlugin(app, {
         mediaUpload,
+        route: uploadAttemptMediaRoute,
         ...mediaRegistration,
       });
 
-    app.get("/v1/challenges", async (request, reply) => {
+    app.get(fastifyRoutePath(challengeRoute), async (request, reply) => {
       assertNoQuery(request.query);
-      return sendResponse(reply, 200, ChallengeListResponseSchema, {
-        items: [
-          {
-            id: "wall-pass",
-            version: 1,
-            sport: "futsal",
-            activeDurationSeconds: 60,
-            calibrationPreRollSeconds: 4,
-            requiredGates: [
-              "device",
-              "space",
-              "athlete",
-              "rehearsal",
-              "record",
-            ],
-          },
-        ],
-      });
+      return sendResponse(
+        reply,
+        challengeRoute,
+        200,
+        ChallengeListResponseSchema,
+        {
+          items: [
+            {
+              id: "wall-pass",
+              version: 1,
+              sport: "futsal",
+              activeDurationSeconds: 60,
+              calibrationPreRollSeconds: 4,
+              requiredGates: [
+                "device",
+                "space",
+                "athlete",
+                "rehearsal",
+                "record",
+              ],
+            },
+          ],
+        },
+      );
     });
 
-    app.get(LIVE_LEADERBOARD_PATH, async (request, reply) => {
+    app.get(fastifyRoutePath(leaderboardRoute), async (request, reply) => {
       if (!hasExactPublicPath(request, LIVE_LEADERBOARD_PATH))
         throw new AttemptRouteError("invalid_request");
       const query = parseRequest(LeaderboardQuerySchema, request.query);
@@ -243,54 +271,72 @@ function createAttemptApiInternal(
         limit: query.limit,
         ...(query.cursor ? { cursor: query.cursor } : {}),
       });
-      return sendResponse(reply, 200, LeaderboardResponseSchema, {
-        view: "live",
-        challengeId: "wall-pass",
-        challengeVersion: query.version,
-        ruleVersion: query.ruleVersion,
-        calculatedAt: page.calculatedAt,
-        cohortSize: page.cohortSize,
-        entries: page.entries,
-        nextCursor: page.nextCursor,
-      });
+      return sendResponse(
+        reply,
+        leaderboardRoute,
+        200,
+        LeaderboardResponseSchema,
+        {
+          view: "live",
+          challengeId: "wall-pass",
+          challengeVersion: query.version,
+          ruleVersion: query.ruleVersion,
+          calculatedAt: page.calculatedAt,
+          cohortSize: page.cohortSize,
+          entries: page.entries,
+          nextCursor: page.nextCursor,
+        },
+      );
     });
 
-    app.post("/v1/calibration-sessions", async (request, reply) => {
-      const body = parseRequest(
-        CalibrationSessionCreateInputSchema,
-        request.body,
-      );
-      const athleteId = requiredAthleteId(athleteIds, request);
-      const sessionId = requiredGeneratedUuid(ids.next());
-      const sessionNonce = requiredGeneratedNonce(nonce());
-      const session = await input.repository.issueCalibrationSession({
-        id: sessionId,
-        athleteId,
-        nonce: sessionNonce,
-        challengeId: body.challengeId,
-        challengeVersion: body.challengeVersion,
-      });
-      return sendResponse(reply, 201, CalibrationSessionSchema, session);
-    });
+    app.post(
+      fastifyRoutePath(createCalibrationRoute),
+      async (request, reply) => {
+        const body = parseRequest(
+          CalibrationSessionCreateInputSchema,
+          request.body,
+        );
+        const athleteId = requiredAthleteId(athleteIds, request);
+        const sessionId = requiredGeneratedUuid(ids.next());
+        const sessionNonce = requiredGeneratedNonce(nonce());
+        const session = await input.repository.issueCalibrationSession({
+          id: sessionId,
+          athleteId,
+          nonce: sessionNonce,
+          challengeId: body.challengeId,
+          challengeVersion: body.challengeVersion,
+        });
+        return sendResponse(
+          reply,
+          createCalibrationRoute,
+          201,
+          CalibrationSessionSchema,
+          session,
+        );
+      },
+    );
 
-    app.post("/v1/calibration-sessions/:id/ready", async (request, reply) => {
-      const params = parseRequest(
-        CalibrationSessionIdPathParamsSchema,
-        request.params,
-      );
-      const body = parseRequest(
-        CalibrationSessionReadyInputSchema,
-        request.body,
-      );
-      await input.repository.readyCalibrationSession({
-        id: params.id,
-        athleteId: requiredAthleteId(athleteIds, request),
-        requiredGates: body.requiredGates,
-      });
-      return reply.code(204).send();
-    });
+    app.post(
+      fastifyRoutePath(readyCalibrationRoute),
+      async (request, reply) => {
+        const params = parseRequest(
+          CalibrationSessionIdPathParamsSchema,
+          request.params,
+        );
+        const body = parseRequest(
+          CalibrationSessionReadyInputSchema,
+          request.body,
+        );
+        await input.repository.readyCalibrationSession({
+          id: params.id,
+          athleteId: requiredAthleteId(athleteIds, request),
+          requiredGates: body.requiredGates,
+        });
+        return reply.code(204).send();
+      },
+    );
 
-    app.post("/v1/attempts", async (request, reply) => {
+    app.post(fastifyRoutePath(createAttemptRoute), async (request, reply) => {
       const body = parseRequest(CreateAttemptInputSchema, request.body);
       const attemptId = requiredGeneratedUuid(ids.next());
       const attempt = await input.repository.createAttempt({
@@ -300,36 +346,49 @@ function createAttemptApiInternal(
       });
       return sendResponse(
         reply,
+        createAttemptRoute,
         201,
         CreateAttemptResponseSchema,
         projectAttempt(attempt),
       );
     });
 
-    app.delete("/v1/attempts/:id", async (request, reply) => {
+    app.delete(fastifyRoutePath(deleteAttemptRoute), async (request, reply) => {
       assertNoQuery(request.query);
       assertNoBody(request.body);
       await tombstoneAttempt({
         attemptId: requiredCanonicalAttemptId(request),
         athleteId: requiredAthleteId(athleteIds, request),
       });
-      return sendResponse(reply, 204, DeleteAttemptResponseSchema, undefined);
+      return sendResponse(
+        reply,
+        deleteAttemptRoute,
+        204,
+        DeleteAttemptResponseSchema,
+        undefined,
+      );
     });
 
-    app.get("/v1/attempts", async (request, reply) => {
+    app.get(fastifyRoutePath(listAttemptsRoute), async (request, reply) => {
       const query = parseRequest(AttemptListQuerySchema, request.query);
       const page = await input.repository.listAttempts({
         athleteId: requiredAthleteId(athleteIds, request),
         limit: query.limit,
         ...(query.cursor ? { cursor: query.cursor } : {}),
       });
-      return sendResponse(reply, 200, AttemptListResponseSchema, {
-        items: page.items.map(projectAttempt),
-        nextCursor: page.nextCursor,
-      });
+      return sendResponse(
+        reply,
+        listAttemptsRoute,
+        200,
+        AttemptListResponseSchema,
+        {
+          items: page.items.map(projectAttempt),
+          nextCursor: page.nextCursor,
+        },
+      );
     });
 
-    app.get("/v1/attempts/:id/result", async (request, reply) => {
+    app.get(fastifyRoutePath(getAttemptResultRoute), async (request, reply) => {
       assertNoQuery(request.query);
       const outcome = await attemptRead.result({
         attemptId: requiredCanonicalAttemptId(request),
@@ -338,20 +397,27 @@ function createAttemptApiInternal(
       if (!outcome) throw new AttemptRouteError("attempt_not_found");
       return sendResponse(
         reply,
+        getAttemptResultRoute,
         outcome.state === "pending" ? 202 : 200,
         AttemptResultResponseSchema,
         outcome,
       );
     });
 
-    app.get("/v1/attempts/:id", async (request, reply) => {
+    app.get(fastifyRoutePath(getAttemptRoute), async (request, reply) => {
       assertNoQuery(request.query);
       const attempt = await attemptRead.read({
         attemptId: requiredCanonicalAttemptId(request),
         athleteId: requiredAthleteId(athleteIds, request),
       });
       if (!attempt) throw new AttemptRouteError("attempt_not_found");
-      return sendResponse(reply, 200, AttemptReadResponseSchema, attempt);
+      return sendResponse(
+        reply,
+        getAttemptRoute,
+        200,
+        AttemptReadResponseSchema,
+        attempt,
+      );
     });
 
     app.setNotFoundHandler((_request, reply) =>
@@ -433,11 +499,28 @@ function assertNoBody(body: unknown): void {
 
 function sendResponse<Output>(
   reply: FastifyReply,
+  route: ApiRouteContract,
   statusCode: number,
   schema: Readonly<{ parse(value: unknown): Output }>,
   value: unknown,
 ): Output {
   try {
+    if (
+      !route.responses.some(
+        (definition) =>
+          definition.status === statusCode && definition.schema === schema,
+      ) &&
+      !(
+        statusCode === 204 &&
+        route.responses.some(
+          (definition) =>
+            definition.status === statusCode && definition.schema === undefined,
+        )
+      )
+    )
+      throw new Error(
+        "C2 route response is not declared by its shared contract.",
+      );
     return reply.code(statusCode).send(schema.parse(value)) as Output;
   } catch {
     throw new AttemptRouteError("service_not_ready");

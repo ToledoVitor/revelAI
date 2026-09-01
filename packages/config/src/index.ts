@@ -38,6 +38,25 @@ const requiredRoboflowVariableNames = [
   "ROBOFLOW_FREE_MODEL_BUNDLE_ID",
 ] as const;
 
+const knownApiEnvironmentNames = new Set([
+  "NODE_ENV",
+  "HOST",
+  "PORT",
+  "PUBLIC_BASE_URL",
+  "DATA_DIR",
+  "MEDIA_DIR",
+  "DATABASE_PATH",
+  "ALLOW_UNAUTHENTICATED_PUBLIC",
+  "ROBOFLOW_API_KEY",
+  "ROBOFLOW_API_URL",
+  "ROBOFLOW_WORKSPACE_ID",
+  "ROBOFLOW_WORKFLOW_VERSION",
+  "ROBOFLOW_WALL_PASS_WORKFLOW_ID",
+  "ROBOFLOW_WALL_PASS_MODEL_BUNDLE_ID",
+  "ROBOFLOW_FREE_WORKFLOW_ID",
+  "ROBOFLOW_FREE_MODEL_BUNDLE_ID",
+]);
+
 const publicBindWarning: ApiStartupWarning = {
   id: "unauthenticated_mvp_public_bind",
   message:
@@ -184,8 +203,11 @@ function parseVisionProvider(
 
   const apiUrl = parseHttpUrl(apiUrlValue, "ROBOFLOW_API_URL");
 
-  if (apiUrl.protocol !== "https:" && !isLoopbackHost(apiUrl.hostname)) {
-    throw new Error("A key-bearing external provider URL must use HTTPS");
+  if (
+    apiUrl.protocol !== "https:" &&
+    (apiKey !== undefined || !isLoopbackHost(apiUrl.hostname))
+  ) {
+    throw new Error("A key-bearing or external provider URL must use HTTPS");
   }
 
   return {
@@ -206,7 +228,7 @@ function parseVisionProvider(
 }
 
 export function parseApiEnv(source: ApiEnvInput): ApiEnv {
-  const input = apiEnvInputSchema.parse(source);
+  const input = apiEnvInputSchema.parse(projectApiEnv(source));
   const publicBaseUrl = parseHttpUrl(
     input.PUBLIC_BASE_URL ??
       `http://${formatHostForUrl(input.HOST)}:${input.PORT}`,
@@ -243,4 +265,17 @@ export function parseApiEnv(source: ApiEnvInput): ApiEnv {
     visionProvider: parseVisionProvider(input),
     startupWarnings: isPublicBind ? [publicBindWarning] : [],
   };
+}
+
+function projectApiEnv(source: ApiEnvInput): ApiEnvInput {
+  const projected: Record<string, string | undefined> = {};
+  for (const [name, value] of Object.entries(source)) {
+    if (knownApiEnvironmentNames.has(name)) {
+      projected[name] = value;
+      continue;
+    }
+    if (name.startsWith("REVELAI_") || name.startsWith("ROBOFLOW_"))
+      throw new Error(`Unrecognized key: ${name}`);
+  }
+  return projected;
 }

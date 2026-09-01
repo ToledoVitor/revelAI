@@ -26,7 +26,14 @@ type ResponseDefinition = Readonly<{
   status: number;
   schema?: ZodType;
 }>;
-type RouteDefinition = Readonly<{
+export type MultipartWireContract = Readonly<{
+  contentType: "multipart/form-data";
+  required: readonly string[];
+  properties: Readonly<
+    Record<string, Readonly<{ type: "string"; format: "binary" }>>
+  >;
+}>;
+export type ApiRouteContract = Readonly<{
   method: HttpMethod;
   path: string;
   operationId: string;
@@ -34,8 +41,9 @@ type RouteDefinition = Readonly<{
   authenticated?: boolean;
   pathParams?: ZodType;
   query?: ZodType;
+  queryDefaults?: Readonly<Record<string, unknown>>;
   requestBody?: ZodType;
-  multipart?: boolean;
+  multipart?: MultipartWireContract;
   responses: readonly ResponseDefinition[];
 }>;
 export type OpenApiDocument = Readonly<{
@@ -54,7 +62,15 @@ const routeError = (status: number): ResponseDefinition =>
  * The C8 HTTP surface is described only by its route mapping and C2 Zod
  * schemas. The generated artifact never redefines a request or response body.
  */
-export const apiRouteRegistry: readonly RouteDefinition[] = Object.freeze([
+const oneMediaMultipartWire: MultipartWireContract = Object.freeze({
+  contentType: "multipart/form-data",
+  required: Object.freeze(["media"]),
+  properties: Object.freeze({
+    media: Object.freeze({ type: "string", format: "binary" }),
+  }),
+});
+
+export const apiRouteRegistry: readonly ApiRouteContract[] = Object.freeze([
   {
     method: "get",
     path: "/health",
@@ -74,7 +90,11 @@ export const apiRouteRegistry: readonly RouteDefinition[] = Object.freeze([
     path: "/v1/challenges",
     operationId: "listChallenges",
     summary: "List active challenges",
-    responses: [response(200, ChallengeListResponseSchema), routeError(400)],
+    responses: [
+      response(200, ChallengeListResponseSchema),
+      routeError(400),
+      routeError(503),
+    ],
   },
   {
     method: "post",
@@ -83,7 +103,11 @@ export const apiRouteRegistry: readonly RouteDefinition[] = Object.freeze([
     summary: "Issue a calibration session",
     authenticated: true,
     requestBody: CalibrationSessionCreateInputSchema,
-    responses: [response(201, CalibrationSessionSchema), routeError(400)],
+    responses: [
+      response(201, CalibrationSessionSchema),
+      routeError(400),
+      routeError(503),
+    ],
   },
   {
     method: "post",
@@ -99,6 +123,7 @@ export const apiRouteRegistry: readonly RouteDefinition[] = Object.freeze([
       routeError(404),
       routeError(409),
       routeError(410),
+      routeError(503),
     ],
   },
   {
@@ -108,7 +133,11 @@ export const apiRouteRegistry: readonly RouteDefinition[] = Object.freeze([
     summary: "List attempts for the local athlete",
     authenticated: true,
     query: AttemptListQuerySchema,
-    responses: [response(200, AttemptListResponseSchema), routeError(400)],
+    responses: [
+      response(200, AttemptListResponseSchema),
+      routeError(400),
+      routeError(503),
+    ],
   },
   {
     method: "post",
@@ -123,6 +152,7 @@ export const apiRouteRegistry: readonly RouteDefinition[] = Object.freeze([
       routeError(404),
       routeError(409),
       routeError(410),
+      routeError(503),
     ],
   },
   {
@@ -136,6 +166,7 @@ export const apiRouteRegistry: readonly RouteDefinition[] = Object.freeze([
       response(200, AttemptReadResponseSchema),
       routeError(400),
       routeError(404),
+      routeError(503),
     ],
   },
   {
@@ -145,7 +176,12 @@ export const apiRouteRegistry: readonly RouteDefinition[] = Object.freeze([
     summary: "Delete an attempt",
     authenticated: true,
     pathParams: AttemptIdPathParamsSchema,
-    responses: [response(204), routeError(400), routeError(404)],
+    responses: [
+      response(204),
+      routeError(400),
+      routeError(404),
+      routeError(503),
+    ],
   },
   {
     method: "get",
@@ -159,6 +195,7 @@ export const apiRouteRegistry: readonly RouteDefinition[] = Object.freeze([
       response(202, AttemptResultResponseSchema),
       routeError(400),
       routeError(404),
+      routeError(503),
     ],
   },
   {
@@ -168,7 +205,7 @@ export const apiRouteRegistry: readonly RouteDefinition[] = Object.freeze([
     summary: "Upload exactly one media part",
     authenticated: true,
     pathParams: AttemptIdPathParamsSchema,
-    multipart: true,
+    multipart: oneMediaMultipartWire,
     responses: [
       response(202, MediaUploadAcceptedSchema),
       routeError(400),
@@ -186,9 +223,26 @@ export const apiRouteRegistry: readonly RouteDefinition[] = Object.freeze([
     operationId: "getWallPassLeaderboard",
     summary: "Read the live wall-pass leaderboard",
     query: LeaderboardQuerySchema,
-    responses: [response(200, LeaderboardResponseSchema), routeError(400)],
+    queryDefaults: Object.freeze({ limit: "20" }),
+    responses: [
+      response(200, LeaderboardResponseSchema),
+      routeError(400),
+      routeError(503),
+    ],
   },
 ]);
+
+export function apiRoute(operationId: string): ApiRouteContract {
+  const route = apiRouteRegistry.find(
+    (candidate) => candidate.operationId === operationId,
+  );
+  if (!route) throw new Error(`Unknown C2 route contract: ${operationId}`);
+  return route;
+}
+
+export function fastifyRoutePath(route: ApiRouteContract): string {
+  return route.path.replace(/\{([^}]+)\}/g, ":$1");
+}
 
 const schemaComponents = new Map<ZodType, string>([
   [AthleteIdentityHeaderSchema, "AthleteIdentityHeader"],
@@ -245,7 +299,7 @@ export function renderOpenApiDocument(): string {
   return `${JSON.stringify(generateOpenApiDocument(), null, 2)}\n`;
 }
 
-function operation(route: RouteDefinition): Record<string, unknown> {
+function operation(route: ApiRouteContract): Record<string, unknown> {
   return {
     operationId: route.operationId,
     summary: route.summary,
@@ -255,19 +309,21 @@ function operation(route: RouteDefinition): Record<string, unknown> {
           parameters: [
             athleteIdentityParameter(),
             ...schemaParameters(route.pathParams, "path"),
-            ...schemaParameters(route.query, "query"),
+            ...schemaParameters(route.query, "query", route.queryDefaults),
           ],
         }
       : {
           parameters: [
             ...schemaParameters(route.pathParams, "path"),
-            ...schemaParameters(route.query, "query"),
+            ...schemaParameters(route.query, "query", route.queryDefaults),
           ],
         }),
     ...(route.requestBody
       ? { requestBody: jsonRequestBody(route.requestBody) }
       : {}),
-    ...(route.multipart ? { requestBody: multipartRequestBody() } : {}),
+    ...(route.multipart
+      ? { requestBody: multipartRequestBody(route.multipart) }
+      : {}),
     responses: Object.fromEntries(
       route.responses.map((definition) => [
         String(definition.status),
@@ -287,7 +343,7 @@ function operation(route: RouteDefinition): Record<string, unknown> {
 }
 
 function athleteIdentityParameter(): Record<string, unknown> {
-  const schema = jsonSchema(AthleteIdentityHeaderSchema) as {
+  const schema = inputJsonSchema(AthleteIdentityHeaderSchema) as {
     properties?: Record<string, unknown>;
   };
   return {
@@ -301,9 +357,10 @@ function athleteIdentityParameter(): Record<string, unknown> {
 function schemaParameters(
   schema: ZodType | undefined,
   location: "path" | "query",
+  defaults: Readonly<Record<string, unknown>> = {},
 ): Record<string, unknown>[] {
   if (!schema) return [];
-  const converted = jsonSchema(schema) as {
+  const converted = inputJsonSchema(schema) as {
     properties?: Record<string, unknown>;
     required?: string[];
   };
@@ -312,7 +369,10 @@ function schemaParameters(
     in: location,
     required:
       location === "path" || converted.required?.includes(name) === true,
-    schema: value,
+    schema:
+      location === "query" && Object.hasOwn(defaults, name)
+        ? { ...(value as Record<string, unknown>), default: defaults[name] }
+        : value,
   }));
 }
 
@@ -323,16 +383,18 @@ function jsonRequestBody(schema: ZodType): Record<string, unknown> {
   };
 }
 
-function multipartRequestBody(): Record<string, unknown> {
+function multipartRequestBody(
+  multipart: MultipartWireContract,
+): Record<string, unknown> {
   return {
     required: true,
     content: {
-      "multipart/form-data": {
+      [multipart.contentType]: {
         schema: {
           type: "object",
           additionalProperties: false,
-          required: ["media"],
-          properties: { media: { type: "string", format: "binary" } },
+          required: multipart.required,
+          properties: multipart.properties,
         },
       },
     },
@@ -347,4 +409,8 @@ function schemaReference(schema: ZodType): Record<string, string> {
 
 function jsonSchema(schema: ZodType): Record<string, unknown> {
   return z.toJSONSchema(schema, { unrepresentable: "any" });
+}
+
+function inputJsonSchema(schema: ZodType): Record<string, unknown> {
+  return z.toJSONSchema(schema, { io: "input", unrepresentable: "any" });
 }

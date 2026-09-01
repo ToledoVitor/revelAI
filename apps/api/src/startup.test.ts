@@ -53,7 +53,7 @@ describe("configured API startup", () => {
 
     await started.close();
 
-    expect(events).toEqual(["listen", "worker", "storage", "server"]);
+    expect(events).toEqual(["listen", "server", "worker", "storage"]);
     expect(warnings).toEqual([
       {
         id: "unauthenticated_mvp_public_bind",
@@ -62,5 +62,81 @@ describe("configured API startup", () => {
       },
     ]);
     expect(JSON.stringify(warnings)).not.toMatch(/0\.0\.0\.0|key|path/i);
+  });
+
+  it("rejects a public bind without a persistent warning sink before listening", async () => {
+    let listens = 0;
+
+    await expect(
+      startConfiguredApi({
+        environment: {
+          HOST: "0.0.0.0",
+          ALLOW_UNAUTHENTICATED_PUBLIC: "true",
+        },
+        server: {
+          listen: async () => {
+            listens += 1;
+          },
+          close: async () => undefined,
+        },
+      }),
+    ).rejects.toThrow("warning sink");
+
+    expect(listens).toBe(0);
+  });
+
+  it("rolls back the server and every owned resource when listening fails", async () => {
+    const events: string[] = [];
+
+    await expect(
+      startConfiguredApi({
+        environment: {},
+        server: {
+          listen: async () => {
+            events.push("listen");
+            throw new Error("bind failed");
+          },
+          close: async () => {
+            events.push("server");
+          },
+        },
+        resources: [
+          { close: async () => void events.push("worker") },
+          { close: async () => void events.push("storage") },
+        ],
+      }),
+    ).rejects.toThrow("bind failed");
+
+    expect(events).toEqual(["listen", "server", "worker", "storage"]);
+  });
+
+  it("drains admission before resources, attempts every close, and closes once", async () => {
+    const events: string[] = [];
+    const started = await startConfiguredApi({
+      environment: {},
+      server: {
+        listen: async () => void events.push("listen"),
+        close: async () => void events.push("server"),
+      },
+      resources: [
+        {
+          close: async () => {
+            events.push("worker");
+            throw new Error("worker close failed");
+          },
+        },
+        {
+          close: async () => {
+            events.push("storage");
+            throw new Error("storage close failed");
+          },
+        },
+      ],
+    });
+
+    await expect(started.close()).rejects.toBeInstanceOf(AggregateError);
+    await expect(started.close()).rejects.toBeInstanceOf(AggregateError);
+
+    expect(events).toEqual(["listen", "server", "worker", "storage"]);
   });
 });

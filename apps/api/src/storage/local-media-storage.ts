@@ -29,11 +29,11 @@ export interface OpaqueMediaIdGenerator {
 const localMediaStorageCapabilities = new WeakSet<object>();
 const localMediaStorageReadinessProbes = new WeakMap<
   object,
-  () => Promise<void>
+  (signal?: AbortSignal) => Promise<void>
 >();
 
 export type LocalMediaStorageReadinessProbe = Readonly<{
-  probe(): Promise<void>;
+  probe(signal?: AbortSignal): Promise<void>;
 }>;
 
 export type LocalMediaStorage = Readonly<{
@@ -234,8 +234,10 @@ class LocalMediaStorageImplementation {
     }
   }
 
-  public async probeReadiness(): Promise<void> {
+  public async probeReadiness(signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
     await this.initialize();
+    throwIfAborted(signal);
     const sentinel = this.safePath(this.temporary, randomUUID());
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     let failure: unknown;
@@ -249,6 +251,9 @@ class LocalMediaStorageImplementation {
         0o600,
       );
       await handle.chmod(0o600);
+      throwIfAborted(signal);
+      await handle.writeFile(Uint8Array.of(0), { signal });
+      throwIfAborted(signal);
     } catch (error) {
       failure = error;
     } finally {
@@ -640,4 +645,9 @@ function isNotFound(error: unknown): boolean {
     "code" in error &&
     error.code === "ENOENT"
   );
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted)
+    throw signal.reason ?? new Error("storage probe aborted");
 }

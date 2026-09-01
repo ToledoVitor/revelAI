@@ -78,6 +78,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "HTTP 503",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            }
           }
         }
       }
@@ -126,6 +136,16 @@
           },
           "400": {
             "description": "HTTP 400",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "HTTP 503",
             "content": {
               "application/json": {
                 "schema": {
@@ -220,6 +240,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "HTTP 503",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            }
           }
         }
       }
@@ -247,7 +277,7 @@
           {
             "name": "limit",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "default": 20,
               "type": "integer",
@@ -278,6 +308,16 @@
           },
           "400": {
             "description": "HTTP 400",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "HTTP 503",
             "content": {
               "application/json": {
                 "schema": {
@@ -368,6 +408,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "HTTP 503",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            }
           }
         }
       }
@@ -432,6 +482,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "HTTP 503",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            }
           }
         }
       },
@@ -480,6 +540,16 @@
           },
           "404": {
             "description": "HTTP 404",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "HTTP 503",
             "content": {
               "application/json": {
                 "schema": {
@@ -554,6 +624,16 @@
           },
           "404": {
             "description": "HTTP 404",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "HTTP 503",
             "content": {
               "application/json": {
                 "schema": {
@@ -708,7 +788,10 @@
             "name": "version",
             "in": "query",
             "required": true,
-            "schema": {}
+            "schema": {
+              "type": "string",
+              "const": "1"
+            }
           },
           {
             "name": "ruleVersion",
@@ -722,8 +805,12 @@
           {
             "name": "limit",
             "in": "query",
-            "required": true,
-            "schema": {}
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(?:[1-9]|[1-4][0-9]|50)$",
+              "default": "20"
+            }
           },
           {
             "name": "cursor",
@@ -748,6 +835,16 @@
           },
           "400": {
             "description": "HTTP 400",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "HTTP 503",
             "content": {
               "application/json": {
                 "schema": {

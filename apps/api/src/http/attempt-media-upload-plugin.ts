@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { MediaUploadContext } from "../repositories/attempt-repository.js";
 import type { MediaUploadService } from "../services/media-upload-service.js";
+import { fastifyRoutePath, type ApiRouteContract } from "./openapi.js";
 import {
   createStreamingMultipartIntake,
   drainMediaUploadRequest,
@@ -18,6 +19,7 @@ export function registerAttemptMediaUploadPlugin(
   input: Readonly<{
     /** Internal application-composition seam, never an adapter capability. */
     mediaUpload: MediaUploadService;
+    route: ApiRouteContract;
     maxUploadBytes: number;
     maxMultipartBytes: number;
     requiredAthleteId(request: FastifyRequest): string;
@@ -26,6 +28,9 @@ export function registerAttemptMediaUploadPlugin(
   }>,
 ): void {
   const mediaUpload = input.mediaUpload;
+  const route = input.route;
+  if (!route.multipart)
+    throw new Error("C2 media upload route requires multipart wire contract.");
   app.register((mediaApp, _options, done) => {
     const mediaUploads = new WeakMap<FastifyRequest, MediaUploadContext>();
     mediaApp.addContentTypeParser(
@@ -37,7 +42,7 @@ export function registerAttemptMediaUploadPlugin(
     });
     mediaApp.route({
       method: "POST",
-      url: "/v1/attempts/:id/media",
+      url: fastifyRoutePath(route),
       onRequest: async (request) => {
         const upload = await mediaUpload.preflight({
           attemptId: input.attemptId(request),

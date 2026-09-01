@@ -95,7 +95,7 @@ type FactoryIssuedC5MediaPipelinePort = Readonly<{
    * storage method.
    */
   deleteRetentionRecord(record: RetentionRecord): Promise<void>;
-  probeStorage(): Promise<void>;
+  probeStorage(signal?: AbortSignal): Promise<void>;
 }>;
 const factoryIssuedC5MediaPipelinePorts = new WeakMap<
   object,
@@ -237,7 +237,7 @@ class MediaPipeline implements C5MediaPipeline {
           // by the retention repository after this intentionally empty C5
           // physical-delete step.
         },
-        probeStorage: () => storageReadiness.probe(),
+        probeStorage: (signal) => storageReadiness.probe(signal),
       }),
     );
     return publicApi;

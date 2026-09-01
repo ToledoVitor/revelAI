@@ -312,7 +312,14 @@ export function createProductionAttemptApiFromResolvedQueue(
       readiness: Object.freeze({
         database: readiness.probeDatabase,
         storage: c5.probeStorage,
-        queue: snapshot.queue.isAvailable,
+        queue: async (signal: AbortSignal) => {
+          if (signal.aborted)
+            throw signal.reason ?? new Error("queue readiness aborted");
+          const available = await snapshot.queue.isAvailable();
+          if (signal.aborted)
+            throw signal.reason ?? new Error("queue readiness aborted");
+          return available;
+        },
       }),
       leaderboard: Object.freeze({
         listLiveLeaderboard: (

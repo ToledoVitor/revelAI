@@ -123,7 +123,7 @@ type ProductionSQLiteAttemptProcessingPort = Readonly<{
   >;
 }>;
 type ProductionSQLiteAttemptReadinessPort = Readonly<{
-  probeDatabase(): Promise<void>;
+  probeDatabase(signal?: AbortSignal): Promise<void>;
 }>;
 
 const productionSQLiteAttemptUploadPorts = new WeakMap<
@@ -2004,10 +2004,14 @@ function registerProductionSQLiteAttemptReadinessPort(
   productionSQLiteAttemptReadinessPorts.set(
     repository,
     Object.freeze({
-      probeDatabase: async () => {
+      probeDatabase: async (signal) => {
         if (!isCurrentProductionSQLiteAttemptRepository(repository))
           throw new Error("C9 readiness composition is no longer current.");
+        if (signal?.aborted)
+          throw signal.reason ?? new Error("database readiness aborted");
         raw.prepare("SELECT 1").get();
+        if (signal?.aborted)
+          throw signal.reason ?? new Error("database readiness aborted");
       },
     }),
   );

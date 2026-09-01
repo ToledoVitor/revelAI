@@ -59,6 +59,7 @@ import {
   createAttemptApi,
   createInternallyComposedAttemptApi,
 } from "./attempt-api.js";
+import { apiRouteRegistry, fastifyRoutePath } from "./openapi.js";
 
 const ATHLETE_A = "11111111-1111-4111-8111-111111111111";
 const ATHLETE_B = "22222222-2222-4222-8222-222222222222";
@@ -86,6 +87,36 @@ describe("attempt HTTP foundation", () => {
       expect(health.json()).toEqual({ status: "ok" });
       expect(ready.statusCode).toBe(200);
       expect(ready.json()).toEqual({ status: "ready" });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("registers every shared C2 method at its shared path", async () => {
+    const fixture = await makeMediaApi();
+    try {
+      await fixture.app.ready();
+      const unregistered = apiRouteRegistry.filter(
+        (route) =>
+          !route.multipart &&
+          !fixture.app.hasRoute({
+            method: route.method.toUpperCase() as "GET" | "POST" | "DELETE",
+            url: fastifyRoutePath(route),
+          }),
+      );
+      expect(unregistered).toEqual([]);
+      await expect(
+        fixture.app.inject({
+          method: "POST",
+          url: "/v1/attempts/11111111-1111-4111-8111-111111111111/media",
+          headers: athleteHeader(ATHLETE_A),
+        }),
+      ).resolves.toMatchObject({ statusCode: 404 });
+      for (const route of apiRouteRegistry) {
+        expect(
+          route.responses.some((response) => response.status === 503),
+        ).toBe(route.operationId !== "getHealth");
+      }
     } finally {
       await fixture.close();
     }
