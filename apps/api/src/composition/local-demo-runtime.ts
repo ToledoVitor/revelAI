@@ -8,7 +8,7 @@ import {
   type AttemptOutcome,
 } from "@revelai/contracts";
 import { parseApiEnv } from "@revelai/config";
-import { createProductionTrainingAttemptApi } from "../composition/training-analysis-composition.js";
+import { createProductionTrainingAttemptApi } from "./training-analysis-composition.js";
 import {
   openSqliteDatabase,
   type SqliteDatabase,
@@ -29,7 +29,7 @@ import {
   createConfiguredVisionProvider,
   preflightMediaBinaries,
   type LocalDemoProcessRunner,
-} from "./local-demo-support.js";
+} from "../demo/local-demo-support.js";
 
 export type LocalDemoRuntime = Readonly<{
   app: ReturnType<typeof createProductionTrainingAttemptApi>;

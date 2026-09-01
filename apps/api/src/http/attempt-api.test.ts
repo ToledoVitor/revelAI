@@ -4443,6 +4443,7 @@ const expectedQueueAdapterFile = join("queue", "in-memory-analysis-queue.ts");
 const permittedQueueResolutionFiles = new Set([
   join("composition", "sqlite-media-upload-composition.ts"),
   join("composition", "free-training-analysis-composition.ts"),
+  join("composition", "local-demo-runtime.ts"),
   join("composition", "training-analysis-composition.ts"),
   join("composition", "verified-training-analysis-composition.ts"),
 ]);

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import {
   createLocalDemoRuntime,
   runLocalDemoCheckTrace,
-} from "../dist/demo/local-demo-runtime.js";
+} from "../dist/composition/local-demo-runtime.js";
 import { LocalDemoPreflightError } from "../dist/demo/local-demo-support.js";
 import { startConfiguredApi } from "../dist/startup.js";
 

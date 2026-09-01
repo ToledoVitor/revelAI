@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createLocalDemoRuntime,
   runLocalDemoCheckTrace,
-} from "./local-demo-runtime.js";
+} from "../composition/local-demo-runtime.js";
 import {
   createConfiguredVisionProvider,
   preflightMediaBinaries,
