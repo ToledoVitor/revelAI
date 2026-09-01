@@ -564,12 +564,13 @@ const migrations: readonly Migration[] = [
       );
       INSERT INTO processing_recovery_records_v9
         (attempt_id, generation, retry_attempts, state, created_at, updated_at)
-        SELECT attempt_id, generation, retry_attempts, state, created_at, updated_at
-        FROM processing_recovery_records
-        WHERE typeof(generation) = 'integer'
-          AND generation BETWEEN 0 AND 9007199254740991
-          AND typeof(retry_attempts) = 'integer'
-          AND retry_attempts BETWEEN 0 AND 9007199254740991;
+      SELECT attempt_id, generation, retry_attempts, state, created_at, updated_at
+      FROM processing_recovery_records
+      WHERE typeof(generation) = 'integer'
+        AND generation BETWEEN 0 AND 9007199254740991
+        AND typeof(retry_attempts) = 'integer'
+        AND retry_attempts BETWEEN 0 AND 9007199254740991
+        AND state IN ('retrying', 'dead-lettered');
       DROP TABLE processing_recovery_records;
       ALTER TABLE processing_recovery_records_v9 RENAME TO processing_recovery_records;
 
@@ -814,6 +815,39 @@ const migrations: readonly Migration[] = [
     version: 21,
     sql: "SELECT 1;",
     afterApply: normalizeLegacyTerminalAttemptStatusesV21,
+  },
+  {
+    // v9 guarded only INSERT. A legacy UPDATE could still place the same
+    // receipt in both records; quarantine wins deterministically because it
+    // preserves the invalid legacy fact while keeping primary policy lookup
+    // unavailable. Cover both directions before a later UPDATE can recreate it.
+    version: 22,
+    sql: `
+      DELETE FROM workflow_benchmark_receipt_invalidations
+      WHERE receipt_id IN (
+        SELECT receipt_id
+        FROM workflow_benchmark_receipt_invalidation_quarantine
+      );
+
+      CREATE TRIGGER workflow_benchmark_receipt_invalidations_reject_quarantined_update
+      BEFORE UPDATE OF receipt_id ON workflow_benchmark_receipt_invalidations
+      WHEN EXISTS (
+        SELECT 1 FROM workflow_benchmark_receipt_invalidation_quarantine
+        WHERE receipt_id = NEW.receipt_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'invalidation already quarantined');
+      END;
+      CREATE TRIGGER workflow_benchmark_receipt_invalidation_quarantine_reject_primary_update
+      BEFORE UPDATE OF receipt_id ON workflow_benchmark_receipt_invalidation_quarantine
+      WHEN EXISTS (
+        SELECT 1 FROM workflow_benchmark_receipt_invalidations
+        WHERE receipt_id = NEW.receipt_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'invalidation already recorded');
+      END;
+    `,
   },
 ];
 

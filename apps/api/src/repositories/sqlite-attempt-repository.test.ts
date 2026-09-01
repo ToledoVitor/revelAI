@@ -6183,6 +6183,115 @@ describe("SQLiteAttemptRepository", () => {
     reopened.close();
   });
 
+  it("reconciles a reachable legacy dual invalidation to quarantine before policy lookup", async () => {
+    const filename = join(
+      fixture.directory,
+      "legacy-dual-invalidation-v21.sqlite",
+    );
+    const legacy = openSqliteDatabaseAtVersionForTest(filename, 21);
+    const policy = new SQLiteCompetitivePolicyRepository({
+      database: legacy,
+      clock: fixture.clock,
+    });
+    const primaryReceipt = passingWorkflowBenchmarkReceiptFixture;
+    const quarantinedReceipt = renewedReceipt();
+    await policy.storeBenchmarkReceipt(primaryReceipt);
+    await policy.storeBenchmarkReceipt(quarantinedReceipt);
+    legacy.raw
+      .prepare(
+        "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, 'operator_revoked', ?)",
+      )
+      .run(primaryReceipt.id, fixture.clock.now(), fixture.clock.now());
+    legacy.raw
+      .prepare(
+        "INSERT INTO workflow_benchmark_receipt_invalidation_quarantine (receipt_id, invalidated_at, reason, created_at, quarantine_reason) VALUES (?, ?, 'operator_revoked', ?, 'invalid_v6_timestamp')",
+      )
+      .run(quarantinedReceipt.id, fixture.clock.now(), fixture.clock.now());
+    // v9 protected INSERT but its historical triggers did not protect this
+    // reachable UPDATE path, leaving both invalidation tables authoritative.
+    legacy.raw
+      .prepare(
+        "UPDATE workflow_benchmark_receipt_invalidations SET receipt_id = ? WHERE receipt_id = ?",
+      )
+      .run(quarantinedReceipt.id, primaryReceipt.id);
+    legacy.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM workflow_benchmark_receipt_invalidations WHERE receipt_id = ?",
+        )
+        .get(quarantinedReceipt.id),
+    ).toEqual({ count: 0 });
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM workflow_benchmark_receipt_invalidation_quarantine WHERE receipt_id = ?",
+        )
+        .get(quarantinedReceipt.id),
+    ).toEqual({ count: 1 });
+    expect(
+      upgraded.raw
+        .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+        .get(),
+    ).toEqual({ count: 22 });
+    upgraded.raw
+      .prepare(
+        "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, 'operator_revoked', ?)",
+      )
+      .run(primaryReceipt.id, fixture.clock.now(), fixture.clock.now());
+    expect(() =>
+      upgraded.raw
+        .prepare(
+          "UPDATE workflow_benchmark_receipt_invalidations SET receipt_id = ? WHERE receipt_id = ?",
+        )
+        .run(quarantinedReceipt.id, primaryReceipt.id),
+    ).toThrow("invalidation already quarantined");
+    expect(() =>
+      upgraded.raw
+        .prepare(
+          "UPDATE workflow_benchmark_receipt_invalidation_quarantine SET receipt_id = ? WHERE receipt_id = ?",
+        )
+        .run(primaryReceipt.id, quarantinedReceipt.id),
+    ).toThrow("invalidation already recorded");
+    upgraded.close();
+  });
+
+  it("drops corrupt legacy recovery states instead of aborting v9 startup", () => {
+    const filename = join(
+      fixture.directory,
+      "legacy-corrupt-recovery-state-v8.sqlite",
+    );
+    const legacy = openSqliteDatabaseAtVersionForTest(filename, 8);
+    legacy.raw.pragma("foreign_keys = OFF");
+    legacy.raw.pragma("ignore_check_constraints = ON");
+    legacy.raw
+      .prepare(
+        "INSERT INTO processing_recovery_records (attempt_id, generation, retry_attempts, state, created_at, updated_at) VALUES (?, 1, 0, 'corrupt-recovery-state', ?, ?)",
+      )
+      .run(
+        "99999999-9999-4999-8999-999999999999",
+        fixture.clock.now(),
+        fixture.clock.now(),
+      );
+    legacy.raw.pragma("ignore_check_constraints = OFF");
+    legacy.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    expect(
+      upgraded.raw
+        .prepare("SELECT COUNT(*) AS count FROM processing_recovery_records")
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      upgraded.raw
+        .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+        .get(),
+    ).toEqual({ count: 22 });
+    upgraded.close();
+  });
+
   it("stores parsed receipts but activates only a current passed exact tuple", async () => {
     await fixture.policy.storeBenchmarkReceipt(
       passingWorkflowBenchmarkReceiptFixture,
