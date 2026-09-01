@@ -238,6 +238,134 @@ describe("AnalysisWorker", () => {
     });
   });
 
+  it("drains active work, rejects post-stop delivery, and shares one idempotent shutdown", async () => {
+    let delivery:
+      | ((
+          job: Readonly<{ attemptId: string; generation: number }>,
+        ) => Promise<void>)
+      | undefined;
+    let started = 0;
+    let release: (() => void) | undefined;
+    const processing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let startedBoth: (() => void) | undefined;
+    const bothStarted = new Promise<void>((resolve) => {
+      startedBoth = resolve;
+    });
+    const finalized: string[] = [];
+    const worker = new AnalysisWorker({
+      queue: {
+        isAvailable: async () => true,
+        enqueue: async () => undefined,
+        subscribe: (deliver) => {
+          delivery = deliver;
+          return () => undefined;
+        },
+      },
+      mode: "free",
+      repository: {
+        claimProcessing: async (job) => ({
+          leaseId: `lease-${job.attemptId}`,
+          generation: job.generation,
+          mode: "free",
+        }),
+        releaseProcessingClaim: async () => true,
+        recordProcessingFailure: async () => ({
+          kind: "recorded" as const,
+          retryAttempt: 1,
+        }),
+        deadLetterProcessingClaim: async () => deadLettered,
+        finalizeTerminalResult: async (input) => {
+          finalized.push(input.attemptId);
+          return acknowledgedFinalization;
+        },
+      },
+      process: async () => {
+        started += 1;
+        if (started === 2) startedBoth?.();
+        await processing;
+        return outcome;
+      },
+    });
+    const stop = worker.start();
+    const first = delivery!({ attemptId: "attempt-a", generation: 1 });
+    const second = delivery!({ attemptId: "attempt-b", generation: 1 });
+    await bothStarted;
+
+    const stopping = stop();
+    expect(stopping).toBeInstanceOf(Promise);
+    expect(stop()).toBe(stopping);
+    await expect(
+      delivery!({ attemptId: "attempt-c", generation: 1 }),
+    ).rejects.toThrow("stopping");
+
+    let settled = false;
+    void stopping.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    release!();
+    await Promise.all([first, second, stopping]);
+    expect(finalized).toEqual(["attempt-a", "attempt-b"]);
+  });
+
+  it("waits for an in-flight processing error to settle during shutdown", async () => {
+    let delivery:
+      | ((
+          job: Readonly<{ attemptId: string; generation: number }>,
+        ) => Promise<void>)
+      | undefined;
+    let release: (() => void) | undefined;
+    const processing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started: (() => void) | undefined;
+    const workerStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let recoveryWrites = 0;
+    const worker = new AnalysisWorker({
+      queue: {
+        isAvailable: async () => true,
+        enqueue: async () => undefined,
+        subscribe: (deliver) => {
+          delivery = deliver;
+          return () => undefined;
+        },
+      },
+      repository: {
+        claimProcessing: async () => ({
+          leaseId: "lease-a",
+          generation: 1,
+          mode: "free",
+        }),
+        releaseProcessingClaim: async () => true,
+        recordProcessingFailure: async () => {
+          recoveryWrites += 1;
+          return { kind: "tombstoned" as const };
+        },
+        deadLetterProcessingClaim: async () => deadLettered,
+        finalizeTerminalResult: async () => acknowledgedFinalization,
+      },
+      process: async () => {
+        started?.();
+        await processing;
+        throw new Error("provider failed after shutdown began");
+      },
+    });
+    const stop = worker.start();
+    const delivered = delivery!({ attemptId: "attempt-a", generation: 1 });
+    await workerStarted;
+
+    const stopping = stop();
+    release!();
+    await Promise.all([delivered, stopping]);
+    expect(recoveryWrites).toBe(1);
+  });
+
   it("releases a failed lease and leaves delivery unacknowledged for one terminal redelivery", async () => {
     const scheduler = new ManualScheduler();
     const queue = new InMemoryAnalysisQueue({ scheduler });

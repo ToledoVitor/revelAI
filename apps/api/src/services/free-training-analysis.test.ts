@@ -239,6 +239,231 @@ describe("Free Training analysis", () => {
     database.close();
   });
 
+  it("keeps app close pending for an in-flight Free provider, then leaves no post-close writes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "revelai-free-close-"));
+    directories.push(root);
+    const database = openSqliteDatabase(join(root, "api.sqlite"));
+    const c5 = createC5PipelineTestSupport({ root: join(root, "c5") });
+    const repository = new SQLiteAttemptRepository({
+      database,
+      clock: { now: () => NOW },
+      ids: { next: ids() },
+      handoffVerifier: c5.handoffVerifier,
+    });
+    const attached = await createAttachedFreeAttempt({
+      repository,
+      retention: new SQLiteRetentionRepository({ database }),
+      c5,
+    });
+    const queueScheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler: queueScheduler });
+    let providerStarted: (() => void) | undefined;
+    const providerBegan = new Promise<void>((resolve) => {
+      providerStarted = resolve;
+    });
+    let releaseProvider: (() => void) | undefined;
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const demo = createDemoVisionProvider();
+    const app = createProductionFreeTrainingAttemptApi({
+      repository,
+      retention: new SQLiteRetentionRepository({ database }),
+      mediaPipeline: c5.pipeline,
+      queue,
+      cleaner: { cleanup: async () => undefined },
+      scheduler: { everyHour: () => undefined, cancel: () => undefined },
+      clock: { now: () => NOW },
+      freeTraining: {
+        provider: {
+          ...demo,
+          analyzeFree: async (request, signal, deadline) => {
+            providerStarted?.();
+            await providerGate;
+            return demo.analyzeFree(request, signal, deadline);
+          },
+        },
+        clock: { now: () => NOW },
+      },
+    });
+
+    await queue.enqueue(attached.job);
+    const drainingQueue = queueScheduler.runAll();
+    await providerBegan;
+    const closing = app.close();
+    let closed = false;
+    void closing.then(() => {
+      closed = true;
+    });
+    await Promise.resolve();
+    expect(closed).toBe(false);
+
+    releaseProvider!();
+    await Promise.all([drainingQueue, closing]);
+    const terminalCount = database.raw
+      .prepare(
+        "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
+      )
+      .get(ATTEMPT_ID);
+    await Promise.resolve();
+    expect(
+      database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM terminal_results WHERE attempt_id = ?",
+        )
+        .get(ATTEMPT_ID),
+    ).toEqual(terminalCount);
+    database.close();
+  });
+
+  it("reads each official Free host dependency once and keeps a Proxy host coherent end to end", async () => {
+    const root = await mkdtemp(join(tmpdir(), "revelai-free-proxy-"));
+    directories.push(root);
+    const database = openSqliteDatabase(join(root, "api.sqlite"));
+    const c5 = createC5PipelineTestSupport({ root: join(root, "c5") });
+    const repository = new SQLiteAttemptRepository({
+      database,
+      clock: { now: () => NOW },
+      ids: { next: ids() },
+      handoffVerifier: c5.handoffVerifier,
+    });
+    const queueScheduler = new ManualScheduler();
+    const queue = new InMemoryAnalysisQueue({ scheduler: queueScheduler });
+    const reads = new Map<string, number>();
+    const input = new Proxy(
+      {
+        repository,
+        retention: new SQLiteRetentionRepository({ database }),
+        mediaPipeline: c5.pipeline,
+        queue,
+        cleaner: { cleanup: async () => undefined },
+        scheduler: { everyHour: () => undefined, cancel: () => undefined },
+        clock: { now: () => NOW },
+        freeTraining: {
+          provider: createDemoVisionProvider(),
+          clock: { now: () => NOW },
+        },
+      },
+      {
+        get(target, property, receiver) {
+          if (typeof property === "string")
+            reads.set(property, (reads.get(property) ?? 0) + 1);
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+    const app = createProductionFreeTrainingAttemptApi(input);
+
+    expect(Object.fromEntries(reads)).toEqual({
+      repository: 1,
+      retention: 1,
+      mediaPipeline: 1,
+      queue: 1,
+      cleaner: 1,
+      maxUploadBytes: 1,
+      scheduler: 1,
+      recoveryBatchLimit: 1,
+      clock: 1,
+      ids: 1,
+      nonce: 1,
+      log: 1,
+      freeTraining: 1,
+    });
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/attempts",
+      headers: { "x-revelai-athlete-id": ATHLETE_ID },
+      payload: { mode: "free" },
+    });
+    const uploaded = await app.inject({
+      method: "POST",
+      url: `/v1/attempts/${(created.json() as Readonly<{ id: string }>).id}/media`,
+      headers: {
+        "x-revelai-athlete-id": ATHLETE_ID,
+        "content-type": "multipart/form-data; boundary=revelai-free-test",
+      },
+      payload: multipartBody(),
+    });
+    await queueScheduler.runAll();
+    await app.close();
+    database.close();
+
+    expect(uploaded.statusCode).toBe(202);
+  });
+
+  it("rejects an alternating official host before it can start recovery scheduling", async () => {
+    const root = await mkdtemp(join(tmpdir(), "revelai-free-alternating-"));
+    directories.push(root);
+    const databaseA = openSqliteDatabase(join(root, "a.sqlite"));
+    const databaseB = openSqliteDatabase(join(root, "b.sqlite"));
+    const c5 = createC5PipelineTestSupport({ root: join(root, "c5") });
+    const hostA = {
+      repository: new SQLiteAttemptRepository({
+        database: databaseA,
+        clock: { now: () => NOW },
+        ids: { next: ids() },
+        handoffVerifier: c5.handoffVerifier,
+      }),
+      retention: new SQLiteRetentionRepository({ database: databaseA }),
+      queue: new InMemoryAnalysisQueue(),
+    };
+    const hostB = {
+      repository: new SQLiteAttemptRepository({
+        database: databaseB,
+        clock: { now: () => NOW },
+        ids: { next: ids() },
+        handoffVerifier: c5.handoffVerifier,
+      }),
+      retention: new SQLiteRetentionRepository({ database: databaseB }),
+      queue: new InMemoryAnalysisQueue(),
+    };
+    let repositoryReads = 0;
+    let queueReads = 0;
+    let schedulerCalls = 0;
+    const alternating = new Proxy(
+      {
+        repository: hostA.repository,
+        retention: hostA.retention,
+        queue: hostA.queue,
+        mediaPipeline: c5.pipeline,
+        cleaner: { cleanup: async () => undefined },
+        scheduler: {
+          everyHour: () => {
+            schedulerCalls += 1;
+            return undefined;
+          },
+          cancel: () => undefined,
+        },
+        freeTraining: { provider: createDemoVisionProvider() },
+      },
+      {
+        get(target, property, receiver) {
+          if (property === "repository") {
+            repositoryReads += 1;
+            return repositoryReads === 1 ? hostA.repository : hostB.repository;
+          }
+          if (property === "retention") return hostB.retention;
+          if (property === "queue") {
+            queueReads += 1;
+            return queueReads === 1 ? hostB.queue : hostA.queue;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+
+    expect(() => createProductionFreeTrainingAttemptApi(alternating)).toThrow(
+      "factory-issued media upload composition",
+    );
+    expect({ repositoryReads, queueReads, schedulerCalls }).toEqual({
+      repositoryReads: 1,
+      queueReads: 1,
+      schedulerCalls: 0,
+    });
+    databaseA.close();
+    databaseB.close();
+  });
+
   it("releases retryable Free provider failures and eventually persists the exact retryable outcome", async () => {
     const root = await mkdtemp(join(tmpdir(), "revelai-free-retry-"));
     directories.push(root);
@@ -331,7 +556,7 @@ describe("Free Training analysis", () => {
         },
         freeTraining: options,
       }),
-    ).toThrow("factory-issued C4/C5 composition");
+    ).toThrow("C8 requires a factory-issued");
     expect(schedulerCalls).toBe(0);
 
     expect(() =>

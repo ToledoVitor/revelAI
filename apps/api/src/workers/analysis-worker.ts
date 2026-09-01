@@ -98,6 +98,11 @@ export class AnalysisWorker {
   private readonly mode: ProcessingClaim["mode"] | undefined;
   private readonly unexpectedRetryPolicy: UnexpectedRetryPolicy;
   private readonly retryWaiter: RetryWaiter;
+  private started = false;
+  private stopping = false;
+  private stoppingPromise: Promise<void> | undefined;
+  private unsubscribe: (() => void) | undefined;
+  private readonly inFlight = new Set<Promise<void>>();
 
   public constructor(
     input: Readonly<{
@@ -132,56 +137,94 @@ export class AnalysisWorker {
       );
   }
 
-  public start(): () => void {
-    return this.queue.subscribe(
-      async (job) => {
-        const claim = await this.repository.claimProcessing(job);
-        if (!claim) return;
-        if (this.mode && claim.mode !== this.mode) {
-          // Queue mode selects a consumer but is not C4 authority. Correct a
-          // malformed/stale delivery before any processor sees the claim, so
-          // Free can never terminalize a Verified row.
-          const released = await this.repository.releaseProcessingClaim({
-            attemptId: job.attemptId,
-            leaseId: claim.leaseId,
-            generation: claim.generation,
-          });
-          if (!released) throw new LostProcessingClaimError();
-          await this.queue.enqueue(
-            Object.freeze({
-              attemptId: job.attemptId,
-              generation: claim.generation,
-              mode: claim.mode,
-            }),
-          );
-          return;
-        }
-        let candidate: TerminalCandidate;
-        try {
-          try {
-            candidate = await this.process({ job, claim });
-          } catch (error) {
-            if (error instanceof ExpectedProcessingFailure)
-              candidate = error.candidate;
-            else throw error;
-          }
-          const finalization = await this.repository.finalizeTerminalResult({
-            attemptId: job.attemptId,
-            leaseId: claim.leaseId,
-            generation: claim.generation,
-            candidate,
-          });
-          if (!acknowledges(finalization)) {
-            await this.releaseForRetry(job, claim);
-            throw new LostProcessingClaimError();
-          }
-        } catch (error) {
-          if (error instanceof LostProcessingClaimError) throw error;
-          await this.recover(job, claim, error);
-        }
-      },
+  public start(): () => Promise<void> {
+    if (this.started)
+      throw new Error("Analysis worker can only be started once.");
+    this.started = true;
+    this.unsubscribe = this.queue.subscribe(
+      async (job) => this.trackDelivery(job),
       this.mode ? Object.freeze({ mode: this.mode }) : undefined,
     );
+    return () => this.stop();
+  }
+
+  /** Stops intake first, then drains callbacks already holding a C4 lease. */
+  private stop(): Promise<void> {
+    if (this.stoppingPromise) return this.stoppingPromise;
+    this.stopping = true;
+    try {
+      this.unsubscribe?.();
+    } catch {
+      // Subscription teardown cannot make an already-issued C4 lease vanish.
+      // Continue draining that lease so callers still get deterministic close.
+    }
+    this.stoppingPromise = this.drainInFlight();
+    return this.stoppingPromise;
+  }
+
+  private async drainInFlight(): Promise<void> {
+    while (this.inFlight.size > 0) await Promise.allSettled([...this.inFlight]);
+  }
+
+  private async trackDelivery(job: AnalysisJob): Promise<void> {
+    // A rejected callback is deliberately not acknowledged by an at-least-once
+    // queue. It remains available for the next runtime owner without touching
+    // C4 retry accounting or terminal state.
+    if (this.stopping) throw new WorkerStoppingError();
+    const delivery = this.deliver(job);
+    this.inFlight.add(delivery);
+    try {
+      await delivery;
+    } finally {
+      this.inFlight.delete(delivery);
+    }
+  }
+
+  private async deliver(job: AnalysisJob): Promise<void> {
+    const claim = await this.repository.claimProcessing(job);
+    if (!claim) return;
+    if (this.mode && claim.mode !== this.mode) {
+      // Queue mode selects a consumer but is not C4 authority. Correct a
+      // malformed/stale delivery before any processor sees the claim, so
+      // Free can never terminalize a Verified row.
+      const released = await this.repository.releaseProcessingClaim({
+        attemptId: job.attemptId,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+      });
+      if (!released) throw new LostProcessingClaimError();
+      await this.queue.enqueue(
+        Object.freeze({
+          attemptId: job.attemptId,
+          generation: claim.generation,
+          mode: claim.mode,
+        }),
+      );
+      return;
+    }
+    let candidate: TerminalCandidate;
+    try {
+      try {
+        candidate = await this.process({ job, claim });
+      } catch (error) {
+        if (error instanceof ExpectedProcessingFailure)
+          candidate = error.candidate;
+        else throw error;
+      }
+      const finalization = await this.repository.finalizeTerminalResult({
+        attemptId: job.attemptId,
+        leaseId: claim.leaseId,
+        generation: claim.generation,
+        candidate,
+      });
+      if (!acknowledges(finalization)) {
+        await this.releaseForRetry(job, claim);
+        throw new LostProcessingClaimError();
+      }
+    } catch (error) {
+      if (error instanceof LostProcessingClaimError) throw error;
+      await this.recover(job, claim, error);
+    }
   }
 
   private async recover(
@@ -282,6 +325,13 @@ class LostProcessingClaimError extends Error {
   public constructor() {
     super("Processing claim was lost before terminalization.");
     this.name = "LostProcessingClaimError";
+  }
+}
+
+class WorkerStoppingError extends Error {
+  public constructor() {
+    super("Analysis worker is stopping.");
+    this.name = "WorkerStoppingError";
   }
 }
 

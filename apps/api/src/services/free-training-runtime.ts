@@ -14,7 +14,7 @@ import type { FreeTrainingAnalysisDependencies } from "./free-training-analysis.
 import { createFreeTrainingAnalysisProcessor } from "./free-training-analysis.js";
 
 export type FreeTrainingRuntimeHandle = Readonly<{
-  stop(): void;
+  stop(): Promise<void>;
 }>;
 
 const defaultRetryPolicy: UnexpectedRetryPolicy = Object.freeze({
