@@ -92,7 +92,7 @@ describe("C7 decision-layer boundary", () => {
           declaredSymbol(checker, integritySource, "scoreVerifiedCandidate"),
         ),
       ),
-    ).toEqual([]);
+    ).toEqual(["services/verified-training-analysis.ts"]);
     expect(
       relativeCallSites(
         apiSource,
@@ -106,7 +106,7 @@ describe("C7 decision-layer boundary", () => {
           ),
         ),
       ),
-    ).toEqual([]);
+    ).toEqual(["services/verified-training-analysis.ts"]);
     expect(
       candidateParameterType(
         functionDeclaration(integritySource, "scoreVerifiedCandidate"),

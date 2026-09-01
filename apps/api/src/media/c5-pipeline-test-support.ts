@@ -43,11 +43,16 @@ export type C5PipelineTestSupport = Readonly<{
  * issuance remain the production implementations.
  */
 export function createC5PipelineTestSupport(
-  input: Readonly<{ root: string; prober?: LocalMediaProber }>,
+  input: Readonly<{
+    root: string;
+    prober?: LocalMediaProber;
+    /** Selects deterministic runner evidence for real multipart route tests. */
+    mode?: "free" | "verified";
+  }>,
 ): C5PipelineTestSupport {
   let nextMediaId: string | undefined;
   let directPipelineMediaSequence = 0;
-  let currentMode: "free" | "verified" = "free";
+  let currentMode: "free" | "verified" = input.mode ?? "free";
   let frameSequence = 0;
   const storage = createLocalMediaStorage({
     root: input.root,

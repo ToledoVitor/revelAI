@@ -6,7 +6,12 @@ import {
   type WorkflowBenchmarkInvalidationReason,
   type WorkflowBenchmarkReceipt,
 } from "@revelai/contracts";
-import type { SqliteDatabase } from "../database/sqlite-database.js";
+import {
+  isFactoryIssuedSqliteDatabase,
+  resolveFactoryIssuedSqliteDatabaseCompositionToken,
+  type SqliteDatabase,
+  type SqliteDatabaseCompositionToken,
+} from "../database/sqlite-database.js";
 import type {
   CompetitivePolicyActivation,
   CompetitivePolicyActivationInput,
@@ -21,25 +26,60 @@ import {
 
 export type PolicyClock = Readonly<{ now(): string }>;
 
+export type ProductionSQLiteCompetitivePolicyLookupPort = Readonly<{
+  token: SqliteDatabaseCompositionToken;
+  isCurrent(): boolean;
+  lookup: Readonly<{
+    getActivePolicy(
+      tuple: CompetitivePolicyTuple,
+    ): Promise<CompetitivePolicyActivation | null>;
+  }>;
+}>;
+
+const productionSQLiteCompetitivePolicyLookupPorts = new WeakMap<
+  object,
+  ProductionSQLiteCompetitivePolicyLookupPort
+>();
+
+/** Resolves the immutable policy lookup for one exact production adapter. */
+export function resolveProductionSQLiteCompetitivePolicyLookupPort(
+  repository: unknown,
+): ProductionSQLiteCompetitivePolicyLookupPort | undefined {
+  if (typeof repository !== "object" || repository === null) return undefined;
+  return productionSQLiteCompetitivePolicyLookupPorts.get(repository);
+}
+
 export class SQLiteCompetitivePolicyRepository
   implements CompetitivePolicyRepository
 {
-  private readonly raw;
-  private readonly clock: PolicyClock;
+  readonly #raw;
+  readonly #clock: PolicyClock;
 
   public constructor(
     input: Readonly<{ database: SqliteDatabase; clock: PolicyClock }>,
   ) {
-    this.raw = input.database.raw;
-    this.clock = input.clock;
+    if (!isFactoryIssuedSqliteDatabase(input.database))
+      throw new Error(
+        "Competitive policy requires a factory-issued SQLite database capability.",
+      );
+    this.#raw = input.database.raw;
+    this.#clock = input.clock;
+    const token = resolveFactoryIssuedSqliteDatabaseCompositionToken(
+      input.database,
+    );
+    if (!token)
+      throw new Error(
+        "Competitive policy factory database composition token is required.",
+      );
+    registerProductionSQLiteCompetitivePolicyLookupPort(this, token);
   }
 
   public async storeBenchmarkReceipt(
     receipt: unknown,
   ): Promise<WorkflowBenchmarkReceipt> {
     const parsed = WorkflowBenchmarkReceiptSchema.parse(receipt);
-    return this.transaction(() => {
-      const existing = this.raw
+    return this.#transaction(() => {
+      const existing = this.#raw
         .prepare(
           "SELECT receipt_sha256, schema_version, workflow_id, workflow_version, model_bundle_id, provider_version, status, run_at, valid_until, invalidated_at, receipt_json FROM workflow_benchmark_receipts WHERE id = ?",
         )
@@ -83,7 +123,7 @@ export class SQLiteCompetitivePolicyRepository
           "competitive_policy_conflict",
         );
       }
-      const sameHash = this.raw
+      const sameHash = this.#raw
         .prepare(
           "SELECT id FROM workflow_benchmark_receipts WHERE receipt_sha256 = ?",
         )
@@ -92,7 +132,7 @@ export class SQLiteCompetitivePolicyRepository
         throw new CompetitivePolicyRepositoryError(
           "competitive_policy_conflict",
         );
-      this.raw
+      this.#raw
         .prepare(
           "INSERT INTO workflow_benchmark_receipts (id, receipt_sha256, schema_version, workflow_id, workflow_version, model_bundle_id, provider_version, status, run_at, valid_until, invalidated_at, receipt_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
@@ -109,7 +149,7 @@ export class SQLiteCompetitivePolicyRepository
           parsed.validUntil,
           parsed.invalidatedAt,
           stableJson(parsed),
-          this.clock.now(),
+          this.#clock.now(),
         );
       return parsed;
     });
@@ -118,8 +158,8 @@ export class SQLiteCompetitivePolicyRepository
   public async activateCompetitivePolicy(
     input: CompetitivePolicyActivationInput,
   ): Promise<void> {
-    await this.transaction(() => {
-      const receipt = this.raw
+    await this.#transaction(() => {
+      const receipt = this.#raw
         .prepare(
           "SELECT r.receipt_sha256, r.schema_version, r.workflow_id, r.workflow_version, r.model_bundle_id, r.provider_version, r.status, r.run_at, r.valid_until, r.invalidated_at, r.receipt_json, i.receipt_id AS invalidation_receipt_id, q.receipt_id AS quarantined_invalidation_receipt_id FROM workflow_benchmark_receipts r LEFT JOIN workflow_benchmark_receipt_invalidations i ON i.receipt_id = r.id LEFT JOIN workflow_benchmark_receipt_invalidation_quarantine q ON q.receipt_id = r.id WHERE r.id = ?",
         )
@@ -146,7 +186,7 @@ export class SQLiteCompetitivePolicyRepository
         );
       if (
         receipt.status !== "passed" ||
-        receipt.valid_until <= this.clock.now() ||
+        receipt.valid_until <= this.#clock.now() ||
         receipt.invalidated_at !== null ||
         receipt.invalidation_receipt_id !== null ||
         receipt.quarantined_invalidation_receipt_id !== null
@@ -192,7 +232,7 @@ export class SQLiteCompetitivePolicyRepository
           "competitive_policy_receipt_mismatch",
         );
       try {
-        this.raw
+        this.#raw
           .prepare(
             "UPDATE approved_competitive_model_policies SET active = 0 WHERE active = 1 AND workspace_id = ? AND model_bundle_id = ? AND workflow_id = ? AND workflow_version = ? AND provider_version = ? AND calibration_evidence_version = ? AND extraction_evidence_version = ? AND observation_evidence_version = ? AND challenge_id = ? AND challenge_version = ? AND rule_version = ?",
           )
@@ -209,7 +249,7 @@ export class SQLiteCompetitivePolicyRepository
             input.challengeVersion,
             input.ruleVersion,
           );
-        this.raw
+        this.#raw
           .prepare(
             "INSERT INTO approved_competitive_model_policies (id, receipt_id, receipt_sha256, receipt_schema_version, workspace_id, model_bundle_id, workflow_id, workflow_version, provider_version, calibration_evidence_version, extraction_evidence_version, observation_evidence_version, challenge_id, challenge_version, rule_version, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
           )
@@ -229,7 +269,7 @@ export class SQLiteCompetitivePolicyRepository
             input.challengeId,
             input.challengeVersion,
             input.ruleVersion,
-            this.clock.now(),
+            this.#clock.now(),
           );
       } catch {
         throw new CompetitivePolicyRepositoryError(
@@ -242,8 +282,8 @@ export class SQLiteCompetitivePolicyRepository
   public async deactivateCompetitivePolicy(
     input: Readonly<{ id: string }>,
   ): Promise<void> {
-    await this.transaction(() => {
-      this.raw
+    await this.#transaction(() => {
+      this.#raw
         .prepare(
           "UPDATE approved_competitive_model_policies SET active = 0 WHERE id = ? AND active = 1",
         )
@@ -266,15 +306,15 @@ export class SQLiteCompetitivePolicyRepository
         "competitive_policy_invalid_invalidation",
       );
     const invalidatedAt = new Date(input.invalidatedAt).toISOString();
-    await this.transaction(() => {
-      const receipt = this.raw
+    await this.#transaction(() => {
+      const receipt = this.#raw
         .prepare("SELECT id FROM workflow_benchmark_receipts WHERE id = ?")
         .get(input.receiptId) as { id: string } | undefined;
       if (!receipt)
         throw new CompetitivePolicyRepositoryError(
           "competitive_policy_receipt_not_found",
         );
-      const existing = this.raw
+      const existing = this.#raw
         .prepare(
           `SELECT invalidated_at, reason, source FROM (
              SELECT invalidated_at, reason, 'primary' AS source
@@ -308,11 +348,11 @@ export class SQLiteCompetitivePolicyRepository
         );
       }
       try {
-        this.raw
+        this.#raw
           .prepare(
             "INSERT INTO workflow_benchmark_receipt_invalidations (receipt_id, invalidated_at, reason, created_at) VALUES (?, ?, ?, ?)",
           )
-          .run(input.receiptId, invalidatedAt, input.reason, this.clock.now());
+          .run(input.receiptId, invalidatedAt, input.reason, this.#clock.now());
       } catch (error) {
         if (isSqliteConstraintError(error))
           throw new CompetitivePolicyRepositoryError(
@@ -328,7 +368,7 @@ export class SQLiteCompetitivePolicyRepository
   ): Promise<CompetitivePolicyActivation | null> {
     let row: Record<string, unknown> | undefined;
     try {
-      row = this.raw
+      row = this.#raw
         .prepare(
           `SELECT p.id, p.receipt_id, p.receipt_sha256, p.receipt_schema_version, p.workspace_id, p.model_bundle_id, p.workflow_id, p.workflow_version, p.provider_version, p.calibration_evidence_version, p.extraction_evidence_version, p.observation_evidence_version, p.challenge_id, p.challenge_version, p.rule_version,
                 r.receipt_json, r.receipt_sha256 AS source_receipt_sha256, r.schema_version AS source_schema_version, r.model_bundle_id AS source_model_bundle_id, r.workflow_id AS source_workflow_id, r.workflow_version AS source_workflow_version, r.provider_version AS source_provider_version, r.status AS source_status, r.run_at AS source_run_at, r.valid_until AS source_valid_until, r.invalidated_at AS source_invalidated_at
@@ -347,7 +387,7 @@ export class SQLiteCompetitivePolicyRepository
            AND p.workspace_id = ? AND p.model_bundle_id = ? AND p.workflow_id = ? AND p.workflow_version = ? AND p.provider_version = ? AND p.calibration_evidence_version = ? AND p.extraction_evidence_version = ? AND p.observation_evidence_version = ? AND p.challenge_id = ? AND p.challenge_version = ? AND p.rule_version = ?`,
         )
         .get(
-          this.clock.now(),
+          this.#clock.now(),
           tuple.workspaceId,
           tuple.modelBundleId,
           tuple.workflowId,
@@ -368,17 +408,51 @@ export class SQLiteCompetitivePolicyRepository
     return parsePolicyRow(row);
   }
 
-  private transaction<T>(operation: () => T): T {
-    this.raw.exec("BEGIN IMMEDIATE");
+  #transaction<T>(operation: () => T): T {
+    this.#raw.exec("BEGIN IMMEDIATE");
     try {
       const result = operation();
-      this.raw.exec("COMMIT");
+      this.#raw.exec("COMMIT");
       return result;
     } catch (error) {
-      this.raw.exec("ROLLBACK");
+      this.#raw.exec("ROLLBACK");
       throw error;
     }
   }
+}
+
+const exactGetActiveCompetitivePolicy =
+  SQLiteCompetitivePolicyRepository.prototype.getActiveCompetitivePolicy;
+
+function registerProductionSQLiteCompetitivePolicyLookupPort(
+  repository: SQLiteCompetitivePolicyRepository,
+  token: SqliteDatabaseCompositionToken,
+): void {
+  if (!isCurrentProductionSQLiteCompetitivePolicyRepository(repository)) return;
+  productionSQLiteCompetitivePolicyLookupPorts.set(
+    repository,
+    Object.freeze({
+      token,
+      isCurrent: () =>
+        isCurrentProductionSQLiteCompetitivePolicyRepository(repository),
+      lookup: Object.freeze({
+        getActivePolicy: (tuple: CompetitivePolicyTuple) =>
+          exactGetActiveCompetitivePolicy.call(repository, tuple),
+      }),
+    }),
+  );
+}
+
+function isCurrentProductionSQLiteCompetitivePolicyRepository(
+  repository: SQLiteCompetitivePolicyRepository,
+): boolean {
+  return (
+    Object.getPrototypeOf(repository) ===
+      SQLiteCompetitivePolicyRepository.prototype &&
+    !Object.hasOwn(repository, "getActiveCompetitivePolicy") &&
+    SQLiteCompetitivePolicyRepository.prototype.getActiveCompetitivePolicy ===
+      exactGetActiveCompetitivePolicy
+  );
 }
 
 function isSqliteConstraintError(error: unknown): boolean {

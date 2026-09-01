@@ -68,7 +68,7 @@ export async function verifiedCandidateFixture(
   );
   const evidence = await assembleVerifiedObservation({
     manifest,
-    provider: fixtureProvider(provenance),
+    provider: createVerifiedFixtureVisionProvider(provenance),
     calibrationSessionId: sessionId,
     calibrationNonce: nonce,
     frames: {
@@ -97,7 +97,10 @@ export async function verifiedCandidateFixture(
   return decision.candidate;
 }
 
-function fixtureProvider(provenance: "demo" | "roboflow"): VisionProvider {
+/** Test-only deterministic provider; it never performs a network request. */
+export function createVerifiedFixtureVisionProvider(
+  provenance: "demo" | "roboflow",
+): VisionProvider {
   if (provenance === "demo") return createDemoVisionProvider();
   const frameIndexes: number[] = [];
   return createRoboflowVisionProvider({

@@ -60,7 +60,7 @@ export function createFactoryIssuedFreeTrainingRuntime(
   });
 }
 
-function createFactoryIssuedFreeTrainingRuntimeFromResolvedQueue(
+export function createFactoryIssuedFreeTrainingRuntimeFromResolvedQueue(
   input: Readonly<{
     repository: SQLiteAttemptRepository;
     queue: ResolvedAnalysisQueuePort;
@@ -226,7 +226,7 @@ function resolveRequiredAnalysisQueuePort(
   return port;
 }
 
-function assertFactoryIssuedFreeTrainingComposition(
+export function assertFactoryIssuedFreeTrainingComposition(
   input: Readonly<{
     repository: SQLiteAttemptRepository;
     mediaPipeline: C5MediaPipeline;
