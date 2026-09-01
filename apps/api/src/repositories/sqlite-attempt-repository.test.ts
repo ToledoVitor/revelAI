@@ -1,7 +1,9 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import { Worker } from "node:worker_threads";
+import Database from "better-sqlite3";
 import {
   failedWorkflowBenchmarkReceiptFixture,
   FailureMessageByCode,
@@ -467,6 +469,138 @@ function missingLedgerStateForTest(database: SqliteDatabase): Readonly<{
     attemptCount: database.raw
       .prepare("SELECT COUNT(*) AS count FROM attempts")
       .get(),
+  });
+}
+
+async function durableStartupStateForTest(filename: string): Promise<
+  Readonly<{
+    journalMode: unknown;
+    userVersion: unknown;
+    ledgerSchema: unknown;
+    ledgerRows: unknown;
+    fileBytes: Buffer;
+  }>
+> {
+  const database = new Database(filename, { readonly: true });
+  try {
+    const state = Object.freeze({
+      journalMode: database.pragma("journal_mode", { simple: true }),
+      userVersion: database.pragma("user_version", { simple: true }),
+      ledgerSchema: database
+        .prepare(
+          "SELECT type, name, sql FROM sqlite_master WHERE name = 'schema_migrations'",
+        )
+        .all(),
+      ledgerRows: database
+        .prepare(
+          "SELECT rowid, version, applied_at FROM schema_migrations ORDER BY rowid ASC",
+        )
+        .all(),
+      fileBytes: await readFile(filename),
+    });
+    return state;
+  } finally {
+    database.close();
+  }
+}
+
+function openDatabaseInChild(
+  filename: string,
+): Promise<Readonly<{ userVersion: unknown; migrationCount: unknown }>> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [
+        "-e",
+        `
+          const fs = require("node:fs");
+          const Module = require("node:module");
+          const ts = require("typescript");
+          const originalResolveFilename = Module._resolveFilename;
+          Module._resolveFilename = function (request, parent, isMain, options) {
+            if (request === "@revelai/contracts") return process.env.REVELAI_CHILD_CONTRACTS_MODULE;
+            if (request === "@revelai/domain") return process.env.REVELAI_CHILD_DOMAIN_MODULE;
+            try {
+              return originalResolveFilename.call(this, request, parent, isMain, options);
+            } catch (error) {
+              if (typeof request === "string" && request.startsWith(".") && request.endsWith(".js")) {
+                return originalResolveFilename.call(this, request.slice(0, -3) + ".ts", parent, isMain, options);
+              }
+              throw error;
+            }
+          };
+          require.extensions[".ts"] = function (module, moduleFilename) {
+            const output = ts.transpileModule(fs.readFileSync(moduleFilename, "utf8"), {
+              compilerOptions: {
+                target: ts.ScriptTarget.ES2022,
+                module: ts.ModuleKind.CommonJS,
+                moduleResolution: ts.ModuleResolutionKind.NodeNext,
+                esModuleInterop: true,
+              },
+              fileName: moduleFilename,
+            }).outputText;
+            module._compile(output, moduleFilename);
+          };
+          try {
+            const { openSqliteDatabase } = require(process.env.REVELAI_CHILD_DATABASE_MODULE);
+            const database = openSqliteDatabase(process.env.REVELAI_CHILD_FILENAME);
+            const result = {
+              userVersion: database.raw.pragma("user_version", { simple: true }),
+              migrationCount: database.raw.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
+            };
+            database.close();
+            process.stdout.write(JSON.stringify(result));
+          } catch (error) {
+            process.stderr.write(error instanceof Error ? error.stack ?? error.message : String(error));
+            process.exitCode = 1;
+          }
+        `,
+      ],
+      {
+        env: {
+          ...process.env,
+          REVELAI_CHILD_FILENAME: filename,
+          REVELAI_CHILD_DATABASE_MODULE: join(
+            process.cwd(),
+            "src/database/sqlite-database.ts",
+          ),
+          REVELAI_CHILD_CONTRACTS_MODULE: join(
+            process.cwd(),
+            "../../packages/contracts/src/index.ts",
+          ),
+          REVELAI_CHILD_DOMAIN_MODULE: join(
+            process.cwd(),
+            "../../packages/domain/src/index.ts",
+          ),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.once("error", reject);
+    child.once("close", (exitCode) => {
+      if (exitCode !== 0) {
+        reject(
+          new Error(
+            `Database child exited ${exitCode}: ${Buffer.concat(stderr).toString("utf8")}`,
+          ),
+        );
+        return;
+      }
+      try {
+        resolve(
+          JSON.parse(Buffer.concat(stdout).toString("utf8")) as Readonly<{
+            userVersion: unknown;
+            migrationCount: unknown;
+          }>,
+        );
+      } catch (error) {
+        reject(error);
+      }
+    });
   });
 }
 
@@ -4114,6 +4248,90 @@ describe("SQLiteAttemptRepository", () => {
       missingLedgerWithDataBefore,
     );
     missingLedgerWithData.close();
+
+    const emptyLedgerWithDataFilename = join(
+      fixture.directory,
+      "migration-empty-ledger-with-data.sqlite",
+    );
+    const emptyLedgerWithData = openSqliteDatabaseAtVersionForTest(
+      emptyLedgerWithDataFilename,
+      20,
+    );
+    emptyLedgerWithData.raw
+      .prepare("INSERT INTO athletes (id, created_at) VALUES (?, ?)")
+      .run(ATHLETE_A, canonicalAppliedAt);
+    emptyLedgerWithData.raw.exec("DELETE FROM schema_migrations");
+    emptyLedgerWithData.raw.pragma("user_version = 0");
+    const emptyLedgerWithDataBefore =
+      missingLedgerStateForTest(emptyLedgerWithData);
+    expect(() => openSqliteDatabase(emptyLedgerWithDataFilename)).toThrow(
+      "sqlite migration history is invalid",
+    );
+    expect(missingLedgerStateForTest(emptyLedgerWithData)).toEqual(
+      emptyLedgerWithDataBefore,
+    );
+    emptyLedgerWithData.close();
+  });
+
+  it("leaves an invalid predecessor's journal and durable bytes unchanged", async () => {
+    const filename = join(
+      fixture.directory,
+      "migration-journal-unchanged.sqlite",
+    );
+    const predecessor = openSqliteDatabase(filename);
+    predecessor.raw.pragma("journal_mode = DELETE");
+    predecessor.raw.pragma("user_version = 22");
+    predecessor.close();
+
+    const before = await durableStartupStateForTest(filename);
+    expect(before.journalMode).toBe("delete");
+    expect(() => openSqliteDatabase(filename)).toThrow(
+      "sqlite migration history is invalid",
+    );
+    expect(await durableStartupStateForTest(filename)).toEqual(before);
+  });
+
+  it("serializes concurrent fresh and predecessor migration startup", async () => {
+    for (const source of [
+      {
+        label: "fresh",
+        prepare(): void {
+          // A missing file is the fresh predecessor.
+        },
+      },
+      {
+        label: "v20",
+        prepare(filename: string): void {
+          openSqliteDatabaseAtVersionForTest(filename, 20).close();
+        },
+      },
+    ]) {
+      for (const round of [1, 2, 3]) {
+        const filename = join(
+          fixture.directory,
+          `migration-concurrent-${source.label}-${round}.sqlite`,
+        );
+        source.prepare(filename);
+        await expect(
+          Promise.all(
+            Array.from({ length: 4 }, () => openDatabaseInChild(filename)),
+          ),
+        ).resolves.toEqual(
+          Array.from({ length: 4 }, () => ({
+            userVersion: 21,
+            migrationCount: 21,
+          })),
+        );
+        const reopened = openSqliteDatabase(filename);
+        expect(reopened.raw.pragma("user_version", { simple: true })).toBe(21);
+        expect(
+          reopened.raw
+            .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+            .get(),
+        ).toEqual({ count: 21 });
+        reopened.close();
+      }
+    }
   });
 
   it("backfills a live v17 delivery row with its exact durable frame batch once", () => {

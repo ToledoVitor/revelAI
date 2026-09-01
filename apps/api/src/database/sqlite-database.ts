@@ -837,9 +837,9 @@ function openSqliteDatabaseInternal(
   try {
     raw = new Database(filename);
     raw.pragma("foreign_keys = ON");
-    raw.pragma("journal_mode = WAL");
     raw.pragma("busy_timeout = 5000");
     applyMigrations(raw, migrationVersion);
+    raw.pragma("journal_mode = WAL");
   } catch (error) {
     raw?.close();
     throw error;
@@ -916,24 +916,31 @@ function applyMigrations(
   migrationVersion?: number,
 ): void {
   const targetVersion = resolveMigrationTargetVersion(migrationVersion);
-  const userVersion = readValidatedUserVersion(raw);
-  ensureMigrationLedgerExistsOnlyForFreshDatabase(raw, userVersion);
-  const history = readValidatedMigrationHistory(raw, targetVersion);
-  if (userVersion > history.highestVersion) throwInvalidMigrationHistory();
-
-  const pending = migrations.filter(
-    (migration) =>
-      migration.version <= targetVersion &&
-      migration.version > history.highestVersion,
-  );
-  if (pending.length === 0) {
-    reconcileStaleUserVersion(raw, userVersion, history.highestVersion);
-    return;
-  }
-
-  for (const migration of pending) {
+  // Reject corruption before acquiring a write lock so invalid files stay
+  // byte-for-byte untouched. The same validation is repeated under the lock
+  // because another process may finish startup between these two phases.
+  readValidatedMigrationStartup(raw, targetVersion);
+  let began = false;
+  try {
     raw.exec("BEGIN IMMEDIATE");
-    try {
+    began = true;
+    let startup = readValidatedMigrationStartup(raw, targetVersion);
+    if (!startup.history) {
+      raw.exec(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL, applied_at TEXT NOT NULL)",
+      );
+      startup = readValidatedMigrationStartup(raw, targetVersion);
+      if (!startup.history) throwInvalidMigrationHistory();
+    }
+    const history = startup.history;
+    if (!history) throwInvalidMigrationHistory();
+
+    const pending = migrations.filter(
+      (migration) =>
+        migration.version <= targetVersion &&
+        migration.version > history.highestVersion,
+    );
+    for (const migration of pending) {
       raw.exec(migration.sql);
       migration.afterApply?.(raw);
       raw
@@ -942,16 +949,29 @@ function applyMigrations(
         )
         .run(migration.version, new Date().toISOString());
       raw.pragma(`user_version = ${migration.version}`);
-      raw.exec("COMMIT");
-    } catch (error) {
-      raw.exec("ROLLBACK");
-      throw error;
     }
+    if (pending.length === 0 && startup.userVersion !== history.highestVersion)
+      raw.pragma(`user_version = ${history.highestVersion}`);
+    raw.exec("COMMIT");
+    began = false;
+  } catch (error) {
+    if (began)
+      try {
+        raw.exec("ROLLBACK");
+      } catch {
+        // Preserve the original migration failure.
+      }
+    throw error;
   }
 }
 
 type MigrationHistory = Readonly<{
   highestVersion: number;
+}>;
+
+type MigrationStartup = Readonly<{
+  userVersion: number;
+  history: MigrationHistory | undefined;
 }>;
 
 type MigrationHistoryRow = Readonly<{
@@ -973,6 +993,11 @@ type MigrationLedgerObject = Readonly<{
   type: unknown;
 }>;
 
+type MigrationLedgerInspection = Readonly<{
+  ledgerObjects: readonly MigrationLedgerObject[];
+  otherApplicationTableCount: number;
+}>;
+
 function resolveMigrationTargetVersion(migrationVersion?: number): number {
   const latestVersion = migrations.length;
   if (
@@ -990,45 +1015,66 @@ function resolveMigrationTargetVersion(migrationVersion?: number): number {
   return migrationVersion;
 }
 
-/**
- * A fresh SQLite file has no application tables and a zero migration mirror.
- * Any other missing or non-table ledger is durable corruption: fail before
- * creating anything so an invalid predecessor is never silently repaired.
- */
-function ensureMigrationLedgerExistsOnlyForFreshDatabase(
+function readValidatedMigrationStartup(
   raw: Database.Database,
-  userVersion: number,
-): void {
+  targetVersion: number,
+): MigrationStartup {
+  const userVersion = readValidatedUserVersion(raw);
+  const inspection = readMigrationLedgerInspection(raw);
+  if (inspection.ledgerObjects.length === 0) {
+    if (userVersion !== 0 || inspection.otherApplicationTableCount !== 0)
+      throwInvalidMigrationHistory();
+    return Object.freeze({ userVersion, history: undefined });
+  }
+  if (
+    inspection.ledgerObjects.length !== 1 ||
+    inspection.ledgerObjects[0]?.type !== "table"
+  )
+    throwInvalidMigrationHistory();
+
+  const history = readValidatedMigrationHistory(raw, targetVersion);
+  if (
+    (history.highestVersion === 0 &&
+      inspection.otherApplicationTableCount !== 0) ||
+    userVersion > history.highestVersion
+  )
+    throwInvalidMigrationHistory();
+  return Object.freeze({ userVersion, history });
+}
+
+/**
+ * A fresh SQLite file has neither a ledger nor application tables. Every
+ * existing ledger shape is examined without writes before startup can obtain
+ * its cross-process SQLite write lock.
+ */
+function readMigrationLedgerInspection(
+  raw: Database.Database,
+): MigrationLedgerInspection {
   let ledgerObjects: readonly MigrationLedgerObject[];
-  let applicationTableCount: unknown;
+  let otherApplicationTableCount: unknown;
   try {
     ledgerObjects = raw
       .prepare(
         "SELECT type FROM sqlite_master WHERE name = 'schema_migrations'",
       )
       .all() as readonly MigrationLedgerObject[];
-    applicationTableCount = (
+    otherApplicationTableCount = (
       raw
         .prepare(
-          "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+          "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations'",
         )
         .get() as Readonly<{ count?: unknown }>
     ).count;
   } catch {
     throwInvalidMigrationHistory();
   }
-
-  if (ledgerObjects.length === 1 && ledgerObjects[0]?.type === "table") return;
   if (
-    ledgerObjects.length !== 0 ||
-    userVersion !== 0 ||
-    applicationTableCount !== 0
+    typeof otherApplicationTableCount !== "number" ||
+    !Number.isSafeInteger(otherApplicationTableCount) ||
+    otherApplicationTableCount < 0
   )
     throwInvalidMigrationHistory();
-
-  raw.exec(
-    "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY NOT NULL, applied_at TEXT NOT NULL)",
-  );
+  return Object.freeze({ ledgerObjects, otherApplicationTableCount });
 }
 
 function readValidatedMigrationHistory(
@@ -1143,22 +1189,6 @@ function readValidatedUserVersion(raw: Database.Database): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
     throwInvalidMigrationHistory();
   return value;
-}
-
-function reconcileStaleUserVersion(
-  raw: Database.Database,
-  userVersion: number,
-  highestVersion: number,
-): void {
-  if (userVersion === highestVersion) return;
-  raw.exec("BEGIN IMMEDIATE");
-  try {
-    raw.pragma(`user_version = ${highestVersion}`);
-    raw.exec("COMMIT");
-  } catch (error) {
-    raw.exec("ROLLBACK");
-    throw error;
-  }
 }
 
 function throwInvalidMigrationHistory(): never {
