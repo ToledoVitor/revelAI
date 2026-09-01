@@ -10,6 +10,12 @@ const TERMINATION_GRACE_MS = 250;
 const MAX_CAPTURED_OUTPUT_BYTES = 32 * 1024;
 const COMMAND_FAILURE = "Clean API executable regression command failed.";
 const readinessPrefix = "REVELAI_EXECUTABLE_READY ";
+const sessionArgumentPrefix = "--revelai-clean-api-session=";
+const invocation = parseInvocation(process.argv.slice(2));
+const fixturePrefix =
+  invocation.session === undefined
+    ? "revelai-clean-api-demo-"
+    : `revelai-clean-api-demo-${invocation.session}-`;
 const executableCases = [
   { name: "demo", script: "demo:smoke" },
   { name: "operator", script: "operator:receipt-smoke" },
@@ -39,7 +45,7 @@ void mainOperation.catch(() => {
 
 async function main() {
   assertCanStart();
-  const [mode] = process.argv.slice(2);
+  const { mode } = invocation;
 
   if (mode === "--self-test") {
     await verifyProcessGuard();
@@ -107,7 +113,7 @@ async function verifyIndependentMutation() {
 
 async function runCleanCase(executableCase, options = {}) {
   assertCanStart();
-  const fixture = await mkdtemp(join(tmpdir(), "revelai-clean-api-demo-"));
+  const fixture = await mkdtemp(join(tmpdir(), fixturePrefix));
   activeFixtures.add(fixture);
   const archive = join(fixture, "revelai.tar");
 
@@ -273,4 +279,25 @@ function sendSignal(child, signal) {
   } catch {
     child.kill(signal);
   }
+}
+
+function parseInvocation(arguments_) {
+  let mode;
+  let session;
+
+  for (const argument of arguments_) {
+    if (argument.startsWith(sessionArgumentPrefix)) {
+      const candidate = argument.slice(sessionArgumentPrefix.length);
+      if (session !== undefined || !/^[a-f0-9]{32}$/.test(candidate)) {
+        throw new Error(COMMAND_FAILURE);
+      }
+      session = candidate;
+      continue;
+    }
+
+    if (mode !== undefined) throw new Error(COMMAND_FAILURE);
+    mode = argument;
+  }
+
+  return Object.freeze({ mode, session });
 }

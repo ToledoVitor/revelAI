@@ -9,6 +9,8 @@ const DEFAULT_MODE_TIMEOUT_MS = 120_000;
 const TERMINATION_GRACE_MS = 750;
 const FAILURE = "Clean API executable self-test failed.";
 const readinessPrefix = "REVELAI_EXECUTABLE_READY ";
+const sessionArgumentPrefix = "--revelai-clean-api-session=";
+const session = parseSession(process.argv.slice(2));
 const modeTimeoutMs = configuredTimeoutMs(
   process.env.CLEAN_API_EXECUTABLE_SELF_TEST_TIMEOUT_MS,
 );
@@ -42,6 +44,7 @@ if (process.platform === "win32") {
 
 async function main() {
   assertCanStart();
+  await pauseAtBoundary("outer:before-main");
   await expectMode(
     "--self-test",
     "Clean API executable process guard regression passed.",
@@ -68,10 +71,18 @@ function run(mode) {
   return new Promise((resolve, reject) => {
     let output = Buffer.alloc(0);
     let readinessOutput = "";
-    const child = spawn(process.execPath, [script, mode], {
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawn(
+      process.execPath,
+      [
+        script,
+        mode,
+        ...(session === undefined ? [] : [sessionArgument(session)]),
+      ],
+      {
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
     const record = {
       child,
       settled: false,
@@ -194,4 +205,18 @@ function configuredTimeoutMs(value) {
     return DEFAULT_MODE_TIMEOUT_MS;
   }
   return parsed;
+}
+
+function parseSession(arguments_) {
+  if (arguments_.length === 0) return undefined;
+  if (arguments_.length !== 1) throw new Error(FAILURE);
+  const [argument] = arguments_;
+  if (!argument.startsWith(sessionArgumentPrefix)) throw new Error(FAILURE);
+  const candidate = argument.slice(sessionArgumentPrefix.length);
+  if (!/^[a-f0-9]{32}$/.test(candidate)) throw new Error(FAILURE);
+  return candidate;
+}
+
+function sessionArgument(value) {
+  return `${sessionArgumentPrefix}${value}`;
 }
