@@ -79,6 +79,28 @@ test("keeps every mobile home decision in the 390 by 844 viewport", async ({
   }
 });
 
+test("renders the exact mobile viewport without browser warnings or errors", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-home");
+  const diagnostics: string[] = [];
+
+  page.on("console", (message) => {
+    if (message.type() === "warning" || message.type() === "error") {
+      diagnostics.push(`${message.type()}: ${message.text()}`);
+    }
+  });
+  page.on("pageerror", (error) =>
+    diagnostics.push(`pageerror: ${error.message}`),
+  );
+
+  await page.goto("/");
+  expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBe(
+    844,
+  );
+  expect(diagnostics).toEqual([]);
+});
+
 test("writes normalized capture, metadata, overlay, and diff for each approved reference", async ({
   page,
 }, testInfo) => {
@@ -111,9 +133,79 @@ test("writes normalized capture, metadata, overlay, and diff for each approved r
   expect(artifacts.comparison.reference).toMatch(
     /(?:desktop|mobile)-home\.png$/,
   );
-  expect(artifacts.comparison.mismatchRatio).toBeLessThanOrEqual(
-    artifacts.comparison.maxMismatchRatio,
+  expect(artifacts.comparison.exceedsBudget).toBe(false);
+  expect(artifacts.comparison.image.mismatchRatio).toBeLessThanOrEqual(
+    artifacts.comparison.image.maxMismatchRatio,
   );
+  expect(artifacts.comparison.uiInk.mismatchRatio).toBeLessThanOrEqual(
+    artifacts.comparison.uiInk.maxMismatchRatio,
+  );
+  expect(artifacts.comparison.uiInk.coverage).toEqual(
+    expect.arrayContaining([expect.objectContaining({ passes: true })]),
+  );
+});
+
+test("rejects deliberate UI regressions that sit over the masked photo", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/");
+
+  await page.evaluate((isMobile) => {
+    const selectors = isMobile
+      ? [".brand", ".hero-copy h1", ".hero-description"]
+      : [".primary-navigation"];
+
+    for (const selector of selectors) {
+      const element = document.querySelector<HTMLElement>(selector);
+      if (!element) {
+        throw new Error(`Missing visual-regression target: ${selector}`);
+      }
+
+      element.style.color = "#F7F5F0";
+      element.style.opacity = "0";
+    }
+  }, testInfo.project.name === "mobile-home");
+
+  try {
+    const artifacts = await captureHomeVisualArtifacts({
+      page,
+      viewport: testInfo.project.use.viewport as {
+        width: number;
+        height: number;
+      },
+      dpr: testInfo.project.use.deviceScaleFactor as number,
+      state: "ui-ink-mutation",
+    });
+
+    expect(artifacts.metadata).toMatchObject({
+      route: "/",
+      state: "ui-ink-mutation",
+      fixture: "home-mutation",
+    });
+    expect(artifacts.comparison.exceedsBudget).toBe(true);
+    expect(artifacts.comparison.uiInk.coverage).toEqual(
+      expect.arrayContaining([expect.objectContaining({ passes: false })]),
+    );
+  } finally {
+    await page.goto("/");
+  }
+});
+
+test("starts the desktop photo at the approved 46 percent composition split", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-home");
+  await page.goto("/");
+
+  const heroBox = await page
+    .getByRole("img", {
+      name: "Jogador de futsal treinando em quadra interna",
+    })
+    .boundingBox();
+
+  expect(heroBox).not.toBeNull();
+  expect(heroBox!.x).toBeGreaterThanOrEqual(655);
+  expect(heroBox!.x).toBeLessThanOrEqual(691);
 });
 
 test("respects reduced motion", async ({ page }) => {

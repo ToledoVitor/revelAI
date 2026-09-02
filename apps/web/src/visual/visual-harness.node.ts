@@ -18,17 +18,37 @@ type MaskRegion = {
   height: number;
 };
 
-type ComparisonResult = {
-  reference: string;
+type VisualMetric = {
   threshold: number;
-  mask: {
-    rationale: string;
-    regions: readonly MaskRegion[];
-  };
   changedPixels: number;
   comparedPixels: number;
   mismatchRatio: number;
   maxMismatchRatio: number;
+};
+
+type UiInkCoverage = {
+  region: MaskRegion;
+  baselineCaptureInkPixels: number;
+  minCaptureInkPixels: number;
+  capturedInkPixels: number;
+  passes: boolean;
+};
+
+type ComparisonResult = {
+  reference: string;
+  mask: {
+    rationale: string;
+    regions: readonly MaskRegion[];
+  };
+  image: VisualMetric;
+  uiInk: VisualMetric & {
+    rationale: string;
+    regions: readonly MaskRegion[];
+    coverage: readonly UiInkCoverage[];
+  };
+  mismatchRatio: number;
+  maxMismatchRatio: number;
+  exceedsBudget: boolean;
 };
 
 type VisualArtifacts = {
@@ -39,6 +59,10 @@ type VisualArtifacts = {
     normalizedReference: string;
     overlay: string;
     diff: string;
+    uiInkCapture: string;
+    uiInkReference: string;
+    uiInkOverlay: string;
+    uiInkDiff: string;
   };
   comparison: ComparisonResult;
 };
@@ -58,17 +82,17 @@ function getReference(viewport: Viewport) {
   return viewport.width <= 700 ? "mobile-home.png" : "desktop-home.png";
 }
 
-function getMask(viewport: Viewport): ComparisonResult["mask"] {
+function getMask(viewport: Viewport) {
   if (viewport.width <= 700) {
     return {
       rationale:
-        "The upper mobile hero is an independently supplied runtime image, so the comparison evaluates the unmasked decision controls below it.",
+        "The mobile photo begins below the header and ends before the decision controls; only those runtime-photography pixels are excluded from the full-view comparison.",
       regions: [
         {
           x: 0,
-          y: 0,
+          y: Math.round(viewport.height * 0.069),
           width: viewport.width,
-          height: Math.round(viewport.height * 0.62),
+          height: Math.round(viewport.height * 0.565),
         },
       ],
     };
@@ -76,16 +100,53 @@ function getMask(viewport: Viewport): ComparisonResult["mask"] {
 
   return {
     rationale:
-      "The desktop runtime hero uses the approved standalone image instead of the reference screenshot raster, so its photographic region is excluded while the left-side interface remains compared.",
+      "The desktop runtime photo starts at the approved 46 percent split below the header, so only that photographic rectangle is excluded from the full-view comparison.",
     regions: [
       {
-        x: Math.round(viewport.width * 0.45),
-        y: 0,
-        width: Math.round(viewport.width * 0.55),
-        height: viewport.height,
+        x: Math.round(viewport.width * 0.464),
+        y: 82,
+        width: Math.round(viewport.width * 0.536),
+        height: viewport.height - 82,
       },
     ],
   };
+}
+
+function getUiInkRegions(viewport: Viewport): readonly MaskRegion[] {
+  if (viewport.width <= 700) {
+    return [
+      { x: 20, y: 8, width: 150, height: 45 },
+      { x: 20, y: 78, width: 230, height: 312 },
+      { x: 20, y: 398, width: 235, height: 135 },
+    ];
+  }
+
+  return [{ x: 1035, y: 20, width: 375, height: 44 }];
+}
+
+function getUiInkCoverageBaselines(viewport: Viewport) {
+  // Captured after `document.fonts.ready` at the approved CSS viewports. The
+  // gate allows a 10% rasterisation margin below while making a removed control
+  // unambiguously fail without depending on the variable hero photograph.
+  if (viewport.width <= 700) {
+    return [1264, 17232, 2315] as const;
+  }
+
+  return [416] as const;
+}
+
+function getVisualBudgets(viewport: Viewport) {
+  if (viewport.width <= 700) {
+    return {
+      imageMaxMismatchRatio: 0.145,
+      uiInkMaxMismatchRatio: 0.24,
+    } as const;
+  }
+
+  return {
+    imageMaxMismatchRatio: 0.12,
+    uiInkMaxMismatchRatio: 0.05,
+  } as const;
 }
 
 function resizeNearest(source: PNG, width: number, height: number) {
@@ -172,7 +233,7 @@ function createMaskedDiff({
   }
 
   const diff = new PNG({ width: capture.width, height: capture.height });
-  const threshold = 0.32;
+  const threshold = 0.18;
   const changedPixels = pixelmatch(
     referenceForDiff.data,
     captureForDiff.data,
@@ -190,17 +251,164 @@ function createMaskedDiff({
   };
 }
 
+const warmWhite = [247, 245, 240] as const;
+const nearBlack = [16, 17, 15] as const;
+const deepEmerald = [0, 107, 60] as const;
+
+function isWithinRegion(x: number, y: number, regions: readonly MaskRegion[]) {
+  return regions.some(
+    (region) =>
+      x >= region.x &&
+      y >= region.y &&
+      x < region.x + region.width &&
+      y < region.y + region.height,
+  );
+}
+
+function colorDistance(
+  red: number,
+  green: number,
+  blue: number,
+  target: readonly [number, number, number],
+) {
+  return Math.hypot(red - target[0], green - target[1], blue - target[2]);
+}
+
+function getUiInkColor(red: number, green: number, blue: number) {
+  if (colorDistance(red, green, blue, nearBlack) <= 58) {
+    return nearBlack;
+  }
+
+  if (colorDistance(red, green, blue, deepEmerald) <= 68) {
+    return deepEmerald;
+  }
+
+  return null;
+}
+
+function createUiInkLayer(source: PNG, regions: readonly MaskRegion[]) {
+  const layer = new PNG({ width: source.width, height: source.height });
+
+  for (let y = 0; y < source.height; y += 1) {
+    for (let x = 0; x < source.width; x += 1) {
+      const offset = (y * source.width + x) * 4;
+      const ink = isWithinRegion(x, y, regions)
+        ? getUiInkColor(
+            source.data[offset],
+            source.data[offset + 1],
+            source.data[offset + 2],
+          )
+        : null;
+      const color = ink ?? warmWhite;
+
+      layer.data[offset] = color[0];
+      layer.data[offset + 1] = color[1];
+      layer.data[offset + 2] = color[2];
+      layer.data[offset + 3] = 255;
+    }
+  }
+
+  return layer;
+}
+
+function countInkPixels(layer: PNG, region: MaskRegion) {
+  let inkPixels = 0;
+
+  for (let y = region.y; y < region.y + region.height; y += 1) {
+    for (let x = region.x; x < region.x + region.width; x += 1) {
+      const offset = (y * layer.width + x) * 4;
+      const isWarmWhite =
+        layer.data[offset] === warmWhite[0] &&
+        layer.data[offset + 1] === warmWhite[1] &&
+        layer.data[offset + 2] === warmWhite[2];
+
+      if (!isWarmWhite) {
+        inkPixels += 1;
+      }
+    }
+  }
+
+  return inkPixels;
+}
+
+function createUiInkDiff({
+  reference,
+  capture,
+  regions,
+}: {
+  reference: PNG;
+  capture: PNG;
+  regions: readonly MaskRegion[];
+}) {
+  const referenceInk = createUiInkLayer(reference, regions);
+  const captureInk = createUiInkLayer(capture, regions);
+  const diff = new PNG({ width: capture.width, height: capture.height });
+  const threshold = 0.1;
+  const changedPixels = pixelmatch(
+    referenceInk.data,
+    captureInk.data,
+    diff.data,
+    capture.width,
+    capture.height,
+    { threshold, includeAA: false },
+  );
+  const comparedPixels = regions.reduce(
+    (total, region) => total + region.width * region.height,
+    0,
+  );
+
+  return {
+    referenceInk,
+    captureInk,
+    diff,
+    threshold,
+    changedPixels,
+    comparedPixels,
+  };
+}
+
+async function captureUiInk(page: Page, path: string) {
+  const style = await page.addStyleTag({
+    content: ".hero-image { visibility: hidden !important; }",
+  });
+
+  try {
+    await page.screenshot({ path, scale: "css" });
+  } finally {
+    await style.evaluate((element) => element.parentNode?.removeChild(element));
+  }
+}
+
+async function waitForVisualAssets(page: Page) {
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await Promise.all(
+      Array.from(document.images).map((image) => {
+        if (image.complete) {
+          return Promise.resolve();
+        }
+
+        return new Promise<void>((resolveImage) => {
+          image.addEventListener("load", () => resolveImage(), { once: true });
+          image.addEventListener("error", () => resolveImage(), { once: true });
+        });
+      }),
+    );
+  });
+}
+
 export async function captureHomeVisualArtifacts({
   page,
   viewport,
   dpr,
+  state = "ready",
 }: {
   page: Page;
   viewport: Viewport;
   dpr: number;
+  state?: string;
 }): Promise<VisualArtifacts> {
   const route = new URL(page.url()).pathname;
-  const state = "ready";
   const fixture = selectFixture({ route, state });
   const metadata = createCaptureMetadata({
     viewport,
@@ -220,14 +428,27 @@ export async function captureHomeVisualArtifacts({
     ),
     overlay: resolve(artifactDirectory, `${artifactStem}.overlay.png`),
     diff: resolve(artifactDirectory, `${artifactStem}.diff.png`),
+    uiInkCapture: resolve(artifactDirectory, `${artifactStem}.ui-ink.png`),
+    uiInkReference: resolve(
+      artifactDirectory,
+      `${artifactStem}.ui-ink-reference.png`,
+    ),
+    uiInkOverlay: resolve(
+      artifactDirectory,
+      `${artifactStem}.ui-ink-overlay.png`,
+    ),
+    uiInkDiff: resolve(artifactDirectory, `${artifactStem}.ui-ink-diff.png`),
   };
 
   await mkdir(artifactDirectory, { recursive: true });
+  await waitForVisualAssets(page);
   await page.screenshot({ path: files.capture, scale: "css" });
+  await captureUiInk(page, files.uiInkCapture);
 
-  const [captureFile, referenceFile] = await Promise.all([
+  const [captureFile, referenceFile, uiInkCaptureFile] = await Promise.all([
     readFile(files.capture),
     readFile(resolve(repositoryRoot, "docs/design/references", referenceName)),
+    readFile(files.uiInkCapture),
   ]);
   const capture = PNG.sync.read(captureFile);
   const reference = resizeNearest(
@@ -241,20 +462,76 @@ export async function captureHomeVisualArtifacts({
     capture,
     regions: mask.regions,
   });
-  const comparison: ComparisonResult = {
-    reference: referenceName,
+  const uiInkRegions = getUiInkRegions(viewport);
+  const uiInkCoverageBaselines = getUiInkCoverageBaselines(viewport);
+  const budgets = getVisualBudgets(viewport);
+  const uiInkCapture = PNG.sync.read(uiInkCaptureFile);
+  const {
+    referenceInk,
+    captureInk,
+    diff: uiInkDiff,
+    threshold: uiInkThreshold,
+    changedPixels: uiInkChangedPixels,
+    comparedPixels: uiInkComparedPixels,
+  } = createUiInkDiff({
+    reference,
+    capture: uiInkCapture,
+    regions: uiInkRegions,
+  });
+  const image: VisualMetric = {
     threshold,
-    mask,
     changedPixels,
     comparedPixels,
     mismatchRatio: changedPixels / comparedPixels,
-    maxMismatchRatio: viewport.width <= 700 ? 0.24 : 0.33,
+    maxMismatchRatio: budgets.imageMaxMismatchRatio,
+  };
+  const coverage = uiInkRegions.map((region, index) => {
+    const baselineCaptureInkPixels = uiInkCoverageBaselines[index];
+    const minCaptureInkPixels = Math.floor(baselineCaptureInkPixels * 0.9);
+    const capturedInkPixels = countInkPixels(captureInk, region);
+
+    return {
+      region,
+      baselineCaptureInkPixels,
+      minCaptureInkPixels,
+      capturedInkPixels,
+      passes: capturedInkPixels >= minCaptureInkPixels,
+    };
+  });
+  const uiInk: ComparisonResult["uiInk"] = {
+    rationale:
+      "The focused ink layer compares brand, navigation, headline, and description tokens after hiding only the runtime photograph. Its pixel diff and per-region ink-coverage floors keep interface ink over photography regression-tested.",
+    regions: uiInkRegions,
+    coverage,
+    threshold: uiInkThreshold,
+    changedPixels: uiInkChangedPixels,
+    comparedPixels: uiInkComparedPixels,
+    mismatchRatio: uiInkChangedPixels / uiInkComparedPixels,
+    maxMismatchRatio: budgets.uiInkMaxMismatchRatio,
+  };
+  const comparison: ComparisonResult = {
+    reference: referenceName,
+    mask,
+    image,
+    uiInk,
+    mismatchRatio: uiInk.mismatchRatio,
+    maxMismatchRatio: uiInk.maxMismatchRatio,
+    exceedsBudget:
+      image.mismatchRatio > image.maxMismatchRatio ||
+      uiInk.mismatchRatio > uiInk.maxMismatchRatio ||
+      uiInk.coverage.some((region) => !region.passes),
   };
 
   await Promise.all([
     writeFile(files.normalizedReference, PNG.sync.write(reference)),
     writeFile(files.overlay, PNG.sync.write(createOverlay(reference, capture))),
     writeFile(files.diff, PNG.sync.write(diff)),
+    writeFile(files.uiInkReference, PNG.sync.write(referenceInk)),
+    writeFile(
+      files.uiInkOverlay,
+      PNG.sync.write(createOverlay(referenceInk, captureInk)),
+    ),
+    writeFile(files.uiInkDiff, PNG.sync.write(uiInkDiff)),
     writeFile(
       files.metadata,
       `${JSON.stringify(

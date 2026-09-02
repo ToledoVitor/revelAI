@@ -23,6 +23,11 @@ const fixtures = [
     route: "/",
     state: "ready",
   },
+  {
+    id: "home-mutation",
+    route: "/",
+    state: "ui-ink-mutation",
+  },
 ] as const;
 
 function routeFilePart(route: string) {
