@@ -10,9 +10,12 @@
     "build": "pnpm --filter @revelai/design-system run build && tsc --project tsconfig.json && vite build",
     "lint": "eslint src",
     "typecheck": "tsc --project tsconfig.json --noEmit",
-    "test": "vitest run --config vitest.config.ts && pnpm run test:visual",
-    "pretest:visual": "playwright install chromium",
-    "test:visual": "node scripts/run-playwright.mjs"
+    "pretest": "node scripts/ensure-chromium.mjs",
+    "test": "vitest run --config vitest.config.ts && pnpm run test:visual:run",
+    "test:provisioning": "node --test scripts/playwright-provisioning.check.mjs",
+    "pretest:visual": "node scripts/ensure-chromium.mjs",
+    "test:visual": "pnpm run test:visual:run",
+    "test:visual:run": "node scripts/run-playwright.mjs"
   },
   "dependencies": {
     "@fontsource/bebas-neue": "5.3.0",
