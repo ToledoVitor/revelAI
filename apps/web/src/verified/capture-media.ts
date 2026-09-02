@@ -1,4 +1,8 @@
-export type AcceptedMediaMime = "video/mp4" | "video/quicktime" | "video/webm";
+export {
+  normalizeSelectedMedia,
+  selectedMediaMime,
+  type AcceptedMediaMime,
+} from "../lib/media/selected-media";
 
 export type RecorderCandidate = Readonly<{
   recorderMime: string;
@@ -41,38 +45,6 @@ export const captureRequirementLines = [
   "Duas placas fiduciais quadradas de 0,20 m no chão. Parede/chão é Y=0, Y positivo aponta ao atleta e X negativo fica à esquerda.",
   "Centro A (-1,50, 3,00) m; cantos TL/TR/BR/BL: (-1,60,2,90), (-1,40,2,90), (-1,40,3,10), (-1,60,3,10). Centro B (1,50, 3,00) m; cantos: (1,40,2,90), (1,60,2,90), (1,60,3,10), (1,40,3,10).",
 ] as const;
-
-export function selectedMediaMime(file: File): AcceptedMediaMime | undefined {
-  const extension = file.name.toLowerCase().split(".").at(-1);
-  const expectedMime =
-    extension === "mp4"
-      ? "video/mp4"
-      : extension === "mov"
-        ? "video/quicktime"
-        : extension === "webm"
-          ? "video/webm"
-          : undefined;
-
-  if (!expectedMime) return undefined;
-  const declaredMime = file.type.split(";", 1)[0]?.trim().toLowerCase();
-  return declaredMime === "" || declaredMime === expectedMime
-    ? expectedMime
-    : undefined;
-}
-
-export function normalizeSelectedMedia(
-  sourceFile: File,
-): Readonly<{ file: File; wireMime: AcceptedMediaMime }> | undefined {
-  const wireMime = selectedMediaMime(sourceFile);
-  if (!wireMime) return undefined;
-  return {
-    file:
-      sourceFile.type === wireMime
-        ? sourceFile
-        : new File([sourceFile], sourceFile.name, { type: wireMime }),
-    wireMime,
-  };
-}
 
 export function selectedRecorderCandidate(): RecorderCandidate | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;

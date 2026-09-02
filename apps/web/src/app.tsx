@@ -89,6 +89,39 @@ type ShellProps = Readonly<{
   reviewSetupPort?: ReviewSetupPort;
 }>;
 
+function canonicalPathname(pathname: string): string {
+  const collapsed = pathname.replace(/\/{2,}/g, "/");
+  if (collapsed === "/") return collapsed;
+  return collapsed.replace(/\/+$/, "") || "/";
+}
+
+function isFreeTrainingPath(pathname: string): boolean {
+  return canonicalPathname(pathname) === "/free-training";
+}
+
+function FreeTrainingRoute({ client }: Readonly<{ client: RevelApiClient }>) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const canonicalPath = canonicalPathname(location.pathname);
+
+  useEffect(() => {
+    if (location.pathname === canonicalPath) return;
+    navigate(`${canonicalPath}${location.search}${location.hash}`, {
+      replace: true,
+    });
+  }, [
+    canonicalPath,
+    location.hash,
+    location.pathname,
+    location.search,
+    navigate,
+  ]);
+
+  if (location.pathname !== canonicalPath) return null;
+  if (canonicalPath !== "/free-training") return <UnavailableShell />;
+  return <FreeTrainingTracer client={client} />;
+}
+
 function Shell({ client, reviewCapturePort, reviewSetupPort }: ShellProps) {
   const [isNavigationOpen, setNavigationOpen] = useState(false);
   const navigationToggleRef = useRef<HTMLButtonElement>(null);
@@ -168,7 +201,7 @@ function Shell({ client, reviewCapturePort, reviewSetupPort }: ShellProps) {
           <Link to="/training/history" onClick={() => closeNavigation()}>
             Meus treinos
           </Link>
-          {location.pathname !== "/free-training" ? (
+          {!isFreeTrainingPath(location.pathname) ? (
             <button type="button" onClick={openRanking}>
               Ranking
             </button>
@@ -188,8 +221,8 @@ function Shell({ client, reviewCapturePort, reviewSetupPort }: ShellProps) {
         />
         <Route path="/verified" element={<VerifiedTracer client={client} />} />
         <Route
-          path="/free-training"
-          element={<FreeTrainingTracer client={client} />}
+          path="/free-training/*"
+          element={<FreeTrainingRoute client={client} />}
         />
         <Route
           path="/training/history"
@@ -257,11 +290,16 @@ function UnavailableShell() {
 }
 
 type AppProps = Readonly<{
+  apiClient?: RevelApiClient;
   reviewCapturePort?: ReviewCapturePort;
   reviewSetupPort?: ReviewSetupPort;
 }>;
 
-export function App({ reviewCapturePort, reviewSetupPort }: AppProps = {}) {
+export function App({
+  apiClient,
+  reviewCapturePort,
+  reviewSetupPort,
+}: AppProps = {}) {
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -270,11 +308,13 @@ export function App({ reviewCapturePort, reviewSetupPort }: AppProps = {}) {
         },
       }),
   );
-  const [client] = useState(() =>
-    createRevelApiClient({
-      baseUrl: window.location.origin,
-      athleteId: getDeviceAthleteId(),
-    }),
+  const [client] = useState(
+    () =>
+      apiClient ??
+      createRevelApiClient({
+        baseUrl: window.location.origin,
+        athleteId: getDeviceAthleteId(),
+      }),
   );
 
   return (

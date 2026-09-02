@@ -34,6 +34,7 @@ function messageFor(error: unknown): string {
 
 export function TrainingHistory({ client }: TrainingHistoryProps) {
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const deleteLockRef = useRef<string | undefined>(undefined);
   const queryClient = useQueryClient();
   const location = useLocation();
   const [deleteMessage, setDeleteMessage] = useState<string | null>(() =>
@@ -69,6 +70,9 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
       setDeleteMessage("Treino excluído.");
       headingRef.current?.focus();
     },
+    onSettled: (_result, _error, id) => {
+      if (deleteLockRef.current === id) deleteLockRef.current = undefined;
+    },
   });
 
   useEffect(() => {
@@ -80,12 +84,16 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
   const initialLoadFailed =
     history.isError && !history.isFetchNextPageError && attempts.length === 0;
   const requestDelete = (id: string) => {
+    if (deleteLockRef.current) return;
+    deleteLockRef.current = id;
     if (
       !window.confirm(
         "Excluir este treino? A mídia e a análise serão removidas.",
       )
-    )
+    ) {
+      deleteLockRef.current = undefined;
       return;
+    }
     deleteAttempt.mutate(id);
   };
 

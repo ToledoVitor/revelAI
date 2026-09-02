@@ -19,9 +19,11 @@ import {
   type SetupGate,
 } from "./setup-model";
 import {
+  isAmbiguousUploadError,
   isVerifiedOutcomeForAttempt,
   resolveUploadReconciliation,
 } from "./upload-reconciliation";
+import { usePendingAttemptPolling } from "../lib/attempt-flow/pending-polling";
 
 type RevelApiClient = ReturnType<typeof createRevelApiClient>;
 
@@ -100,16 +102,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
   const createStartedRef = useRef(false);
   const activeUploadRef = useRef<AbortController | undefined>(undefined);
   const uploadGenerationRef = useRef(0);
-  const pendingRequestRef = useRef<
-    | Readonly<{
-        attemptId: string;
-        generation: number;
-        controller: AbortController;
-      }>
-    | undefined
-  >(undefined);
-  const timeoutRef = useRef<number | undefined>(undefined);
-  const pollAbortRef = useRef<AbortController | undefined>(undefined);
+  const pollingStopRef = useRef<() => void>(() => undefined);
   const [stage, setStage] = useState<TracerStage>("setup");
   const [gateIndex, setGateIndex] = useState(0);
   const [passedGates, setPassedGates] = useState<ReadonlySet<SetupGate["id"]>>(
@@ -127,9 +120,6 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
     "creating" | "ready" | "error"
   >("creating");
   const [createTick, setCreateTick] = useState(0);
-  const [backoffSeconds, setBackoffSeconds] = useState(1);
-  const [pollTick, setPollTick] = useState(0);
-  const [refreshing, setRefreshing] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<
     Readonly<{ loaded: number; total?: number }> | undefined
   >();
@@ -144,13 +134,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
     const upload = activeUploadRef.current;
     activeUploadRef.current = undefined;
     upload?.abort();
-    const pending = pendingRequestRef.current;
-    pendingRequestRef.current = undefined;
-    pending?.controller.abort();
-    pollAbortRef.current?.abort();
-    if (timeoutRef.current !== undefined)
-      window.clearTimeout(timeoutRef.current);
-    timeoutRef.current = undefined;
+    pollingStopRef.current();
     setGateIndex(0);
     setPassedGates(new Set());
     setCameraStatus("pending");
@@ -162,21 +146,12 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
     setMessage("");
     setAttemptState("creating");
     setCreateTick(0);
-    setBackoffSeconds(1);
-    setPollTick(0);
-    setRefreshing(false);
     setUploadProgress(undefined);
     setStage("setup");
   }, []);
 
   const stopPolling = useCallback(() => {
-    if (timeoutRef.current !== undefined)
-      window.clearTimeout(timeoutRef.current);
-    timeoutRef.current = undefined;
-    const pending = pendingRequestRef.current;
-    pendingRequestRef.current = undefined;
-    pending?.controller.abort();
-    pollAbortRef.current = undefined;
+    pollingStopRef.current();
   }, []);
 
   const completeOutcome = useCallback(
@@ -217,7 +192,6 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
         setStage("capture");
         return;
       }
-      setBackoffSeconds(1);
       if (transition.kind === "pending") {
         setStage("pending");
         return;
@@ -381,9 +355,11 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
         activeUploadRef.current = undefined;
         setUploadProgress(undefined);
         if (
-          hasRouteErrorCode(error, "duplicate_media_upload") ||
-          isAbort(error) ||
-          !isRouteError(error)
+          isAmbiguousUploadError(error, {
+            isAbort,
+            isRouteError,
+            hasRouteErrorCode,
+          })
         ) {
           void reconcileUploadAttempt(
             attemptId,
@@ -411,79 +387,33 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
     stage,
   ]);
 
-  const refreshOutcome = useCallback(async () => {
-    if (stage !== "pending" || !attemptId) return;
-    const generation = generationRef.current;
-    const activeRequest = pendingRequestRef.current;
-    if (
-      activeRequest &&
-      activeRequest.generation === generation &&
-      activeRequest.attemptId === attemptId
-    )
-      return;
-    const controller = new AbortController();
-    const request = { attemptId, generation, controller };
-    pendingRequestRef.current = request;
-    setRefreshing(true);
-    pollAbortRef.current = controller;
-    try {
-      const nextOutcome = await client.getAttemptOutcome(attemptId, {
-        signal: controller.signal,
-      });
-      if (
-        controller.signal.aborted ||
-        pendingRequestRef.current !== request ||
-        generation !== generationRef.current
-      )
-        return;
-      if (!isVerifiedOutcomeForAttempt(nextOutcome, attemptId)) {
-        completeOutcome(nextOutcome, attemptId);
+  const pendingPolling = usePendingAttemptPolling({
+    enabled: stage === "pending" && outcome?.state === "pending",
+    attemptId,
+    generation: generationRef.current,
+    request: async (ownedAttemptId, options) => {
+      const nextOutcome = await client.getAttemptOutcome(
+        ownedAttemptId,
+        options,
+      );
+      return !isVerifiedOutcomeForAttempt(nextOutcome, ownedAttemptId) ||
+        nextOutcome.state !== "pending"
+        ? { kind: "terminal" as const, value: nextOutcome }
+        : { kind: "pending" as const, value: nextOutcome };
+    },
+    onDecision: (decision) => {
+      if (!attemptId) return;
+      if (decision.kind === "terminal") {
+        completeOutcome(decision.value, attemptId);
         return;
       }
       setMessage("");
-      setOutcome(nextOutcome);
-      if (nextOutcome.state === "pending") {
-        const nextDelay = Math.min(backoffSeconds * 2, 5);
-        setBackoffSeconds(nextDelay);
-      } else {
-        completeOutcome(nextOutcome, attemptId);
-      }
-    } catch (error) {
-      if (!isAbort(error)) setMessage(safeError(error));
-    } finally {
-      if (pollAbortRef.current === controller) pollAbortRef.current = undefined;
-      if (pendingRequestRef.current === request)
-        pendingRequestRef.current = undefined;
-      if (generation === generationRef.current) setRefreshing(false);
-      if (
-        !controller.signal.aborted &&
-        generation === generationRef.current &&
-        stage === "pending"
-      ) {
-        setPollTick((current) => current + 1);
-      }
-    }
-  }, [attemptId, backoffSeconds, client, completeOutcome, stage]);
-
-  useEffect(() => {
-    if (stage !== "pending" || outcome?.state !== "pending") return;
-    const delay = Math.min(backoffSeconds, 5) * 1_000;
-    timeoutRef.current = window.setTimeout(() => void refreshOutcome(), delay);
-    const onFocus = () => void refreshOutcome();
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") void refreshOutcome();
-    };
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      if (timeoutRef.current !== undefined)
-        window.clearTimeout(timeoutRef.current);
-      timeoutRef.current = undefined;
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVisibility);
-      pollAbortRef.current?.abort();
-    };
-  }, [backoffSeconds, outcome, pollTick, refreshOutcome, stage]);
+      setOutcome(decision.value);
+    },
+    onError: (error) => setMessage(safeError(error)),
+    isAbort,
+  });
+  pollingStopRef.current = pendingPolling.stop;
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
@@ -698,13 +628,15 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
         {message ? <p role="alert">{message}</p> : null}
         <button
           type="button"
-          disabled={refreshing}
-          aria-busy={refreshing}
-          onClick={() => void refreshOutcome()}
+          disabled={pendingPolling.refreshing}
+          aria-busy={pendingPolling.refreshing}
+          onClick={() => void pendingPolling.refresh()}
         >
           Atualizar agora
         </button>
-        {refreshing ? <p role="status">Atualizando tentativa.</p> : null}
+        {pendingPolling.refreshing ? (
+          <p role="status">Atualizando tentativa.</p>
+        ) : null}
         <button type="button" onClick={() => resetToSetup()}>
           Iniciar outro desafio
         </button>

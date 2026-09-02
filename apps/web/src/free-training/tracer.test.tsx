@@ -11,6 +11,7 @@ import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttemptOutcome } from "@revelai/contracts";
 import { App } from "../app";
+import { createRevelApiClient } from "../lib/api/client";
 import { resolveUploadReconciliation } from "../verified/upload-reconciliation";
 
 const createdFreeAttempt = {
@@ -186,6 +187,7 @@ function freeWorkflowFetch(outcome: AttemptOutcome) {
 describe("production Free Training tracer", () => {
   beforeEach(() => {
     window.history.replaceState({}, "", "/");
+    window.sessionStorage.clear();
   });
 
   afterEach(() => {
@@ -193,6 +195,7 @@ describe("production Free Training tracer", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    window.sessionStorage.clear();
     Reflect.deleteProperty(URL, "createObjectURL");
     Reflect.deleteProperty(URL, "revokeObjectURL");
   });
@@ -271,6 +274,126 @@ describe("production Free Training tracer", () => {
       await Promise.resolve();
     });
     expect(screen.queryByRole("main")).not.toBeInTheDocument();
+  });
+
+  it("recovers a server-committed Free create after unmount before its response, without posting another owner", async () => {
+    window.history.replaceState({}, "", "/free-training");
+    const serverCommittedCreate = deferred<Response>();
+    let creates = 0;
+    let listReads = 0;
+    const fetchSpy = vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(input.toString());
+      if (url.pathname !== "/v1/attempts")
+        throw new Error(`Unexpected request: ${url.pathname}`);
+      if (url.search) {
+        listReads += 1;
+        return Promise.resolve(
+          response({
+            items: [
+              { ...createdFreeAttempt, createdAt: new Date().toISOString() },
+            ],
+            nextCursor: null,
+          }),
+        );
+      }
+      creates += 1;
+      return serverCommittedCreate.promise;
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const first = render(<App />);
+    await waitFor(() => expect(creates).toBe(1));
+    first.unmount();
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("button", { name: "Selecionar vídeo" }),
+    ).toBeEnabled();
+    expect(creates).toBe(1);
+    expect(listReads).toBe(1);
+  });
+
+  it.each([
+    ["awaiting upload", createdFreeAttempt, "Selecionar vídeo", undefined],
+    [
+      "processing",
+      {
+        ...createdFreeAttempt,
+        status: "processing",
+        outcome: {
+          state: "pending",
+          attemptId: "attempt-free-w5-1",
+          mode: "free",
+          status: "processing",
+        },
+      },
+      "Atualizar agora",
+      undefined,
+    ],
+    [
+      "valid terminal",
+      { ...createdFreeAttempt, status: "valid", outcome: freeInsight },
+      "Excluir treino",
+      "Mantenha a bola visível durante a sequência.",
+    ],
+    [
+      "failed terminal",
+      { ...createdFreeAttempt, status: "failed", outcome: freeFailure },
+      "Excluir treino",
+      "A análise está indisponível temporariamente.",
+    ],
+  ] as const)(
+    "resumes a persisted Free owner at %s without another create",
+    async (_name, restoredAttempt, expectedControl, expectedText) => {
+      window.history.replaceState({}, "", "/free-training");
+      window.sessionStorage.setItem(
+        "revelai.free-training.owner.v1",
+        JSON.stringify({ attemptId: "attempt-free-w5-1" }),
+      );
+      const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+        const pathname = new URL(input.toString()).pathname;
+        if (pathname === "/v1/attempts/attempt-free-w5-1")
+          return response(restoredAttempt);
+        throw new Error(`Unexpected request: ${pathname}`);
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      render(<App />);
+
+      expect(
+        await screen.findByRole("button", { name: expectedControl }),
+      ).toBeEnabled();
+      if (expectedText) expect(screen.getByText(expectedText)).toBeVisible();
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("fails closed instead of adopting a different Free record for a persisted owner", async () => {
+    window.history.replaceState({}, "", "/free-training");
+    window.sessionStorage.setItem(
+      "revelai.free-training.owner.v1",
+      JSON.stringify({ attemptId: "attempt-owned" }),
+    );
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname === "/v1/attempts/attempt-owned")
+        return response({
+          ...createdFreeAttempt,
+          id: "attempt-unrelated",
+          outcome: {
+            ...createdFreeAttempt.outcome,
+            attemptId: "attempt-unrelated",
+          },
+        });
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(<App />);
+
+    expect(await screen.findByText("Resultado indisponível")).toBeVisible();
+    expect(fetchSpy).toHaveBeenCalledOnce();
   });
 
   it("shows only the Free video requirements before opening its picker", async () => {
@@ -438,6 +561,62 @@ describe("production Free Training tracer", () => {
     expect(screen.getByRole("main")).not.toHaveTextContent(
       /score|ranking|rank|percentil|top percent|verified/i,
     );
+  });
+
+  it("renders owner upload progress from the injected production XHR path", async () => {
+    const user = userEvent.setup();
+    const uploadListeners = new Map<string, (event: ProgressEvent) => void>();
+    const requestListeners = new Map<string, () => void>();
+    const fetchSpy = vi.fn(async () => response(createdFreeAttempt, 201));
+    const xhr = {
+      upload: {
+        addEventListener: (
+          type: string,
+          listener: (event: ProgressEvent) => void,
+        ) => uploadListeners.set(type, listener),
+        removeEventListener: (type: string) => uploadListeners.delete(type),
+      },
+      status: 202,
+      responseText: JSON.stringify(acceptedFreeUpload),
+      open: () => undefined,
+      setRequestHeader: () => undefined,
+      addEventListener: (type: string, listener: () => void) =>
+        requestListeners.set(type, listener),
+      removeEventListener: (type: string) => requestListeners.delete(type),
+      send: () =>
+        uploadListeners.get("progress")?.({
+          lengthComputable: true,
+          loaded: 3,
+          total: 5,
+        } as ProgressEvent),
+      abort: () => requestListeners.get("abort")?.(),
+    };
+    const client = createRevelApiClient({
+      baseUrl: window.location.origin,
+      athleteId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+      fetch: fetchSpy,
+      xhrFactory: () => xhr as unknown as XMLHttpRequest,
+    });
+
+    render(<App apiClient={client} />);
+    await user.click(screen.getByRole("button", { name: "Treino livre" }));
+    fireEvent.change(await screen.findByTestId("free-training-video-input"), {
+      target: {
+        files: [new File(["video"], "xhr.webm", { type: "video/webm" })],
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+
+    expect(
+      await screen.findByRole("progressbar", {
+        name: "Envio do vídeo do treino livre",
+      }),
+    ).toHaveAttribute("value", "3");
+    expect(screen.getByText("Enviando 3 de 5 bytes.")).toBeVisible();
+    requestListeners.get("load")?.();
+    expect(
+      await screen.findByRole("button", { name: "Atualizar agora" }),
+    ).toBeEnabled();
   });
 
   it("polls the owned Free Attempt with the capped 1, 2, 4, 5 second backoff and stops at insight", async () => {
@@ -1139,6 +1318,64 @@ describe("production Free Training tracer", () => {
     ).toHaveFocus();
     expect(deletes).toBe(2);
     expect(confirm).toHaveBeenCalledTimes(2);
+  });
+
+  it("serializes same-tick Free deletion and aborts its stale request on unmount", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const deletion = deferred<Response>();
+    let deletes = 0;
+    let deleteSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const pathname = new URL(input.toString()).pathname;
+        if (pathname === "/v1/attempts" && init?.method === "POST")
+          return Promise.resolve(response(createdFreeAttempt, 201));
+        if (pathname === "/v1/attempts/attempt-free-w5-1/media")
+          return Promise.resolve(response(acceptedFreeUpload, 202));
+        if (pathname === "/v1/attempts/attempt-free-w5-1/result")
+          return Promise.resolve(response(freeInsight));
+        if (
+          pathname === "/v1/attempts/attempt-free-w5-1" &&
+          init?.method === "DELETE"
+        ) {
+          deletes += 1;
+          deleteSignal = init.signal ?? undefined;
+          return deletion.promise;
+        }
+        throw new Error(`Unexpected request: ${pathname}`);
+      }),
+    );
+    const view = render(<App />);
+    await user.click(screen.getByRole("button", { name: "Treino livre" }));
+    fireEvent.change(await screen.findByTestId("free-training-video-input"), {
+      target: {
+        files: [new File(["video"], "delete.webm", { type: "video/webm" })],
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Atualizar agora" }),
+    );
+    const deleteButton = await screen.findByRole("button", {
+      name: "Excluir treino",
+    });
+    fireEvent.click(deleteButton);
+    fireEvent.click(deleteButton);
+
+    await waitFor(() => expect(deletes).toBe(1));
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    view.unmount();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(deleteSignal?.aborted).toBe(true);
+    await act(async () => {
+      deletion.resolve(new Response(null, { status: 204 }));
+      await Promise.resolve();
+    });
+    expect(window.location.pathname).toBe("/free-training");
   });
 
   it("removes a previously cached Free history record before returning after deletion", async () => {

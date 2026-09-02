@@ -268,3 +268,159 @@ test("served production direct Free route owns its one creation without review m
     ),
   ).toBeUndefined();
 });
+
+test("served production canonicalizes trailing and repeated Free slashes before the sole owner mounts", async ({
+  page,
+}) => {
+  const requestBodies: unknown[] = [];
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "POST" && url.pathname === "/v1/attempts") {
+      requestBodies.push(request.postDataJSON());
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "attempt-free-canonical",
+          mode: "free",
+          status: "awaiting-upload",
+          createdAt: "2026-08-30T12:01:00.000Z",
+          outcome: {
+            state: "pending",
+            attemptId: "attempt-free-canonical",
+            mode: "free",
+            status: "awaiting-upload",
+          },
+        }),
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, body: "not expected" });
+  });
+
+  await page.goto("/free-training///");
+
+  await expect(page).toHaveURL(/\/free-training$/);
+  const freeOwner = page.getByRole("main", {
+    name: "Treino livre — análise aproximada",
+  });
+  await expect(
+    freeOwner.getByRole("button", { name: "Selecionar vídeo" }),
+  ).toBeEnabled();
+  await expect(page.getByRole("navigation")).not.toContainText("Ranking");
+  await expect(freeOwner).not.toContainText(
+    /score|ranking|rank|percentil|top percent|verified/i,
+  );
+  expect(requestBodies).toEqual([{ mode: "free" }]);
+});
+
+test("served production reload resumes an observed Free owner without another POST", async ({
+  page,
+}) => {
+  let creates = 0;
+  let reads = 0;
+  const created = {
+    id: "attempt-free-reload",
+    mode: "free",
+    status: "awaiting-upload",
+    createdAt: "2026-08-30T12:01:00.000Z",
+    outcome: {
+      state: "pending",
+      attemptId: "attempt-free-reload",
+      mode: "free",
+      status: "awaiting-upload",
+    },
+  };
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "POST" && url.pathname === "/v1/attempts") {
+      creates += 1;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(created),
+      });
+      return;
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname === "/v1/attempts/attempt-free-reload"
+    ) {
+      reads += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(created),
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, body: "not expected" });
+  });
+
+  await page.goto("/free-training");
+  await expect(
+    page.getByRole("button", { name: "Selecionar vídeo" }),
+  ).toBeEnabled();
+  await page.reload();
+
+  await expect(
+    page.getByRole("button", { name: "Selecionar vídeo" }),
+  ).toBeEnabled();
+  expect(creates).toBe(1);
+  expect(reads).toBe(1);
+});
+
+test("served production recovers a commit-wins lost Free create after reload without an orphan POST", async ({
+  page,
+}) => {
+  let creates = 0;
+  let listReads = 0;
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "POST" && url.pathname === "/v1/attempts") {
+      creates += 1;
+      await route.abort("connectionreset");
+      return;
+    }
+    if (request.method() === "GET" && url.pathname === "/v1/attempts") {
+      listReads += 1;
+      const createdAt = new Date(Date.now() + 1_000).toISOString();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [
+            {
+              id: "attempt-free-commit-wins",
+              mode: "free",
+              status: "awaiting-upload",
+              createdAt,
+              outcome: {
+                state: "pending",
+                attemptId: "attempt-free-commit-wins",
+                mode: "free",
+                status: "awaiting-upload",
+              },
+            },
+          ],
+          nextCursor: null,
+        }),
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, body: "not expected" });
+  });
+
+  await page.goto("/free-training");
+  await expect(page.getByRole("alert")).toBeVisible();
+  await page.reload();
+
+  await expect(
+    page.getByRole("button", { name: "Selecionar vídeo" }),
+  ).toBeEnabled();
+  expect(creates).toBe(1);
+  expect(listReads).toBe(1);
+});

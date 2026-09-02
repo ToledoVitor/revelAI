@@ -15,8 +15,19 @@ import { trainingHistoryQueryKey } from "../history/query";
 import {
   isOutcomeForAttempt,
   resolveUploadReconciliation,
-} from "../verified/upload-reconciliation";
+  isAmbiguousUploadError,
+} from "../lib/attempt-flow/upload-reconciliation";
+import { usePendingAttemptPolling } from "../lib/attempt-flow/pending-polling";
 import { FreeTrainingMedia } from "./media";
+import {
+  beginFreeTrainingCreateIntent,
+  clearFreeTrainingCreateIntent,
+  clearFreeTrainingOwner,
+  persistFreeTrainingOwner,
+  recoverFreeTrainingOwner,
+  readFreeTrainingCreateIntent,
+  readFreeTrainingOwner,
+} from "./owner";
 
 type FreeTrainingTracerProps = Readonly<{
   client: ReturnType<typeof createRevelApiClient>;
@@ -79,20 +90,12 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
   const flowGenerationRef = useRef(0);
   const mountedRef = useRef(false);
   const createStartedRef = useRef(false);
+  const ownerRecoveryStartedRef = useRef(false);
   const uploadGenerationRef = useRef(0);
   const activeCreateRef = useRef<AbortController | undefined>(undefined);
   const activeUploadRef = useRef<AbortController | undefined>(undefined);
   const activeDeleteRef = useRef<AbortController | undefined>(undefined);
-  const pendingRequestRef = useRef<
-    | Readonly<{
-        attemptId: string;
-        generation: number;
-        controller: AbortController;
-      }>
-    | undefined
-  >(undefined);
-  const timeoutRef = useRef<number | undefined>(undefined);
-  const pollAbortRef = useRef<AbortController | undefined>(undefined);
+  const pollingStopRef = useRef<() => void>(() => undefined);
   const [stage, setStage] = useState<FreeStage>("creating");
   const [attemptId, setAttemptId] = useState<string>();
   const [media, setMedia] = useState<File>();
@@ -100,26 +103,20 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
   const [terminal, setTerminal] = useState<AttemptOutcome>();
   const [message, setMessage] = useState("");
   const [createTick, setCreateTick] = useState(0);
-  const [backoffSeconds, setBackoffSeconds] = useState(1);
-  const [pollTick, setPollTick] = useState(0);
-  const [refreshing, setRefreshing] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<
     Readonly<{ loaded: number; total?: number }> | undefined
   >();
 
   const stopPolling = useCallback(() => {
-    if (timeoutRef.current !== undefined)
-      window.clearTimeout(timeoutRef.current);
-    timeoutRef.current = undefined;
-    const pending = pendingRequestRef.current;
-    pendingRequestRef.current = undefined;
-    pending?.controller.abort();
-    pollAbortRef.current = undefined;
+    pollingStopRef.current();
   }, []);
 
   const resetForNewTraining = useCallback(() => {
     flowGenerationRef.current += 1;
     createStartedRef.current = false;
+    ownerRecoveryStartedRef.current = false;
+    clearFreeTrainingOwner();
+    clearFreeTrainingCreateIntent();
     uploadGenerationRef.current += 1;
     const creation = activeCreateRef.current;
     activeCreateRef.current = undefined;
@@ -136,9 +133,6 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
     setOutcome(undefined);
     setTerminal(undefined);
     setMessage("");
-    setBackoffSeconds(1);
-    setPollTick(0);
-    setRefreshing(false);
     setUploadProgress(undefined);
     setStage("creating");
     setCreateTick((current) => current + 1);
@@ -181,7 +175,6 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
         setStage("capture");
         return;
       }
-      setBackoffSeconds(1);
       if (transition.kind === "pending") {
         setStage("pending");
         return;
@@ -225,46 +218,126 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
   }, [stage, terminal]);
 
   useEffect(() => {
-    if (stage !== "creating" || createStartedRef.current) return;
+    if (
+      stage !== "creating" ||
+      createStartedRef.current ||
+      ownerRecoveryStartedRef.current
+    )
+      return;
     createStartedRef.current = true;
+    ownerRecoveryStartedRef.current = true;
     const generation = flowGenerationRef.current;
     const controller = new AbortController();
     activeCreateRef.current = controller;
-    void client
-      .createAttempt({ mode: "free" }, { signal: controller.signal })
-      .then((attempt) => {
-        if (
-          controller.signal.aborted ||
-          generation !== flowGenerationRef.current
-        )
-          return;
-        activeCreateRef.current = undefined;
-        if (
-          attempt.mode !== "free" ||
-          attempt.outcome.mode !== "free" ||
-          attempt.outcome.attemptId !== attempt.id ||
-          attempt.outcome.status !== "awaiting-upload"
-        ) {
-          setMessage("Esta tentativa não está disponível neste fluxo.");
-          setStage("terminal");
+
+    const isCurrent = () =>
+      !controller.signal.aborted &&
+      generation === flowGenerationRef.current &&
+      activeCreateRef.current === controller;
+    const rejectOwner = () => {
+      if (!isCurrent()) return;
+      activeCreateRef.current = undefined;
+      clearFreeTrainingOwner();
+      setMessage("Esta tentativa não está disponível neste fluxo.");
+      setStage("terminal");
+    };
+    const adopt = (attempt: {
+      id: string;
+      mode: string;
+      outcome: AttemptOutcome;
+    }) => {
+      if (!isCurrent()) return;
+      if (!isOutcomeForAttempt(attempt.outcome, attempt.id, "free")) {
+        rejectOwner();
+        return;
+      }
+      activeCreateRef.current = undefined;
+      persistFreeTrainingOwner(attempt.id);
+      clearFreeTrainingCreateIntent();
+      setAttemptId(attempt.id);
+      applyUploadOutcome(attempt.outcome, attempt.id);
+    };
+    const create = async () => {
+      beginFreeTrainingCreateIntent();
+      try {
+        const attempt = await client.createAttempt(
+          { mode: "free" },
+          { signal: controller.signal },
+        );
+        if (attempt.mode !== "free") {
+          rejectOwner();
           return;
         }
-        setAttemptId(attempt.id);
-        setOutcome(attempt.outcome);
-        setStage("capture");
-      })
-      .catch((error: unknown) => {
-        if (
-          controller.signal.aborted ||
-          generation !== flowGenerationRef.current
-        )
-          return;
+        adopt(attempt);
+      } catch (error) {
+        if (!isCurrent() || isAbort(error)) return;
         activeCreateRef.current = undefined;
         createStartedRef.current = false;
+        ownerRecoveryStartedRef.current = false;
+        if (isRouteError(error)) clearFreeTrainingCreateIntent();
         setMessage(safeError(error));
-      });
+      }
+    };
+    const recoverOrCreate = async () => {
+      const owner = readFreeTrainingOwner();
+      if (owner) {
+        try {
+          const attempt = await client.getAttempt(owner.attemptId, {
+            signal: controller.signal,
+          });
+          if (attempt.mode !== "free" || attempt.id !== owner.attemptId) {
+            rejectOwner();
+            return;
+          }
+          adopt(attempt);
+        } catch (error) {
+          if (!isCurrent() || isAbort(error)) return;
+          activeCreateRef.current = undefined;
+          createStartedRef.current = false;
+          ownerRecoveryStartedRef.current = false;
+          setMessage(safeError(error));
+        }
+        return;
+      }
+
+      const intent = readFreeTrainingCreateIntent();
+      if (intent) {
+        try {
+          const attempts = await client.listAttempts(
+            { limit: 50 },
+            {
+              signal: controller.signal,
+            },
+          );
+          if (!isCurrent()) return;
+          const recovery = recoverFreeTrainingOwner(attempts, intent);
+          if (recovery.kind === "owner") {
+            adopt(recovery.attempt);
+            return;
+          }
+          if (recovery.kind === "ambiguous") {
+            activeCreateRef.current = undefined;
+            createStartedRef.current = false;
+            ownerRecoveryStartedRef.current = false;
+            setMessage(
+              "Não foi possível confirmar qual treino livre deve continuar.",
+            );
+            return;
+          }
+        } catch (error) {
+          if (!isCurrent() || isAbort(error)) return;
+          activeCreateRef.current = undefined;
+          createStartedRef.current = false;
+          ownerRecoveryStartedRef.current = false;
+          setMessage(safeError(error));
+          return;
+        }
+      }
+      if (isCurrent()) void create();
+    };
+    void recoverOrCreate();
     return undefined;
-  }, [client, createTick, stage]);
+  }, [applyUploadOutcome, client, createTick, stage]);
 
   useEffect(() => {
     if (stage !== "uploading" || !attemptId || !media) return;
@@ -311,9 +384,11 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
         activeUploadRef.current = undefined;
         setUploadProgress(undefined);
         if (
-          hasRouteErrorCode(error, "duplicate_media_upload") ||
-          isAbort(error) ||
-          !isRouteError(error)
+          isAmbiguousUploadError(error, {
+            isAbort,
+            isRouteError,
+            hasRouteErrorCode,
+          })
         ) {
           void reconcileUploadAttempt(
             attemptId,
@@ -341,77 +416,33 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
     stage,
   ]);
 
-  const refreshOutcome = useCallback(async () => {
-    if (stage !== "pending" || !attemptId) return;
-    const generation = flowGenerationRef.current;
-    const activeRequest = pendingRequestRef.current;
-    if (
-      activeRequest &&
-      activeRequest.generation === generation &&
-      activeRequest.attemptId === attemptId
-    )
-      return;
-    const controller = new AbortController();
-    const request = { attemptId, generation, controller };
-    pendingRequestRef.current = request;
-    pollAbortRef.current = controller;
-    setRefreshing(true);
-    try {
-      const nextOutcome = await client.getAttemptOutcome(attemptId, {
-        signal: controller.signal,
-      });
-      if (
-        controller.signal.aborted ||
-        pendingRequestRef.current !== request ||
-        generation !== flowGenerationRef.current
-      )
-        return;
-      if (!isOutcomeForAttempt(nextOutcome, attemptId, "free")) {
-        completeOutcome(nextOutcome, attemptId);
+  const pendingPolling = usePendingAttemptPolling({
+    enabled: stage === "pending" && outcome?.state === "pending",
+    attemptId,
+    generation: flowGenerationRef.current,
+    request: async (ownedAttemptId, options) => {
+      const nextOutcome = await client.getAttemptOutcome(
+        ownedAttemptId,
+        options,
+      );
+      return !isOutcomeForAttempt(nextOutcome, ownedAttemptId, "free") ||
+        nextOutcome.state !== "pending"
+        ? { kind: "terminal" as const, value: nextOutcome }
+        : { kind: "pending" as const, value: nextOutcome };
+    },
+    onDecision: (decision) => {
+      if (!attemptId) return;
+      if (decision.kind === "terminal") {
+        completeOutcome(decision.value, attemptId);
         return;
       }
       setMessage("");
-      setOutcome(nextOutcome);
-      if (nextOutcome.state === "pending") {
-        setBackoffSeconds((current) => Math.min(current * 2, 5));
-      } else {
-        completeOutcome(nextOutcome, attemptId);
-      }
-    } catch (error) {
-      if (!isAbort(error)) setMessage(safeError(error));
-    } finally {
-      if (pollAbortRef.current === controller) pollAbortRef.current = undefined;
-      if (pendingRequestRef.current === request)
-        pendingRequestRef.current = undefined;
-      if (generation === flowGenerationRef.current) setRefreshing(false);
-      if (
-        !controller.signal.aborted &&
-        generation === flowGenerationRef.current &&
-        stage === "pending"
-      )
-        setPollTick((current) => current + 1);
-    }
-  }, [attemptId, client, completeOutcome, stage]);
-
-  useEffect(() => {
-    if (stage !== "pending" || outcome?.state !== "pending") return;
-    const delay = Math.min(backoffSeconds, 5) * 1_000;
-    timeoutRef.current = window.setTimeout(() => void refreshOutcome(), delay);
-    const onFocus = () => void refreshOutcome();
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") void refreshOutcome();
-    };
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      if (timeoutRef.current !== undefined)
-        window.clearTimeout(timeoutRef.current);
-      timeoutRef.current = undefined;
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVisibility);
-      pollAbortRef.current?.abort();
-    };
-  }, [backoffSeconds, outcome, pollTick, refreshOutcome, stage]);
+      setOutcome(decision.value);
+    },
+    onError: (error) => setMessage(safeError(error)),
+    isAbort,
+  });
+  pollingStopRef.current = pendingPolling.stop;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -452,6 +483,8 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
         )
           return;
         activeDeleteRef.current = undefined;
+        clearFreeTrainingOwner();
+        clearFreeTrainingCreateIntent();
         setMedia(undefined);
         queryClient.setQueryData<
           InfiniteData<AttemptListResponse, string | undefined>
@@ -593,13 +626,15 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
         {message ? <p role="alert">{message}</p> : null}
         <button
           type="button"
-          disabled={refreshing}
-          aria-busy={refreshing}
-          onClick={() => void refreshOutcome()}
+          disabled={pendingPolling.refreshing}
+          aria-busy={pendingPolling.refreshing}
+          onClick={() => void pendingPolling.refresh()}
         >
           Atualizar agora
         </button>
-        {refreshing ? <p role="status">Atualizando treino.</p> : null}
+        {pendingPolling.refreshing ? (
+          <p role="status">Atualizando treino.</p>
+        ) : null}
         <button type="button" onClick={resetForNewTraining}>
           Começar outro treino livre
         </button>

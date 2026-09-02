@@ -1,6 +1,12 @@
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
-import { cleanup, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { routeErrorFixtures } from "@revelai/contracts";
 import {
@@ -275,6 +281,37 @@ describe("training history", () => {
     );
     expect(deleteHandler).not.toHaveBeenCalled();
     expect(screen.getByRole("article")).toBeVisible();
+  });
+
+  it("serializes same-tick history deletion activation through one confirmation and request", async () => {
+    const user = userEvent.setup();
+    const attempt = pendingAttempt(
+      "attempt-delete-same-tick",
+      "2026-08-30T13:00:00.000Z",
+    );
+    const deletion = deferred<Response>();
+    const deleteHandler = vi.fn(() => deletion.promise);
+    server.use(
+      http.get("*/v1/attempts", () =>
+        HttpResponse.json({ items: [attempt], nextCursor: null }),
+      ),
+      http.delete("*/v1/attempts/attempt-delete-same-tick", () =>
+        deleteHandler(),
+      ),
+    );
+
+    render(<App />);
+    await user.click(screen.getByRole("link", { name: "Meus treinos" }));
+    const button = await screen.findByRole("button", {
+      name: "Excluir treino",
+    });
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(deleteHandler).toHaveBeenCalledTimes(1));
+    deletion.resolve(new HttpResponse(null, { status: 204 }));
+    expect(await screen.findByText("Treino excluído.")).toBeVisible();
   });
 });
 

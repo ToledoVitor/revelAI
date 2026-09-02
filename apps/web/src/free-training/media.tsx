@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   normalizeSelectedMedia,
   type AcceptedMediaMime,
-} from "../verified/capture-media";
+} from "../lib/media/selected-media";
 
 type FreeTrainingMediaProps = Readonly<{
   disabled: boolean;
