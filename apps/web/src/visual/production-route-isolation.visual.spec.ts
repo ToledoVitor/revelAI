@@ -23,6 +23,9 @@ for (const path of reviewPaths) {
     ).not.toContainText("Preparação para passe na parede");
     await expect(
       page.getByRole("main", { name: "Indisponível" }),
+    ).not.toContainText("Captura para passe na parede");
+    await expect(
+      page.getByRole("main", { name: "Indisponível" }),
     ).toContainText(
       "A orientação de preparação aguarda a ativação completa da captura e do resultado.",
     );
@@ -34,6 +37,16 @@ for (const path of reviewPaths) {
               __revelaiReviewSetupModuleEvaluations?: number;
             }
           ).__revelaiReviewSetupModuleEvaluations,
+      ),
+    ).toBeUndefined();
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __revelaiReviewCaptureModuleEvaluations?: number;
+            }
+          ).__revelaiReviewCaptureModuleEvaluations,
       ),
     ).toBeUndefined();
     expect(apiRequests).toEqual([]);
@@ -63,6 +76,9 @@ for (const path of reviewPaths) {
     ).not.toContainText("Preparação para passe na parede");
     await expect(
       page.getByRole("main", { name: "Indisponível" }),
+    ).not.toContainText("Captura para passe na parede");
+    await expect(
+      page.getByRole("main", { name: "Indisponível" }),
     ).toContainText(
       "A orientação de preparação aguarda a ativação completa da captura e do resultado.",
     );
@@ -74,6 +90,16 @@ for (const path of reviewPaths) {
               __revelaiReviewSetupModuleEvaluations?: number;
             }
           ).__revelaiReviewSetupModuleEvaluations,
+      ),
+    ).toBeUndefined();
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __revelaiReviewCaptureModuleEvaluations?: number;
+            }
+          ).__revelaiReviewCaptureModuleEvaluations,
       ),
     ).toBeUndefined();
     expect(apiRequests).toEqual([]);

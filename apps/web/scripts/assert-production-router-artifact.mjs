@@ -9,7 +9,9 @@ const outputDirectory = resolve(
 );
 const forbiddenReviewArtifacts = [
   "__revelaiReviewSetupModuleEvaluations",
+  "__revelaiReviewCaptureModuleEvaluations",
   "Preparação para passe na parede",
+  "Captura para passe na parede",
 ];
 
 async function emittedFiles(directory) {
@@ -31,8 +33,14 @@ if (javascriptFiles.length === 0) {
   throw new Error("The isolated production router artifact has no JavaScript.");
 }
 
-if (javascriptFiles.some((file) => /^setup-[\w-]+\.js$/.test(basename(file)))) {
-  throw new Error("Review setup chunk leaked into production output.");
+if (
+  javascriptFiles.some((file) =>
+    /^(setup|capture)-[\w-]+\.js$/.test(basename(file)),
+  )
+) {
+  throw new Error(
+    "Review setup or capture chunk leaked into production output.",
+  );
 }
 
 for (const file of javascriptFiles) {
@@ -40,7 +48,7 @@ for (const file of javascriptFiles) {
   for (const forbiddenArtifact of forbiddenReviewArtifacts) {
     if (content.includes(forbiddenArtifact)) {
       throw new Error(
-        `Review setup artifact leaked into production output: ${forbiddenArtifact}`,
+        `Review setup or capture artifact leaked into production output: ${forbiddenArtifact}`,
       );
     }
   }

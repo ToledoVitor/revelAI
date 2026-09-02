@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 const webDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const reviewSetupModule = resolve(webDirectory, "src/verified/setup.tsx");
+const reviewCaptureModule = resolve(webDirectory, "src/verified/capture.tsx");
 const productionGraphIntegrationTimeoutMs = 15_000;
 
 type OutputChunk = Readonly<{
@@ -62,7 +63,7 @@ async function buildWithProductionEnvironment() {
 
 describe("production router review-route isolation", () => {
   it(
-    "removes the review setup module from the DEV:false/MODE:production router graph",
+    "removes the review setup and capture modules from the DEV:false/MODE:production router graph",
     async () => {
       const buildResult = await buildWithProductionEnvironment();
       const outputGroups = (
@@ -80,11 +81,15 @@ describe("production router review-route isolation", () => {
         }),
       );
 
-      expect(chunks.flatMap((chunk) => chunk.moduleIds)).not.toContain(
-        reviewSetupModule,
-      );
-      expect(chunks.map((chunk) => chunk.code).join("\n")).not.toContain(
+      const moduleIds = chunks.flatMap((chunk) => chunk.moduleIds);
+      const emittedCode = chunks.map((chunk) => chunk.code).join("\n");
+      expect(moduleIds).not.toContain(reviewSetupModule);
+      expect(moduleIds).not.toContain(reviewCaptureModule);
+      expect(emittedCode).not.toContain(
         "__revelaiReviewSetupModuleEvaluations",
+      );
+      expect(emittedCode).not.toContain(
+        "__revelaiReviewCaptureModuleEvaluations",
       );
     },
     productionGraphIntegrationTimeoutMs,

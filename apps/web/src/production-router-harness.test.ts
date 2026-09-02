@@ -16,6 +16,7 @@ import {
   vi,
 } from "vitest";
 import type { ReviewSetupPort } from "./verified/setup";
+import type { ReviewCapturePort } from "./verified/capture";
 
 const webDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const productionHarnessEntry = resolve(
@@ -27,6 +28,7 @@ type ProductionHarness = Readonly<{
   mountProductionApp(
     element: Element,
     reviewSetupPort?: ReviewSetupPort,
+    reviewCapturePort?: ReviewCapturePort,
   ): () => void;
 }>;
 
@@ -170,12 +172,27 @@ function fakeReviewPort() {
   } satisfies ReviewSetupPort;
 }
 
-async function mountAt(path: string, port: ReviewSetupPort) {
+function fakeCapturePort() {
+  return {
+    getDraft: vi.fn(() => ({
+      kind: "review-verified-draft" as const,
+      challengeId: "wall-pass" as const,
+      challengeVersion: 1 as const,
+    })),
+    upload: vi.fn(async () => ({ kind: "accepted" as const })),
+  } satisfies ReviewCapturePort;
+}
+
+async function mountAt(
+  path: string,
+  setupPort: ReviewSetupPort,
+  capturePort: ReviewCapturePort,
+) {
   dom.window.history.replaceState({}, "", path);
   const host = dom.window.document.createElement("div");
   dom.window.document.body.replaceChildren(host);
   activeHost = host;
-  activeUnmount = harness.mountProductionApp(host, port);
+  activeUnmount = harness.mountProductionApp(host, setupPort, capturePort);
   return host;
 }
 
@@ -189,15 +206,18 @@ async function waitForHomeRoute(host: HTMLElement) {
 
 function expectUnavailableBoundary(
   host: HTMLElement,
-  port: ReturnType<typeof fakeReviewPort>,
+  setupPort: ReturnType<typeof fakeReviewPort>,
+  capturePort: ReturnType<typeof fakeCapturePort>,
 ) {
   expect(host.textContent).toContain("Indisponível");
   expect(host.textContent).toContain("Disponível após ativação do fluxo");
   expect(host.textContent).toContain(
     "A orientação de preparação aguarda a ativação completa da captura e do resultado.",
   );
-  expect(port.getFixture).not.toHaveBeenCalled();
-  expect(port.retryCamera).not.toHaveBeenCalled();
+  expect(setupPort.getFixture).not.toHaveBeenCalled();
+  expect(setupPort.retryCamera).not.toHaveBeenCalled();
+  expect(capturePort.getDraft).not.toHaveBeenCalled();
+  expect(capturePort.upload).not.toHaveBeenCalled();
   expect(
     (
       dom.window as typeof window & {
@@ -209,10 +229,11 @@ function expectUnavailableBoundary(
 
 async function waitForUnavailableBoundary(
   host: HTMLElement,
-  port: ReturnType<typeof fakeReviewPort>,
+  setupPort: ReturnType<typeof fakeReviewPort>,
+  capturePort: ReturnType<typeof fakeCapturePort>,
 ) {
   await waitForHarnessRender(host, () => {
-    expectUnavailableBoundary(host, port);
+    expectUnavailableBoundary(host, setupPort, capturePort);
   });
 }
 
@@ -279,10 +300,11 @@ describe("transformed production router harness", () => {
   it.each(["/_test/verified/setup", "/_test/verified/capture"])(
     "keeps direct production navigation to %s unavailable without review effects",
     async (path) => {
-      const port = fakeReviewPort();
-      const host = await mountAt(path, port);
+      const setupPort = fakeReviewPort();
+      const capturePort = fakeCapturePort();
+      const host = await mountAt(path, setupPort, capturePort);
 
-      await waitForUnavailableBoundary(host, port);
+      await waitForUnavailableBoundary(host, setupPort, capturePort);
       expect(fetchSpy).not.toHaveBeenCalled();
     },
   );
@@ -290,14 +312,15 @@ describe("transformed production router harness", () => {
   it.each(["/_test/verified/setup", "/_test/verified/capture"])(
     "keeps in-app production navigation to %s unavailable without review effects",
     async (path) => {
-      const port = fakeReviewPort();
-      const host = await mountAt("/", port);
+      const setupPort = fakeReviewPort();
+      const capturePort = fakeCapturePort();
+      const host = await mountAt("/", setupPort, capturePort);
       await waitForHomeRoute(host);
 
       dom.window.history.pushState({}, "", path);
       dom.window.dispatchEvent(new dom.window.PopStateEvent("popstate"));
 
-      await waitForUnavailableBoundary(host, port);
+      await waitForUnavailableBoundary(host, setupPort, capturePort);
       expect(fetchSpy).not.toHaveBeenCalled();
     },
   );

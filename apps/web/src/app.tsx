@@ -22,14 +22,19 @@ import { TrainingHistory } from "./history/history";
 import { Home } from "./home/home";
 import { createRevelApiClient } from "./lib/api/client";
 import { getDeviceAthleteId } from "./lib/api/identity";
+import type { ReviewCapturePort } from "./verified/capture";
 import type { ReviewSetupPort } from "./verified/setup";
 
 export const reviewRoutesEnabled =
   import.meta.env.DEV || import.meta.env.MODE === "test";
 
 const reviewSetupModulePath = "./verified/setup";
+const reviewCaptureModulePath = "./verified/capture";
 type ReviewSetupRouteComponentProps = Readonly<{
   port?: ReviewSetupPort;
+}>;
+type ReviewCaptureRouteComponentProps = Readonly<{
+  port?: ReviewCapturePort;
 }>;
 
 const ReviewSetupRoute = reviewRoutesEnabled
@@ -40,6 +45,18 @@ const ReviewSetupRoute = reviewRoutesEnabled
       return {
         default:
           reviewModule.ReviewSetupRoute as ComponentType<ReviewSetupRouteComponentProps>,
+      };
+    })
+  : null;
+
+const ReviewCaptureRoute = reviewRoutesEnabled
+  ? lazy(async () => {
+      const reviewModule = await import(
+        /* @vite-ignore */ reviewCaptureModulePath
+      );
+      return {
+        default:
+          reviewModule.ReviewCaptureRoute as ComponentType<ReviewCaptureRouteComponentProps>,
       };
     })
   : null;
@@ -66,10 +83,11 @@ type RevelApiClient = ReturnType<typeof createRevelApiClient>;
 
 type ShellProps = Readonly<{
   client: RevelApiClient;
+  reviewCapturePort?: ReviewCapturePort;
   reviewSetupPort?: ReviewSetupPort;
 }>;
 
-function Shell({ client, reviewSetupPort }: ShellProps) {
+function Shell({ client, reviewCapturePort, reviewSetupPort }: ShellProps) {
   const [isNavigationOpen, setNavigationOpen] = useState(false);
   const navigationToggleRef = useRef<HTMLButtonElement>(null);
   const restoreNavigationToggleFocus = useRef(false);
@@ -161,6 +179,16 @@ function Shell({ client, reviewSetupPort }: ShellProps) {
             }
           />
         ) : null}
+        {ReviewCaptureRoute ? (
+          <Route
+            path="/_test/verified/capture"
+            element={
+              <Suspense fallback={<p role="status">Carregando captura.</p>}>
+                <ReviewCaptureRoute port={reviewCapturePort} />
+              </Suspense>
+            }
+          />
+        ) : null}
         <Route path="*" element={<UnavailableShell />} />
       </Routes>
     </div>
@@ -199,10 +227,11 @@ function UnavailableShell() {
 }
 
 type AppProps = Readonly<{
+  reviewCapturePort?: ReviewCapturePort;
   reviewSetupPort?: ReviewSetupPort;
 }>;
 
-export function App({ reviewSetupPort }: AppProps = {}) {
+export function App({ reviewCapturePort, reviewSetupPort }: AppProps = {}) {
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -221,7 +250,11 @@ export function App({ reviewSetupPort }: AppProps = {}) {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <Shell client={client} reviewSetupPort={reviewSetupPort} />
+        <Shell
+          client={client}
+          reviewCapturePort={reviewCapturePort}
+          reviewSetupPort={reviewSetupPort}
+        />
       </BrowserRouter>
     </QueryClientProvider>
   );
