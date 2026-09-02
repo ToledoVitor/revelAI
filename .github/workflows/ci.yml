@@ -23,6 +23,7 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @revelai/web exec playwright install --with-deps chromium
       - run: pnpm check
       - run: pnpm --filter @revelai/api run openapi:check
       - run: pnpm --filter @revelai/api exec vitest run src/http/operability-routes.test.ts src/startup.test.ts src/http/openapi.test.ts

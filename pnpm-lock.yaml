@@ -74,6 +74,9 @@ importers:
 
   apps/web:
     dependencies:
+      "@fontsource/bebas-neue":
+        specifier: 5.3.0
+        version: 5.3.0
       "@phosphor-icons/react":
         specifier: 2.1.10
         version: 2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -96,6 +99,9 @@ importers:
       "@playwright/test":
         specifier: 1.62.1
         version: 1.62.1
+      "@types/pngjs":
+        specifier: 6.0.5
+        version: 6.0.5
       "@testing-library/jest-dom":
         specifier: 6.9.1
         version: 6.9.1
@@ -117,6 +123,12 @@ importers:
       jsdom:
         specifier: 26.1.0
         version: 26.1.0(supports-color@7.2.0)
+      pixelmatch:
+        specifier: 7.2.0
+        version: 7.2.0
+      pngjs:
+        specifier: 7.0.0
+        version: 7.0.0
       typescript:
         specifier: 5.9.3
         version: 5.9.3
@@ -734,6 +746,12 @@ packages:
         integrity: sha512-INS+6gh91cLUjB+PVHfu1UqcB76Sqtpyp7bnL+FYojhjygvOPA9ctiD/JDKsyD9Xgu4hUhCSJBPig/w7duNajw==,
       }
 
+  "@fontsource/bebas-neue@5.3.0":
+    resolution:
+      {
+        integrity: sha512-nCxMEb9Bg9sjNWm9TIOsvHKDMLRUfEZPWpLgYu6m9KavZZVSA/WoHzI5wROwqA+eNwEi/PNBAcB5Co7HA3S0Cw==,
+      }
+
   "@humanfs/core@0.19.2":
     resolution:
       {
@@ -1193,6 +1211,12 @@ packages:
     resolution:
       {
         integrity: sha512-m5ObIqwsUp6BZzyiy4RdZpzWGub9bqLJMvZDD0QMXhxjqMHMENlj+SqF5QxoUwaQNFe+8kz8XM8ZQhqkQPTgMQ==,
+      }
+
+  "@types/pngjs@6.0.5":
+    resolution:
+      {
+        integrity: sha512-0k5eKfrA83JOZPppLtS2C7OUtyNAl2wKNxfyYl9Q5g9lPkgBl/9hNyAu6HuEH2J4XmIv2znEpkDd0SaZVxW6iQ==,
       }
 
   "@types/react-dom@19.2.3":
@@ -2410,6 +2434,13 @@ packages:
       }
     hasBin: true
 
+  pixelmatch@7.2.0:
+    resolution:
+      {
+        integrity: sha512-xhcb4yHu9sM/G7foGzoLtXYcC0zHEaOXXjRKhGup0fw78Nf2Tkiapv4EQyMzrbcmQPsllAI7DbFY2UT7PlI9Pg==,
+      }
+    hasBin: true
+
   playwright-core@1.62.1:
     resolution:
       {
@@ -2425,6 +2456,13 @@ packages:
       }
     engines: { node: ">=20" }
     hasBin: true
+
+  pngjs@7.0.0:
+    resolution:
+      {
+        integrity: sha512-LKWqWJRhstyYo9pGvgor/ivk2w94eSjE3RGVuzLGlr3NmD8bf7RcYGze1mNdEHRP6TRP6rMuDHk5t44hnTRyow==,
+      }
+    engines: { node: ">=14.19.0" }
 
   postcss@8.5.26:
     resolution:
@@ -3434,6 +3472,8 @@ snapshots:
       "@fastify/forwarded": 3.0.2
       ipaddr.js: 2.5.0
 
+  "@fontsource/bebas-neue@5.3.0": {}
+
   "@humanfs/core@0.19.2":
     dependencies:
       "@humanfs/types": 0.15.0
@@ -3654,6 +3694,10 @@ snapshots:
   "@types/node@22.18.0":
     dependencies:
       undici-types: 6.21.0
+
+  "@types/pngjs@6.0.5":
+    dependencies:
+      "@types/node": 22.18.0
 
   "@types/react-dom@19.2.3(@types/react@19.2.14)":
     dependencies:
@@ -4413,6 +4457,10 @@ snapshots:
       sonic-boom: 4.2.1
       thread-stream: 4.2.0
 
+  pixelmatch@7.2.0:
+    dependencies:
+      pngjs: 7.0.0
+
   playwright-core@1.62.1: {}
 
   playwright@1.62.1:
@@ -4420,6 +4468,8 @@ snapshots:
       playwright-core: 1.62.1
     optionalDependencies:
       fsevents: 2.3.2
+
+  pngjs@7.0.0: {}
 
   postcss@8.5.26:
     dependencies:

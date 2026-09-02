@@ -1,7 +1,7 @@
 import { List, X } from "@phosphor-icons/react";
 import { designTokens } from "@revelai/design-system";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   BrowserRouter,
   Link,
@@ -96,10 +96,18 @@ function Shell() {
 }
 
 function UnavailableShell() {
+  const headingRef = useRef<HTMLHeadingElement>(null);
+
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, []);
+
   return (
     <main className="unavailable-shell" aria-labelledby="unavailable-heading">
       <p className="eyebrow">RevelAI</p>
-      <h1 id="unavailable-heading">Indisponível</h1>
+      <h1 id="unavailable-heading" ref={headingRef} tabIndex={-1}>
+        Indisponível
+      </h1>
       <p role="status">Disponível após ativação do fluxo</p>
       <Link className="return-home" to="/">
         Voltar para Início
