@@ -156,3 +156,115 @@ test("served production verified setup keeps its real device gate coherent acros
   await expect(setup.getByRole("button", { name: "Continuar" })).toBeEnabled();
   expect(apiRequests).toEqual([]);
 });
+
+test("served production Home mounts the sole Free owner before one exact Free creation", async ({
+  page,
+}) => {
+  const requestBodies: unknown[] = [];
+  const apiRequests: string[] = [];
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    apiRequests.push(`${request.method()} ${url.pathname}`);
+    if (request.method() === "POST" && url.pathname === "/v1/attempts") {
+      requestBodies.push(request.postDataJSON());
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "attempt-free-production-1",
+          mode: "free",
+          status: "awaiting-upload",
+          createdAt: "2026-08-30T12:01:00.000Z",
+          outcome: {
+            state: "pending",
+            attemptId: "attempt-free-production-1",
+            mode: "free",
+            status: "awaiting-upload",
+          },
+        }),
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, body: "not expected" });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Treino livre" }).click();
+
+  const freeOwner = page.getByRole("main", {
+    name: "Treino livre — análise aproximada",
+  });
+  await expect(freeOwner).toBeVisible();
+  await expect(
+    freeOwner.getByRole("button", { name: "Selecionar vídeo" }),
+  ).toBeEnabled();
+  await expect(page.getByRole("navigation")).not.toContainText("Ranking");
+  await expect(freeOwner).not.toContainText(
+    /score|ranking|rank|percentil|top percent|verified/i,
+  );
+  expect(requestBodies).toEqual([{ mode: "free" }]);
+  expect(apiRequests).toEqual(["POST /v1/attempts"]);
+});
+
+test("served production direct Free route owns its one creation without review modules", async ({
+  page,
+}) => {
+  const apiRequests: string[] = [];
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    apiRequests.push(`${request.method()} ${url.pathname}`);
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "attempt-free-production-direct",
+        mode: "free",
+        status: "awaiting-upload",
+        createdAt: "2026-08-30T12:01:00.000Z",
+        outcome: {
+          state: "pending",
+          attemptId: "attempt-free-production-direct",
+          mode: "free",
+          status: "awaiting-upload",
+        },
+      }),
+    });
+  });
+
+  await page.goto("/free-training");
+
+  await expect(
+    page.getByRole("heading", {
+      name: "Treino livre — análise aproximada",
+      level: 1,
+    }),
+  ).toBeFocused();
+  await expect(
+    page.getByRole("button", { name: "Selecionar vídeo" }),
+  ).toBeEnabled();
+  expect(apiRequests).toEqual(["POST /v1/attempts"]);
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __revelaiReviewSetupModuleEvaluations?: number;
+            __revelaiReviewCaptureModuleEvaluations?: number;
+          }
+        ).__revelaiReviewSetupModuleEvaluations,
+    ),
+  ).toBeUndefined();
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __revelaiReviewSetupModuleEvaluations?: number;
+            __revelaiReviewCaptureModuleEvaluations?: number;
+          }
+        ).__revelaiReviewCaptureModuleEvaluations,
+    ),
+  ).toBeUndefined();
+});

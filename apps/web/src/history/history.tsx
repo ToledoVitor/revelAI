@@ -5,8 +5,10 @@ import {
   type InfiniteData,
 } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import type { AttemptListResponse } from "@revelai/contracts";
 import type { createRevelApiClient, RevelApiError } from "../lib/api/client";
+import { trainingHistoryQueryKey } from "./query";
 
 type HistoryClient = Pick<
   ReturnType<typeof createRevelApiClient>,
@@ -14,8 +16,7 @@ type HistoryClient = Pick<
 >;
 type HistoryPageParam = string | undefined;
 type TrainingHistoryProps = Readonly<{ client: HistoryClient }>;
-
-const historyQueryKey = ["training-history"] as const;
+type HistoryNavigationState = Readonly<{ deletedFreeTraining?: boolean }>;
 
 function messageFor(error: unknown): string {
   if (
@@ -34,9 +35,14 @@ function messageFor(error: unknown): string {
 export function TrainingHistory({ client }: TrainingHistoryProps) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const queryClient = useQueryClient();
-  const [deleteMessage, setDeleteMessage] = useState<string | null>(null);
+  const location = useLocation();
+  const [deleteMessage, setDeleteMessage] = useState<string | null>(() =>
+    (location.state as HistoryNavigationState | null)?.deletedFreeTraining
+      ? "Treino excluído."
+      : null,
+  );
   const history = useInfiniteQuery({
-    queryKey: historyQueryKey,
+    queryKey: trainingHistoryQueryKey,
     initialPageParam: undefined as HistoryPageParam,
     queryFn: ({ pageParam, signal }) =>
       client.listAttempts(pageParam ? { cursor: pageParam } : undefined, {
@@ -50,7 +56,7 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
     onSuccess: (_result, id) => {
       queryClient.setQueryData<
         InfiniteData<AttemptListResponse, HistoryPageParam>
-      >(historyQueryKey, (current) => {
+      >(trainingHistoryQueryKey, (current) => {
         if (!current) return current;
         return {
           ...current,
@@ -73,6 +79,15 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
   const deletingId = deleteAttempt.variables;
   const initialLoadFailed =
     history.isError && !history.isFetchNextPageError && attempts.length === 0;
+  const requestDelete = (id: string) => {
+    if (
+      !window.confirm(
+        "Excluir este treino? A mídia e a análise serão removidas.",
+      )
+    )
+      return;
+    deleteAttempt.mutate(id);
+  };
 
   return (
     <main
@@ -101,7 +116,7 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
             <article key={attempt.id}>
               <h2>
                 {attempt.mode === "free"
-                  ? "Treino livre"
+                  ? "Treino livre — análise aproximada"
                   : "Desafio verificado"}
               </h2>
               <p>{attempt.status}</p>
@@ -114,7 +129,7 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
                     : "Excluir treino"
                 }
                 disabled={deleteAttempt.isPending}
-                onClick={() => deleteAttempt.mutate(attempt.id)}
+                onClick={() => requestDelete(attempt.id)}
               >
                 {deleteAttempt.isPending && deletingId === attempt.id
                   ? "Excluindo treino"

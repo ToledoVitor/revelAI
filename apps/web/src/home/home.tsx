@@ -1,6 +1,7 @@
 import { ArrowRight } from "@phosphor-icons/react";
 
 type HomeProps = {
+  onFreeTraining(): void;
   onUnavailable(destination: string): void;
   onVerified(): void;
 };
@@ -34,7 +35,7 @@ const choices: readonly TrainingChoice[] = [
   },
 ];
 
-export function Home({ onUnavailable, onVerified }: HomeProps) {
+export function Home({ onFreeTraining, onUnavailable, onVerified }: HomeProps) {
   return (
     <main className="home-page">
       <img
@@ -67,7 +68,7 @@ export function Home({ onUnavailable, onVerified }: HomeProps) {
               onClick={() =>
                 choice.id === "verified-challenge"
                   ? onVerified()
-                  : onUnavailable(choice.destination)
+                  : onFreeTraining()
               }
             >
               <span className="choice-number" aria-hidden="true">

@@ -1,4 +1,4 @@
-import type { AttemptOutcome } from "@revelai/contracts";
+import type { AttemptMode, AttemptOutcome } from "@revelai/contracts";
 
 export type UploadReconciliation =
   | Readonly<{
@@ -21,25 +21,35 @@ export type UploadReconciliation =
       preserveMedia: true;
     }>;
 
+export function isOutcomeForAttempt(
+  outcome: AttemptOutcome,
+  attemptId: string,
+  expectedMode: AttemptMode,
+): boolean {
+  if (outcome.state === "pending")
+    return outcome.mode === expectedMode && outcome.attemptId === attemptId;
+  if (outcome.state === "valid")
+    return (
+      outcome.result.kind ===
+        (expectedMode === "free" ? "free-insight" : "verified-result") &&
+      outcome.result.attemptId === attemptId
+    );
+  return outcome.mode === expectedMode && outcome.attemptId === attemptId;
+}
+
 export function isVerifiedOutcomeForAttempt(
   outcome: AttemptOutcome,
   attemptId: string,
 ): boolean {
-  if (outcome.state === "pending")
-    return outcome.mode === "verified" && outcome.attemptId === attemptId;
-  if (outcome.state === "valid")
-    return (
-      outcome.result.kind === "verified-result" &&
-      outcome.result.attemptId === attemptId
-    );
-  return outcome.mode === "verified" && outcome.attemptId === attemptId;
+  return isOutcomeForAttempt(outcome, attemptId, "verified");
 }
 
 export function resolveUploadReconciliation(
   outcome: AttemptOutcome,
   attemptId: string,
+  expectedMode: AttemptMode = "verified",
 ): UploadReconciliation {
-  if (!isVerifiedOutcomeForAttempt(outcome, attemptId))
+  if (!isOutcomeForAttempt(outcome, attemptId, expectedMode))
     return { kind: "mismatch", preserveMedia: true };
   if (outcome.state === "pending") {
     if (outcome.status === "awaiting-upload")

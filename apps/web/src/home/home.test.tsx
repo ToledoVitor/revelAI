@@ -100,7 +100,7 @@ describe("the web home", () => {
     expect(window.location.pathname).toBe("/");
   });
 
-  it.each(["Treino livre", "Analisar treino"])(
+  it.each(["Analisar treino"])(
     "opens a truthful unavailable shell for %s without making an API call",
     async (control) => {
       const user = userEvent.setup();

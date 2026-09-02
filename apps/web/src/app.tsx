@@ -20,6 +20,7 @@ import {
 } from "react-router-dom";
 import { TrainingHistory } from "./history/history";
 import { Home } from "./home/home";
+import { FreeTrainingTracer } from "./free-training/tracer";
 import { createRevelApiClient } from "./lib/api/client";
 import { getDeviceAthleteId } from "./lib/api/identity";
 import type { ReviewCapturePort } from "./verified/capture";
@@ -115,6 +116,10 @@ function Shell({ client, reviewCapturePort, reviewSetupPort }: ShellProps) {
     closeNavigation();
     navigate("/verified");
   };
+  const openFreeTraining = () => {
+    closeNavigation();
+    navigate("/free-training");
+  };
   const openRanking = () => {
     closeNavigation();
     navigate("/verified?view=ranking");
@@ -163,19 +168,29 @@ function Shell({ client, reviewCapturePort, reviewSetupPort }: ShellProps) {
           <Link to="/training/history" onClick={() => closeNavigation()}>
             Meus treinos
           </Link>
-          <button type="button" onClick={openRanking}>
-            Ranking
-          </button>
+          {location.pathname !== "/free-training" ? (
+            <button type="button" onClick={openRanking}>
+              Ranking
+            </button>
+          ) : null}
         </nav>
       </header>
       <Routes>
         <Route
           path="/"
           element={
-            <Home onUnavailable={openUnavailable} onVerified={openVerified} />
+            <Home
+              onFreeTraining={openFreeTraining}
+              onUnavailable={openUnavailable}
+              onVerified={openVerified}
+            />
           }
         />
         <Route path="/verified" element={<VerifiedTracer client={client} />} />
+        <Route
+          path="/free-training"
+          element={<FreeTrainingTracer client={client} />}
+        />
         <Route
           path="/training/history"
           element={<TrainingHistory client={client} />}

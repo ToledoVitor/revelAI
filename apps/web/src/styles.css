@@ -448,6 +448,83 @@ a:focus-visible {
   font-weight: 700;
 }
 
+.free-training {
+  width: min(100% - 3rem, 52rem);
+  margin: 0 auto;
+  padding: clamp(2.5rem, 7vw, 5rem) 0;
+}
+
+.free-training h1,
+.free-training h2 {
+  margin: 0;
+  font-family: var(--display-font);
+  font-weight: 400;
+  text-transform: uppercase;
+}
+
+.free-training h1 {
+  max-width: 14ch;
+  font-size: clamp(3.5rem, 7vw, 6rem);
+  line-height: 0.95;
+}
+
+.free-training h2 {
+  margin-top: 1.75rem;
+  color: var(--deep-emerald);
+  font-size: 2rem;
+  letter-spacing: 0.06em;
+}
+
+.free-training section {
+  margin-top: 1.5rem;
+}
+
+.free-training li {
+  margin: 0.6rem 0;
+  line-height: 1.45;
+}
+
+.free-training video {
+  display: block;
+  width: min(100%, 36rem);
+  min-height: 10rem;
+  margin: 0 0 1rem;
+  background: var(--near-black);
+}
+
+.free-training [aria-label="Prévia do vídeo selecionado"] {
+  padding: 1rem;
+  border: 1px solid var(--border-gray);
+  background: color-mix(in srgb, var(--deep-emerald) 5%, transparent);
+}
+
+.free-training button,
+.free-training a {
+  display: inline-flex;
+  min-height: 2.75rem;
+  margin: 0.3rem 0.4rem 0.3rem 0;
+  padding: 0.55rem 0.85rem;
+  align-items: center;
+  color: var(--deep-emerald);
+  border: 1px solid var(--deep-emerald);
+  background: transparent;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.free-training [role="alert"] {
+  color: var(--near-black);
+  font-weight: 700;
+}
+
+.free-training progress {
+  display: block;
+  width: min(100%, 32rem);
+  min-height: 1rem;
+  margin-top: 1.5rem;
+  accent-color: var(--deep-emerald);
+}
+
 .calibration-setup h1 {
   max-width: 12ch;
   margin: 0;
@@ -745,6 +822,11 @@ a:focus-visible {
   }
 
   .verified-capture {
+    width: min(100% - 14%, 52rem);
+    padding: 2.25rem 0;
+  }
+
+  .free-training {
     width: min(100% - 14%, 52rem);
     padding: 2.25rem 0;
   }

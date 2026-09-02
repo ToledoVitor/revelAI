@@ -278,7 +278,7 @@ test("respects reduced motion", async ({ page }) => {
   expect(["0.01ms", "1e-05s"]).toContain(transitionDuration);
 });
 
-test("opens each unavailable destination without an API or follow-up network request", async ({
+test("keeps the remaining unavailable destination free of follow-up network requests", async ({
   page,
 }) => {
   const requests: string[] = [];
@@ -286,7 +286,7 @@ test("opens each unavailable destination without an API or follow-up network req
     requests.push(request.url());
   });
 
-  for (const control of ["Treino livre", "Analisar treino"]) {
+  for (const control of ["Analisar treino"]) {
     await page.goto("/");
     await expect(
       page.getByRole("img", {
@@ -311,10 +311,7 @@ test("opens each unavailable destination without an API or follow-up network req
 test("keeps keyboard focus visible and activates every unavailable control", async ({
   page,
 }, testInfo) => {
-  const controls = [
-    { name: "Treino livre", isNavigationControl: false },
-    { name: "Analisar treino", isNavigationControl: false },
-  ];
+  const controls = [{ name: "Analisar treino", isNavigationControl: false }];
 
   for (const control of controls) {
     await page.goto("/");

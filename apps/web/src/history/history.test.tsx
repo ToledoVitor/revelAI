@@ -22,6 +22,7 @@ beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 beforeEach(() => {
   window.history.replaceState({}, "", "/");
   window.localStorage.setItem("revelai.device-athlete-id", athleteId);
+  vi.spyOn(window, "confirm").mockReturnValue(true);
 });
 afterEach(() => {
   cleanup();
@@ -79,7 +80,10 @@ describe("training history", () => {
       HttpResponse.json({ items: [newer, older], nextCursor: null }),
     );
 
-    await screen.findAllByRole("heading", { name: "Treino livre", level: 2 });
+    await screen.findAllByRole("heading", {
+      name: "Treino livre — análise aproximada",
+      level: 2,
+    });
     expect(
       screen.getAllByRole("article").map((item) => item.textContent),
     ).toEqual([
@@ -241,6 +245,36 @@ describe("training history", () => {
       await screen.findByText("Nenhum treino neste dispositivo ainda."),
     ).toHaveAttribute("role", "status");
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
+  });
+
+  it("keeps a history item unchanged when native deletion confirmation is cancelled", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    const attempt = pendingAttempt(
+      "attempt-confirm-cancel",
+      "2026-08-30T13:00:00.000Z",
+    );
+    const deleteHandler = vi.fn();
+    server.use(
+      http.get("*/v1/attempts", () =>
+        HttpResponse.json({ items: [attempt], nextCursor: null }),
+      ),
+      http.delete("*/v1/attempts/attempt-confirm-cancel", () => {
+        deleteHandler();
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+
+    render(<App />);
+    await user.click(screen.getByRole("link", { name: "Meus treinos" }));
+    await screen.findByText(/13:00/);
+    await user.click(screen.getByRole("button", { name: "Excluir treino" }));
+
+    expect(window.confirm).toHaveBeenCalledWith(
+      "Excluir este treino? A mídia e a análise serão removidas.",
+    );
+    expect(deleteHandler).not.toHaveBeenCalled();
+    expect(screen.getByRole("article")).toBeVisible();
   });
 });
 
