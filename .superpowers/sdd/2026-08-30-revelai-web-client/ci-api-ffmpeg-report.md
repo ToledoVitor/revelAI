@@ -74,6 +74,40 @@ muxers, filters, and MJPEG `yuvj420p` compatibility together.
 7. Full API suite after the correction passed: 41 files, 494 tests, 1
    expected local FFmpeg skip.
 
+## Hosted timeout recovery
+
+Hosted retry `33693218189` proved the JPEG correction: the COM rejection was
+gone. Its only API failure was instead Vitest's implicit 5,000-ms budget on
+the now-complete smoke (reported duration 5,071 ms), followed by
+`ENOTEMPTY` while `afterEach` tried to remove the `.frames` directory. That
+second error identified a test-harness lifecycle race: a timed-out promise
+could still have an FFmpeg child writing its owned directory while cleanup
+removed it. It was not a production 30-second runner timeout, a process
+failure, or a weaker C5 evidence invariant.
+
+Commit `19bda2b` scopes a 15,000-ms timeout to this one integration smoke.
+The budget covers its real mini-probe, 64-second fixture encoding, and
+640-frame extraction, remains below the production extraction bound of
+30,000 ms, and does not alter global Vitest configuration. A native Ubuntu
+24.04 single-CPU replay measured the actual mini-probe at 68 ms and the full
+640-file path at 4,473 ms; the hosted 5,071-ms end-to-end observation leaves
+about 10 seconds of targeted headroom.
+
+The smoke now tracks every child it owns, including both capability commands,
+fixture generation, and the extractor. Its suite cleanup first sends SIGTERM,
+waits for each child `close`, and only then removes test roots; a 1,000-ms
+SIGKILL escalation mirrors the existing production process runner rather than
+adding an arbitrary delay. Vitest's local runner confirms `afterEach` runs
+before `onTestFinished`, so the cancellation-safe cleanup intentionally lives
+in `afterEach` rather than a later test hook.
+
+RED: a new lifecycle regression passed a tracking set to the old test helper
+and observed zero owned children instead of one. GREEN: the tracked child is
+terminated, its close is awaited, the set empties, and only then can its root
+be removed. Focused verification passed 15 tests with one honest local
+no-FFmpeg skip. API lint, typecheck, and formatting passed; the full API suite
+passed 41 files, 495 tests, with one expected local capability skip.
+
 The macOS developer host has no `ffmpeg`, so the real-codec smoke remains an
 honest capability skip locally. The Ubuntu replay covers the hosted codec
 path; a fresh hosted CI run remains the final confirmation after the root task
