@@ -8,9 +8,11 @@ import {
 } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { PassThrough } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type MediaProbe } from "../media/probe.js";
 import { verifiedExtractionCapability } from "../media/extraction-manifest.js";
 import { createLocalFrameExtraction } from "./local-frame-extraction.js";
@@ -48,17 +50,40 @@ type TrackedProcess = Readonly<{
   terminate: () => Promise<void>;
 }>;
 
+type ProcessTracker = Readonly<{
+  register: (process: TrackedProcess) => void;
+  release: (process: TrackedProcess) => void;
+  closeAndDrain: () => Promise<void>;
+  size: () => number;
+}>;
+
 type ProcessResult = Readonly<{
   exitCode: number;
   stdout: string;
   stderr: string;
 }>;
 
+type ProcessChild = {
+  stdout: Pick<PassThrough, "on">;
+  stderr: Pick<PassThrough, "on">;
+  kill: (signal: NodeJS.Signals) => boolean;
+  once(event: "error", listener: (error: Error) => void): unknown;
+  once(event: "close", listener: (exitCode: number | null) => void): unknown;
+};
+
+type ProcessSpawner = (
+  executable: string,
+  arguments_: readonly string[],
+) => ProcessChild;
+
 describe("LocalFrameExtraction", () => {
   const roots: string[] = [];
-  const trackedProcesses = new Set<TrackedProcess>();
+  let testGenerationTracker = createProcessTracker();
+  beforeEach(() => {
+    testGenerationTracker = createProcessTracker();
+  });
   afterEach(async () => {
-    await terminateTrackedProcesses(trackedProcesses);
+    await testGenerationTracker.closeAndDrain();
     await Promise.all(
       roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
     );
@@ -219,17 +244,73 @@ describe("LocalFrameExtraction", () => {
 
   it("waits for a tracked subprocess before removing its owned root", async () => {
     const root = await setupRoot(roots);
-    const processes = new Set<TrackedProcess>();
+    const tracker = createProcessTracker();
     const completed = runProcess(
       process.execPath,
       ["-e", "setTimeout(() => process.exit(0), 1_000)"],
-      processes,
+      tracker,
     );
 
-    expect(processes.size).toBe(1);
-    await terminateTrackedProcesses(processes);
-    expect(processes.size).toBe(0);
+    expect(tracker.size()).toBe(1);
+    await tracker.closeAndDrain();
+    expect(tracker.size()).toBe(0);
     await expect(completed).resolves.toMatchObject({ exitCode: 1 });
+    await expect(
+      rm(root, { recursive: true, force: true }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not release a tracked child when termination reports an error before close", async () => {
+    const root = await setupRoot(roots);
+    const tracker = createProcessTracker();
+    const child = new ControlledChildProcess();
+    child.errorOnTerminate = true;
+    const completed = runProcess("controlled-child", [], tracker, () => child);
+    const rejected = expect(completed).rejects.toThrow("simulated kill error");
+
+    const draining = tracker.closeAndDrain();
+    expect(tracker.size()).toBe(1);
+    expect(child.receivedSignals).toEqual(["SIGTERM"]);
+    child.emitClose(1);
+
+    await draining;
+    await rejected;
+    expect(tracker.size()).toBe(0);
+    await expect(
+      rm(root, { recursive: true, force: true }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("drains a child registered by a closing child continuation before root removal", async () => {
+    const root = await setupRoot(roots);
+    const tracker = createProcessTracker();
+    const first = new ControlledChildProcess();
+    const second = new ControlledChildProcess();
+    const firstCompleted = runProcess("first-child", [], tracker, () => first);
+    let resolveSecondRegistered: () => void;
+    const secondRegistered = new Promise<void>((resolve) => {
+      resolveSecondRegistered = resolve;
+    });
+    const secondCompleted = firstCompleted.then(() => {
+      const completed = runProcess("second-child", [], tracker, () => second);
+      resolveSecondRegistered();
+      return completed;
+    });
+    let drained = false;
+    const draining = tracker.closeAndDrain().then(() => {
+      drained = true;
+    });
+
+    first.emitClose(0);
+    await secondRegistered;
+    await Promise.resolve();
+    expect(second.receivedSignals).toEqual(["SIGTERM"]);
+    expect(drained).toBe(false);
+    second.emitClose(1);
+
+    await draining;
+    await expect(secondCompleted).resolves.toMatchObject({ exitCode: 1 });
+    expect(tracker.size()).toBe(0);
     await expect(
       rm(root, { recursive: true, force: true }),
     ).resolves.toBeUndefined();
@@ -620,7 +701,7 @@ describe("LocalFrameExtraction", () => {
       if (
         !(await ffmpegHasPortableExtractionCapability(
           "ffmpeg",
-          trackedProcesses,
+          testGenerationTracker,
         ))
       )
         return context.skip();
@@ -643,7 +724,7 @@ describe("LocalFrameExtraction", () => {
           "mp4",
           staged,
         ],
-        trackedProcesses,
+        testGenerationTracker,
       );
       expect(generated.exitCode).toBe(0);
       const generatedSourceSha256 = createHash("sha256")
@@ -657,7 +738,7 @@ describe("LocalFrameExtraction", () => {
             const result = await runProcess(
               command.executable,
               command.arguments,
-              trackedProcesses,
+              testGenerationTracker,
             );
             return {
               exitCode: result.exitCode,
@@ -940,7 +1021,7 @@ function insertBeforeEoi(bytes: Uint8Array, insert: Uint8Array): Uint8Array {
 /** Skip only when a real invocation cannot execute the complete owned pipeline. */
 async function ffmpegHasPortableExtractionCapability(
   executable = "ffmpeg",
-  trackedProcesses?: Set<TrackedProcess>,
+  tracker?: ProcessTracker,
 ): Promise<boolean> {
   const root = await mkdtemp(join(tmpdir(), "revelai-ffmpeg-capability-"));
   const source = join(root, "source.mp4");
@@ -963,7 +1044,7 @@ async function ffmpegHasPortableExtractionCapability(
         "mp4",
         source,
       ],
-      trackedProcesses,
+      tracker,
     );
     if (generated.exitCode !== 0) return false;
     const extracted = await runProcess(
@@ -995,7 +1076,7 @@ async function ffmpegHasPortableExtractionCapability(
         "null",
         "-",
       ],
-      trackedProcesses,
+      tracker,
     );
     if (extracted.exitCode !== 0) return false;
     return (await readFile(join(root, "frame-000000.jpg"))).length > 0;
@@ -1006,19 +1087,39 @@ async function ffmpegHasPortableExtractionCapability(
   }
 }
 
+class ControlledChildProcess extends EventEmitter {
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly receivedSignals: NodeJS.Signals[] = [];
+  errorOnTerminate = false;
+
+  kill(signal: NodeJS.Signals): boolean {
+    this.receivedSignals.push(signal);
+    if (this.errorOnTerminate)
+      this.emit("error", new Error("simulated kill error"));
+    return !this.errorOnTerminate;
+  }
+
+  emitClose(exitCode: number | null): void {
+    this.emit("close", exitCode);
+    this.stdout.end();
+    this.stderr.end();
+  }
+}
+
 async function runProcess(
   executable: string,
   arguments_: readonly string[],
-  trackedProcesses?: Set<TrackedProcess>,
+  tracker?: ProcessTracker,
+  spawnProcess: ProcessSpawner = spawnProcessNative,
 ): Promise<ProcessResult> {
-  const child = spawn(executable, arguments_, {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = spawnProcess(executable, arguments_);
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   let forceKill: ReturnType<typeof setTimeout> | undefined;
   let finished = false;
   let terminating = false;
+  let processError: Error | undefined;
   let resolveClosed: () => void;
   let resolveCompleted: (result: ProcessResult) => void;
   let rejectCompleted: (error: Error) => void;
@@ -1042,23 +1143,19 @@ async function runProcess(
       await closed;
     },
   });
-  const finish = (settle: () => void): void => {
-    if (finished) return;
-    finished = true;
-    if (forceKill) clearTimeout(forceKill);
-    trackedProcesses?.delete(tracked);
-    resolveClosed();
-    settle();
-  };
-
-  trackedProcesses?.add(tracked);
+  tracker?.register(tracked);
   child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
   child.once("error", (error: Error) => {
-    finish(() => rejectCompleted(error));
+    processError ??= error;
   });
   child.once("close", (code) => {
-    finish(() => {
+    if (finished) return;
+    finished = true;
+    if (forceKill) clearTimeout(forceKill);
+    tracker?.release(tracked);
+    if (processError) rejectCompleted(processError);
+    else
       resolveCompleted(
         Object.freeze({
           exitCode: code ?? 1,
@@ -1066,13 +1163,30 @@ async function runProcess(
           stderr: Buffer.concat(stderr).toString("utf8"),
         }),
       );
-    });
+    resolveClosed();
   });
   return completed;
 }
 
-async function terminateTrackedProcesses(
-  processes: Set<TrackedProcess>,
-): Promise<void> {
-  await Promise.all([...processes].map((process) => process.terminate()));
+const spawnProcessNative: ProcessSpawner = (executable, arguments_) =>
+  spawn(executable, arguments_, { stdio: ["ignore", "pipe", "pipe"] });
+
+function createProcessTracker(): ProcessTracker {
+  const processes = new Set<TrackedProcess>();
+  let closing = false;
+  return Object.freeze({
+    register: (process) => {
+      processes.add(process);
+      if (closing) void process.terminate();
+    },
+    release: (process) => {
+      processes.delete(process);
+    },
+    closeAndDrain: async () => {
+      closing = true;
+      while (processes.size > 0)
+        await Promise.all([...processes].map((process) => process.terminate()));
+    },
+    size: () => processes.size,
+  });
 }
