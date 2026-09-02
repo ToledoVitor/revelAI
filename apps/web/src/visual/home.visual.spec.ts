@@ -385,3 +385,30 @@ test("opens the device-local history link with visible keyboard focus", async ({
     "Nenhum treino neste dispositivo ainda.",
   );
 });
+
+test("keeps mobile navigation links in the keyboard sequence and restores focus when closed", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-home");
+  await page.goto("/");
+
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("link", { name: "RevelAI" })).toBeFocused();
+  await page.keyboard.press("Tab");
+
+  const navigationToggle = page.getByRole("button", { name: /navegação/ });
+  await expect(navigationToggle).toBeFocused();
+  await navigationToggle.press("Enter");
+  await expect(navigationToggle).toHaveAttribute("aria-expanded", "true");
+
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("link", { name: "Início" })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("link", { name: "Meus treinos" })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("button", { name: "Ranking" })).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(navigationToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(navigationToggle).toBeFocused();
+});

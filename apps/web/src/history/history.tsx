@@ -4,7 +4,7 @@ import {
   useQueryClient,
   type InfiniteData,
 } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AttemptListResponse } from "@revelai/contracts";
 import type { createRevelApiClient, RevelApiError } from "../lib/api/client";
 
@@ -34,6 +34,7 @@ function messageFor(error: unknown): string {
 export function TrainingHistory({ client }: TrainingHistoryProps) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const queryClient = useQueryClient();
+  const [deleteMessage, setDeleteMessage] = useState<string | null>(null);
   const history = useInfiniteQuery({
     queryKey: historyQueryKey,
     initialPageParam: undefined as HistoryPageParam,
@@ -45,6 +46,7 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
   });
   const deleteAttempt = useMutation({
     mutationFn: (id: string) => client.deleteAttempt(id),
+    onMutate: () => setDeleteMessage(null),
     onSuccess: (_result, id) => {
       queryClient.setQueryData<
         InfiniteData<AttemptListResponse, HistoryPageParam>
@@ -58,6 +60,8 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
           })),
         };
       });
+      setDeleteMessage("Treino excluído.");
+      headingRef.current?.focus();
     },
   });
 
@@ -78,6 +82,7 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
       <h1 id="training-history-heading" ref={headingRef} tabIndex={-1}>
         Meus treinos neste dispositivo
       </h1>
+      {deleteMessage ? <p role="status">{deleteMessage}</p> : null}
       {history.isPending ? <p role="status">Carregando treinos.</p> : null}
       {initialLoadFailed ? (
         <section aria-label="Erro ao carregar treinos">
@@ -103,7 +108,11 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
               <time dateTime={attempt.createdAt}>{attempt.createdAt}</time>
               <button
                 type="button"
-                aria-label="Excluir treino"
+                aria-label={
+                  deleteAttempt.isPending && deletingId === attempt.id
+                    ? "Excluindo treino"
+                    : "Excluir treino"
+                }
                 disabled={deleteAttempt.isPending}
                 onClick={() => deleteAttempt.mutate(attempt.id)}
               >

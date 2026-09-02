@@ -44,6 +44,7 @@ describe("training history", () => {
     await user.tab();
     await user.tab();
     await user.tab();
+    await user.tab();
     expect(screen.getByRole("link", { name: "Meus treinos" })).toHaveFocus();
     await user.keyboard("{Enter}");
 
@@ -113,9 +114,9 @@ describe("training history", () => {
       error.body.message,
     );
     await user.click(screen.getByRole("button", { name: "Tentar novamente" }));
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      "Nenhum treino neste dispositivo ainda.",
-    );
+    expect(
+      await screen.findByText("Nenhum treino neste dispositivo ainda."),
+    ).toHaveAttribute("role", "status");
   });
 
   it("retries a next cursor page without reordering the received history", async () => {
@@ -167,6 +168,43 @@ describe("training history", () => {
     ]);
   });
 
+  it("announces deletion completion and moves focus to the history heading", async () => {
+    const user = userEvent.setup();
+    const newer = pendingAttempt("attempt-newer", "2026-08-30T13:00:00.000Z");
+    const older = pendingAttempt("attempt-older", "2026-08-30T12:00:00.000Z");
+    const deleteResponse = deferred<Response>();
+    server.use(
+      http.get("*/v1/attempts", () =>
+        HttpResponse.json({ items: [newer, older], nextCursor: null }),
+      ),
+      http.delete("*/v1/attempts/attempt-newer", () => deleteResponse.promise),
+    );
+
+    render(<App />);
+    await user.click(screen.getByRole("link", { name: "Meus treinos" }));
+    await screen.findAllByRole("article");
+
+    await user.click(
+      screen.getAllByRole("button", { name: "Excluir treino" })[0],
+    );
+    expect(
+      screen.getByRole("button", { name: "Excluindo treino" }),
+    ).toBeDisabled();
+
+    deleteResponse.resolve(new HttpResponse(null, { status: 204 }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Treino excluído.",
+    );
+    expect(screen.getAllByRole("article")).toHaveLength(1);
+    expect(
+      screen.getByRole("heading", {
+        name: "Meus treinos neste dispositivo",
+        level: 1,
+      }),
+    ).toHaveFocus();
+  });
+
   it("removes a deleted item and recovers from a deletion error", async () => {
     const user = userEvent.setup();
     const attempt = pendingAttempt(
@@ -199,9 +237,9 @@ describe("training history", () => {
     expect(deleteButton).toBeEnabled();
     await user.click(deleteButton);
 
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      "Nenhum treino neste dispositivo ainda.",
-    );
+    expect(
+      await screen.findByText("Nenhum treino neste dispositivo ainda."),
+    ).toHaveAttribute("role", "status");
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
   });
 });

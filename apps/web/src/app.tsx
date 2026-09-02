@@ -37,11 +37,25 @@ type RevelApiClient = ReturnType<typeof createRevelApiClient>;
 
 function Shell({ client }: Readonly<{ client: RevelApiClient }>) {
   const [isNavigationOpen, setNavigationOpen] = useState(false);
+  const navigationToggleRef = useRef<HTMLButtonElement>(null);
+  const restoreNavigationToggleFocus = useRef(false);
   const location = useLocation();
   const navigate = useNavigate();
 
-  const openUnavailable = (destination: string) => {
+  useEffect(() => {
+    if (!isNavigationOpen && restoreNavigationToggleFocus.current) {
+      navigationToggleRef.current?.focus();
+      restoreNavigationToggleFocus.current = false;
+    }
+  }, [isNavigationOpen]);
+
+  const closeNavigation = (restoreFocus = false) => {
+    restoreNavigationToggleFocus.current = restoreFocus;
     setNavigationOpen(false);
+  };
+
+  const openUnavailable = (destination: string) => {
+    closeNavigation();
     navigate(`/indisponivel/${destination}`);
   };
 
@@ -49,36 +63,49 @@ function Shell({ client }: Readonly<{ client: RevelApiClient }>) {
     <div className="app-shell" style={appTheme}>
       <header className="site-header">
         <Brand />
+        <button
+          ref={navigationToggleRef}
+          className="navigation-toggle"
+          type="button"
+          aria-label={isNavigationOpen ? "Fechar navegação" : "Abrir navegação"}
+          aria-expanded={isNavigationOpen}
+          aria-controls="primary-navigation"
+          onClick={() => {
+            if (isNavigationOpen) {
+              closeNavigation();
+              return;
+            }
+            setNavigationOpen(true);
+          }}
+        >
+          {isNavigationOpen ? <X weight="bold" /> : <List weight="bold" />}
+        </button>
         <nav
           id="primary-navigation"
           className="primary-navigation"
           aria-label="Navegação principal"
           data-open={isNavigationOpen}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              closeNavigation(true);
+            }
+          }}
         >
           <Link
             to="/"
             aria-current={location.pathname === "/" ? "page" : undefined}
-            onClick={() => setNavigationOpen(false)}
+            onClick={() => closeNavigation()}
           >
             Início
           </Link>
-          <Link to="/training/history" onClick={() => setNavigationOpen(false)}>
+          <Link to="/training/history" onClick={() => closeNavigation()}>
             Meus treinos
           </Link>
           <button type="button" onClick={() => openUnavailable("ranking")}>
             Ranking
           </button>
         </nav>
-        <button
-          className="navigation-toggle"
-          type="button"
-          aria-label={isNavigationOpen ? "Fechar navegação" : "Abrir navegação"}
-          aria-expanded={isNavigationOpen}
-          aria-controls="primary-navigation"
-          onClick={() => setNavigationOpen((isOpen) => !isOpen)}
-        >
-          {isNavigationOpen ? <X weight="bold" /> : <List weight="bold" />}
-        </button>
       </header>
       <Routes>
         <Route path="/" element={<Home onUnavailable={openUnavailable} />} />

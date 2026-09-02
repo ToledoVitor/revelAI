@@ -8,6 +8,13 @@ import { createRevelApiClient } from "./client";
 
 const athleteId = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 const server = setupServer();
+const serviceNotReadyError = routeErrorFixtures.find(
+  (fixture) => fixture.body.code === "service_not_ready",
+);
+
+if (!serviceNotReadyError) {
+  throw new Error("The service-not-ready RouteError fixture is required.");
+}
 
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 afterEach(() => server.resetHandlers());
@@ -242,6 +249,74 @@ describe("Revel API client", () => {
       ).rejects.toStrictEqual({ ...fixture.body, status: fixture.status });
     },
   );
+
+  it.each([
+    {
+      name: "an unknown code",
+      body: { ...serviceNotReadyError.body, code: "unknown_error" },
+    },
+    {
+      name: "a non-allowlisted message",
+      body: { ...serviceNotReadyError.body, message: "Provider detail" },
+    },
+    {
+      name: "a mismatched retryability value",
+      body: { ...serviceNotReadyError.body, retryable: false },
+    },
+    {
+      name: "an extra transport field",
+      body: { ...serviceNotReadyError.body, providerDetail: "private" },
+    },
+  ])(
+    "rejects $name without emitting a normalized client error",
+    async ({ body }) => {
+      server.use(
+        http.get("http://revelai.test/v1/attempts/attempt-error", () =>
+          HttpResponse.json(body, { status: serviceNotReadyError.status }),
+        ),
+      );
+
+      const error = await rejectedError(
+        createRevelApiClient({
+          baseUrl: "http://revelai.test",
+          athleteId,
+        }).getAttempt("attempt-error"),
+      );
+
+      expect(error).toMatchObject({ name: "ZodError" });
+      expect(error).not.toMatchObject({
+        code: body.code,
+        message: body.message,
+        retryable: body.retryable,
+        status: serviceNotReadyError.status,
+      });
+    },
+  );
+
+  it("rejects a valid RouteError with a mismatched HTTP status without normalization", async () => {
+    server.use(
+      http.get("http://revelai.test/v1/attempts/attempt-error", () =>
+        HttpResponse.json(serviceNotReadyError.body, { status: 400 }),
+      ),
+    );
+
+    const error = await rejectedError(
+      createRevelApiClient({
+        baseUrl: "http://revelai.test",
+        athleteId,
+      }).getAttempt("attempt-error"),
+    );
+
+    expect(error).toMatchObject({
+      message: "Route error status does not match its contract.",
+    });
+    expect(error).not.toMatchObject({
+      code: serviceNotReadyError.body.code,
+      message: serviceNotReadyError.body.message,
+      retryable: serviceNotReadyError.body.retryable,
+      status: 400,
+    });
+  });
 
   it.each(
     mediaUploadFixtures.rejected.filter(
@@ -482,4 +557,13 @@ function pendingAttempt(id: string, createdAt = "2026-08-30T12:00:00.000Z") {
       status: "awaiting-upload" as const,
     },
   };
+}
+
+async function rejectedError(operation: Promise<unknown>): Promise<unknown> {
+  return operation.then(
+    () => {
+      throw new Error("Expected the client request to reject.");
+    },
+    (error: unknown) => error,
+  );
 }

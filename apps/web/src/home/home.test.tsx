@@ -87,6 +87,10 @@ describe("the web home", () => {
     await user.tab();
     expect(screen.getByRole("link", { name: "RevelAI" })).toHaveFocus();
     await user.tab();
+    expect(
+      screen.getByRole("button", { name: "Abrir navegação" }),
+    ).toHaveFocus();
+    await user.tab();
     expect(screen.getByRole("link", { name: "Início" })).toHaveFocus();
     await user.keyboard("{Enter}");
 
