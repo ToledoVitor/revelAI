@@ -22,6 +22,8 @@
     "test:visual:structural:run": "node scripts/run-playwright.mjs --revelai-visual-mode structural",
     "build:production-router": "node scripts/build-production-router-artifact.mjs",
     "test:production-router": "node scripts/run-playwright.mjs --revelai-visual-mode structural --config playwright.production.config.ts",
+    "pretest:demo:e2e": "node scripts/ensure-chromium.mjs",
+    "test:demo:e2e": "pnpm --filter @revelai/api run build:workspace && pnpm run build && pnpm exec playwright test --config playwright.demo.config.ts",
     "pretest:visual:darwin": "node scripts/ensure-chromium.mjs",
     "test:visual:darwin": "node scripts/run-playwright.mjs --revelai-visual-mode darwin",
     "test:visual:canonical": "node scripts/run-playwright.mjs --revelai-visual-mode canonical"

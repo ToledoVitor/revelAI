@@ -26,6 +26,7 @@ jobs:
       - run: pnpm --filter @revelai/web exec playwright install --with-deps chromium
       - run: pnpm check
       - run: pnpm --filter @revelai/web run test:production-router
+      - run: pnpm --filter @revelai/web run test:demo:e2e
       - name: Run canonical Linux visual gate
         env:
           PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e

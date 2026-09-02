@@ -23,18 +23,57 @@ export type CaptureMetadata = {
   screenshot: string;
 };
 
-const fixtures = [
+type VisualFixture = Readonly<{
+  id: string;
+  route: string;
+  state: string;
+  reference: Readonly<Partial<Record<"desktop" | "mobile", string>>>;
+}>;
+
+const fixtures: readonly VisualFixture[] = [
   {
     id: "home-default",
     route: "/",
     state: "ready",
+    reference: { desktop: "desktop-home.png", mobile: "mobile-home.png" },
   },
   {
     id: "home-mutation",
     route: "/",
     state: "ui-ink-mutation",
+    reference: { desktop: "desktop-home.png", mobile: "mobile-home.png" },
   },
-] as const;
+  {
+    id: "verified-challenge-default",
+    route: "/verified",
+    state: "challenge-choice",
+    reference: { mobile: "mobile-challenge.png" },
+  },
+  {
+    id: "verified-calibration-default",
+    route: "/verified",
+    state: "calibration-guidance",
+    reference: { mobile: "mobile-calibration.png" },
+  },
+  {
+    id: "verified-record-default",
+    route: "/verified",
+    state: "recording-capture",
+    reference: { mobile: "mobile-record.png" },
+  },
+  {
+    id: "verified-processing-demo",
+    route: "/verified",
+    state: "processing-pending",
+    reference: { mobile: "mobile-processing.png" },
+  },
+  {
+    id: "verified-ranked-policy-approved",
+    route: "/verified",
+    state: "ranked-report",
+    reference: { mobile: "mobile-report.png" },
+  },
+];
 
 const uiInkCoverageBaselines = {
   [DARWIN_ARM64_RENDERER]: {
@@ -66,6 +105,30 @@ export function selectFixture({ route, state }: VisualRouteState) {
   }
 
   return fixture.id;
+}
+
+export function getVisualReference({
+  route,
+  state,
+  viewport,
+}: VisualRouteState & Readonly<{ viewport: Viewport }>) {
+  const fixture = fixtures.find(
+    (candidate) => candidate.route === route && candidate.state === state,
+  );
+
+  if (!fixture) {
+    throw new Error(`No visual fixture is registered for ${route} (${state}).`);
+  }
+
+  const density = viewport.width <= 700 ? "mobile" : "desktop";
+  const reference = fixture.reference[density];
+  if (!reference) {
+    throw new Error(
+      `No ${density} reference is registered for ${route} (${state}).`,
+    );
+  }
+
+  return reference;
 }
 
 export function createCaptureMetadata({

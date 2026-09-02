@@ -9,11 +9,14 @@ import { createLocalDemoProcessRunner } from "../dist/demo/local-demo-process-ru
 import { LocalDemoPreflightError } from "../dist/demo/local-demo-support.js";
 import { startConfiguredApi } from "../dist/startup.js";
 
-const isCheck = process.argv.includes("--check");
+const serveCheck = process.argv.includes("--serve-check");
+const isCheck = process.argv.includes("--check") || serveCheck;
 const scratch = isCheck
   ? await mkdtemp(join(tmpdir(), "revelai-local-demo-check-"))
   : undefined;
-const environment = scratch ? checkEnvironment(scratch) : process.env;
+const environment = scratch
+  ? checkEnvironment(scratch, process.env)
+  : process.env;
 
 let runtime;
 
@@ -24,7 +27,7 @@ try {
     processRunner: createLocalDemoProcessRunner(),
   });
 
-  if (isCheck) {
+  if (isCheck && !serveCheck) {
     await runLocalDemoCheckTrace(runtime);
     await runtime.close();
     runtime = undefined;
@@ -42,6 +45,7 @@ try {
           ),
       },
     });
+    if (serveCheck) void releaseServedCheckFrameProcess(runtime);
     let stopping = false;
     const stop = async () => {
       if (stopping) return;
@@ -49,13 +53,16 @@ try {
       try {
         await started.close();
       } finally {
+        if (scratch) await rm(scratch, { recursive: true, force: true });
         process.exitCode = 0;
       }
     };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
     console.log(
-      "RevelAI local demo is listening on its configured local host.",
+      serveCheck
+        ? "RevelAI local demo check API is listening on its configured local host."
+        : "RevelAI local demo is listening on its configured local host.",
     );
   }
 } catch (error) {
@@ -69,12 +76,22 @@ try {
   process.exitCode = 1;
 }
 
-function checkEnvironment(directory) {
+function checkEnvironment(directory, input) {
   return Object.freeze({
     NODE_ENV: "development",
-    HOST: "127.0.0.1",
-    PORT: "3000",
+    HOST: input.HOST ?? "127.0.0.1",
+    PORT: input.PORT ?? "3000",
     DATA_DIR: join(directory, "data"),
     MEDIA_DIR: join(directory, "media"),
   });
+}
+
+async function releaseServedCheckFrameProcess(runtime) {
+  try {
+    await runtime.waitForCheckFrameProcess();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    runtime.releaseCheckFrameProcess();
+  } catch {
+    // Shutdown can close the check gate before an upload reaches extraction.
+  }
 }

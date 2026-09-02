@@ -7,6 +7,7 @@ import { PNG } from "pngjs";
 import {
   assessUiInkCoverage,
   createCaptureMetadata,
+  getVisualReference,
   getUiInkCoverageBaselines,
   selectFixture,
   type CaptureMetadata,
@@ -71,6 +72,22 @@ type VisualArtifacts = {
   comparison: ComparisonResult;
 };
 
+type ReferenceVisualArtifacts = {
+  metadata: CaptureMetadata;
+  files: Pick<
+    VisualArtifacts["files"],
+    "capture" | "metadata" | "normalizedReference" | "overlay" | "diff"
+  >;
+  comparison: Readonly<{
+    reference: string;
+    mask: Readonly<{
+      rationale: string;
+      regions: readonly MaskRegion[];
+    }>;
+    image: VisualMetric;
+  }>;
+};
+
 const webRoot = fileURLToPath(new URL("../../", import.meta.url));
 const repositoryRoot = resolve(webRoot, "../..");
 const artifactDirectory = resolve(
@@ -80,10 +97,6 @@ const artifactDirectory = resolve(
 
 function filenameWithoutExtension(filename: string) {
   return filename.replace(/\.png$/, "");
-}
-
-function getReference(viewport: Viewport) {
-  return viewport.width <= 700 ? "mobile-home.png" : "desktop-home.png";
 }
 
 function getMask(viewport: Viewport) {
@@ -412,7 +425,7 @@ export async function captureHomeVisualArtifacts({
     state,
     fixture,
   });
-  const referenceName = getReference(viewport);
+  const referenceName = getVisualReference({ route, state, viewport });
   const artifactStem = filenameWithoutExtension(metadata.screenshot);
   const files = {
     capture: resolve(artifactDirectory, metadata.screenshot),
@@ -532,6 +545,100 @@ export async function captureHomeVisualArtifacts({
       PNG.sync.write(createOverlay(referenceInk, captureInk)),
     ),
     writeFile(files.uiInkDiff, PNG.sync.write(uiInkDiff)),
+    writeFile(
+      files.metadata,
+      `${JSON.stringify(
+        {
+          ...metadata,
+          captureScale: "css",
+          normalizedPixelDensity: 1,
+          captureDimensions: { width: capture.width, height: capture.height },
+          reference: referenceName,
+          comparison,
+        },
+        null,
+        2,
+      )}\n`,
+    ),
+  ]);
+
+  return { metadata, files, comparison };
+}
+
+/**
+ * Records approved state captures through the W0 artifact pipeline without
+ * granting a non-home state a pixel budget or hiding any candidate UI.
+ */
+export async function captureReferenceVisualArtifacts({
+  page,
+  viewport,
+  dpr,
+  state,
+}: {
+  page: Page;
+  viewport: Viewport;
+  dpr: number;
+  state: string;
+}): Promise<ReferenceVisualArtifacts> {
+  const route = new URL(page.url()).pathname;
+  const fixture = selectFixture({ route, state });
+  const metadata = createCaptureMetadata({
+    viewport,
+    dpr,
+    route,
+    state,
+    fixture,
+  });
+  const referenceName = getVisualReference({ route, state, viewport });
+  const artifactStem = filenameWithoutExtension(metadata.screenshot);
+  const files = {
+    capture: resolve(artifactDirectory, metadata.screenshot),
+    metadata: resolve(artifactDirectory, `${artifactStem}.metadata.json`),
+    normalizedReference: resolve(
+      artifactDirectory,
+      `${artifactStem}.reference-normalized.png`,
+    ),
+    overlay: resolve(artifactDirectory, `${artifactStem}.overlay.png`),
+    diff: resolve(artifactDirectory, `${artifactStem}.diff.png`),
+  };
+
+  await mkdir(artifactDirectory, { recursive: true });
+  await waitForVisualAssets(page);
+  await page.screenshot({ path: files.capture, scale: "css" });
+
+  const [captureFile, referenceFile] = await Promise.all([
+    readFile(files.capture),
+    readFile(resolve(repositoryRoot, "docs/design/references", referenceName)),
+  ]);
+  const capture = PNG.sync.read(captureFile);
+  const reference = resizeNearest(
+    PNG.sync.read(referenceFile),
+    capture.width,
+    capture.height,
+  );
+  const mask = {
+    rationale:
+      "No state-specific region is hidden. This capture records the complete candidate UI for reviewer comparison.",
+    regions: [] as const,
+  };
+  const { diff, threshold, changedPixels, comparedPixels } = createMaskedDiff({
+    reference,
+    capture,
+    regions: mask.regions,
+  });
+  const image: VisualMetric = {
+    threshold,
+    changedPixels,
+    comparedPixels,
+    mismatchRatio: changedPixels / comparedPixels,
+    maxMismatchRatio: 1,
+  };
+  const comparison = { reference: referenceName, mask, image } as const;
+
+  await Promise.all([
+    writeFile(files.normalizedReference, PNG.sync.write(reference)),
+    writeFile(files.overlay, PNG.sync.write(createOverlay(reference, capture))),
+    writeFile(files.diff, PNG.sync.write(diff)),
     writeFile(
       files.metadata,
       `${JSON.stringify(

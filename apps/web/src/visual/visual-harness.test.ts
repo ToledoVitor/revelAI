@@ -5,6 +5,7 @@ import {
   comparePixels,
   createCaptureMetadata,
   createOverlayPlan,
+  getVisualReference,
   getUiInkCoverageBaselines,
   selectFixture,
 } from "./visual-harness";
@@ -63,6 +64,53 @@ describe("visual harness", () => {
     expect(diff.changedPixels).toBe(1);
     expect(diff.totalPixels).toBe(2);
     expect(overlayPixels).toEqual(new Uint8ClampedArray([100, 50, 25, 255]));
+  });
+
+  it("registers every approved mobile acceptance state with its own reference", () => {
+    const states = [
+      ["/", "ready", "home-default", "mobile-home.png"],
+      [
+        "/verified",
+        "challenge-choice",
+        "verified-challenge-default",
+        "mobile-challenge.png",
+      ],
+      [
+        "/verified",
+        "calibration-guidance",
+        "verified-calibration-default",
+        "mobile-calibration.png",
+      ],
+      [
+        "/verified",
+        "recording-capture",
+        "verified-record-default",
+        "mobile-record.png",
+      ],
+      [
+        "/verified",
+        "processing-pending",
+        "verified-processing-demo",
+        "mobile-processing.png",
+      ],
+      [
+        "/verified",
+        "ranked-report",
+        "verified-ranked-policy-approved",
+        "mobile-report.png",
+      ],
+    ] as const;
+
+    for (const [route, state, fixture, reference] of states) {
+      expect(selectFixture({ route, state })).toBe(fixture);
+      expect(
+        getVisualReference({
+          route,
+          state,
+          viewport: { width: 390, height: 844 },
+        }),
+      ).toBe(reference);
+    }
   });
 
   it("keeps an independent Linux ink floor so a missing normal control fails", () => {
