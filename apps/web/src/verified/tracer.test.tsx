@@ -169,6 +169,7 @@ async function waitForAttemptReady() {
 }
 
 async function completeVerifiedSetup(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: "Preparar desafio" }));
   for (let index = 0; index < 5; index += 1) {
     await user.click(
       screen.getByRole("button", {
@@ -206,6 +207,33 @@ describe("production verified tracer", () => {
     vi.unstubAllGlobals();
   });
 
+  it("keeps the challenge choice mounted and network-idle until the player prepares wall pass", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Escolha. Prepare. Compita." }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Preparar desafio" }),
+    ).toBeEnabled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Preparar desafio" }));
+    expect(
+      screen.getByRole("heading", {
+        name: "Preparação do desafio verificado",
+      }),
+    ).toHaveFocus();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("mounts the verified owner before running the exact session-ready-attempt-media sequence", async () => {
     const user = userEvent.setup();
     const fetchSpy = vi.fn(
@@ -234,7 +262,7 @@ describe("production verified tracer", () => {
     );
     expect(
       await screen.findByRole("heading", {
-        name: "Preparação do desafio verificado",
+        name: "Escolha. Prepare. Compita.",
         level: 1,
       }),
     ).toHaveFocus();
@@ -305,6 +333,7 @@ describe("production verified tracer", () => {
     await user.click(
       screen.getByRole("button", { name: "Desafio verificado" }),
     );
+    await user.click(screen.getByRole("button", { name: "Preparar desafio" }));
     expect(screen.getByRole("status")).toHaveTextContent(
       "Ative a câmera ou use um vídeo existente antes de continuar.",
     );
@@ -323,6 +352,9 @@ describe("production verified tracer", () => {
     expect(
       screen.getByRole("heading", { name: "Preparação do desafio verificado" }),
     ).toHaveFocus();
+    expect(
+      screen.getByRole("list", { name: "Etapa 2 de 5" }).querySelector("li"),
+    ).toHaveAttribute("data-passed", "true");
     expect(screen.getByRole("status")).toHaveTextContent(
       "Posicione dois marcadores visíveis a três metros da parede.",
     );
@@ -349,6 +381,7 @@ describe("production verified tracer", () => {
     await user.click(
       screen.getByRole("button", { name: "Desafio verificado" }),
     );
+    await user.click(screen.getByRole("button", { name: "Preparar desafio" }));
 
     expect(
       screen.queryByRole("button", { name: /simular/i }),
@@ -379,6 +412,7 @@ describe("production verified tracer", () => {
     await user.click(
       screen.getByRole("button", { name: "Desafio verificado" }),
     );
+    await user.click(screen.getByRole("button", { name: "Preparar desafio" }));
     await user.click(screen.getByRole("button", { name: "Ativar câmera" }));
     await screen.findByText("Prévia da câmera pronta.");
     await user.click(screen.getByRole("button", { name: "Continuar" }));
@@ -408,6 +442,7 @@ describe("production verified tracer", () => {
     await user.click(
       screen.getByRole("button", { name: "Desafio verificado" }),
     );
+    await user.click(screen.getByRole("button", { name: "Preparar desafio" }));
     await user.click(
       screen.getByRole("button", { name: "Usar vídeo existente" }),
     );
@@ -523,10 +558,13 @@ describe("production verified tracer", () => {
     expect(
       await screen.findByText("Resultado validado — vale para ranking"),
     ).toBeVisible();
+    expect(screen.getByText("Resultado validado.")).toHaveFocus();
+    expect(screen.getByText("Posição no ranking")).toBeVisible();
     expect(screen.getByText("Passes válidos")).toBeVisible();
     expect(screen.getByText("31 passes")).toBeVisible();
     expect(screen.getByText("93.5%")).toBeVisible();
     expect(screen.getByText("1.32 s")).toBeVisible();
+    await user.click(screen.getByText("Detalhes da validação"));
     expect(screen.getByText("Proveniência: roboflow.")).toBeVisible();
     for (const value of [
       "workspace-w4",
@@ -955,7 +993,7 @@ describe("production verified tracer", () => {
       screen.getByRole("button", { name: "Iniciar outro desafio" }),
     );
     expect(
-      screen.getByRole("heading", { name: "Preparação do desafio verificado" }),
+      screen.getByRole("heading", { name: "Escolha. Prepare. Compita." }),
     ).toBeVisible();
     await act(async () => {
       resolveResult?.(response(demoOutcome));
@@ -1104,7 +1142,7 @@ describe("production verified tracer", () => {
       );
       expect(
         screen.getByRole("heading", {
-          name: "Preparação do desafio verificado",
+          name: "Escolha. Prepare. Compita.",
         }),
       ).toBeVisible();
       expect(

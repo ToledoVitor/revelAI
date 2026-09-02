@@ -126,8 +126,9 @@ test("production build drives the verified demo trace without a ranking claim", 
   await page.goto("/");
   await page.getByRole("button", { name: "Desafio verificado" }).click();
   await expect(
-    page.getByRole("heading", { name: "Preparação do desafio verificado" }),
+    page.getByRole("heading", { name: "Escolha. Prepare. Compita." }),
   ).toBeVisible();
+  await page.getByRole("button", { name: "Preparar desafio" }).click();
   await completeVerifiedSetup(page);
   await expect(
     page.getByRole("heading", { name: "Envie o vídeo verificado" }),

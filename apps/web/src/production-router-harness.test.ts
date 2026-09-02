@@ -342,9 +342,9 @@ describe("transformed production router harness", () => {
     const host = await mountAt("/verified", setupPort, capturePort);
 
     await waitForHarnessRender(host, () => {
-      expect(host.querySelector("h1#verified-setup-heading")).toHaveTextContent(
-        "Preparação do desafio verificado",
-      );
+      expect(
+        host.querySelector("h1#challenge-choice-heading"),
+      ).toHaveTextContent("Escolha. Prepare. Compita.");
     });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(setupPort.getFixture).not.toHaveBeenCalled();

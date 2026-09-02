@@ -3,6 +3,16 @@ import type {
   LeaderboardResponse,
   VerifiedResult,
 } from "@revelai/contracts";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Camera,
+  CheckCircle,
+  Circle,
+  Footprints,
+  Timer,
+  Warning,
+} from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
@@ -13,7 +23,6 @@ import {
 import { ProductionCapture } from "./production-capture";
 import { ProductionSetupCamera } from "./production-setup-camera";
 import {
-  captureTimingGuidance,
   setupGates,
   type SetupCameraStatus,
   type SetupGate,
@@ -43,6 +52,7 @@ const leaderboardInput = {
 };
 
 type TracerStage =
+  | "challenge"
   | "setup"
   | "creating-session"
   | "readying-session"
@@ -102,7 +112,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
   const createStartedRef = useRef(false);
   const uploadGenerationRef = useRef(0);
   const pollingStopRef = useRef<() => void>(() => undefined);
-  const [stage, setStage] = useState<TracerStage>("setup");
+  const [stage, setStage] = useState<TracerStage>("challenge");
   const [gateIndex, setGateIndex] = useState(0);
   const [passedGates, setPassedGates] = useState<ReadonlySet<SetupGate["id"]>>(
     () => new Set(),
@@ -143,7 +153,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
     setAttemptState("creating");
     setCreateTick(0);
     setUploadProgress(undefined);
-    setStage("setup");
+    setStage("challenge");
   }, []);
 
   const stopPolling = useCallback(() => {
@@ -339,6 +349,19 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
     return <LiveLeaderboard client={client} headingRef={headingRef} />;
   }
 
+  if (stage === "challenge") {
+    return (
+      <ChallengeChoice
+        headingRef={headingRef}
+        onBack={() => navigate("/")}
+        onPrepare={() => {
+          setMessage("");
+          setStage("setup");
+        }}
+      />
+    );
+  }
+
   if (
     stage === "setup" ||
     stage === "creating-session" ||
@@ -357,20 +380,40 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
         : currentGatePassed
           ? activeGate?.ready
           : activeGate?.correction;
+    const displayedPassedGates = new Set(passedGates);
+    if (cameraStatus === "ready" || cameraStatus === "existing-video") {
+      displayedPassedGates.add("device");
+    }
     return (
       <main
-        className="calibration-setup"
+        className="calibration-setup verified-editorial-page"
         aria-labelledby="verified-setup-heading"
       >
-        <p className="eyebrow">Desafio verificado</p>
-        <h1 id="verified-setup-heading" ref={headingRef} tabIndex={-1}>
-          Preparação do desafio verificado
+        <SetupProgress
+          activeIndex={gateIndex}
+          passedGates={displayedPassedGates}
+        />
+        <p className="eyebrow">Passe contra parede</p>
+        <h1
+          id="verified-setup-heading"
+          ref={headingRef}
+          tabIndex={-1}
+          aria-label="Preparação do desafio verificado"
+        >
+          {activeGate?.id === "space"
+            ? "Calibre o espaço."
+            : activeGate?.id === "athlete"
+              ? "Enquadre o atleta."
+              : activeGate?.id === "rehearsal"
+                ? "Confirme o ensaio."
+                : activeGate?.id === "record"
+                  ? "Prepare a gravação."
+                  : "Prepare o dispositivo."}
         </h1>
-        <p>
+        <p className="sr-only">
           Etapa {gateIndex + 1} de {setupGates.length} — {activeGate?.title}
         </p>
-        <p>{captureTimingGuidance}</p>
-        <h2>{activeGate?.title}</h2>
+        <p className="setup-challenge-name">Passe contra parede</p>
         {activeGate?.id === "device" ? (
           <ProductionSetupCamera
             disabled={stage !== "setup"}
@@ -378,56 +421,67 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
             onStatus={setCameraStatus}
           />
         ) : (
-          <section aria-label="Prévia da câmera">
-            <p role="status">{currentGateStatus}</p>
-          </section>
+          <CalibrationGuidance
+            activeGate={activeGate}
+            currentGatePassed={currentGatePassed}
+            currentGateStatus={currentGateStatus}
+            passedGates={displayedPassedGates}
+          />
         )}
         {message ? <p role="alert">{message}</p> : null}
-        {activeGate && activeGate.id !== "device" ? (
+        <div className="setup-actions">
+          {activeGate && activeGate.id !== "device" ? (
+            <button
+              type="button"
+              disabled={stage !== "setup"}
+              onClick={() =>
+                setPassedGates(
+                  (current) => new Set([...current, activeGate.id]),
+                )
+              }
+            >
+              Confirmar etapa
+            </button>
+          ) : null}
           <button
+            className="setup-continue"
+            type="button"
+            disabled={stage !== "setup" || !currentGatePassed}
+            onClick={() => {
+              if (gateIndex === setupGates.length - 1) {
+                setMessage("");
+                setStage("creating-session");
+                return;
+              }
+              setGateIndex((current) => current + 1);
+            }}
+          >
+            Continuar <ArrowRight aria-hidden="true" weight="light" />
+          </button>
+          <button
+            className="setup-back"
             type="button"
             disabled={stage !== "setup"}
-            onClick={() =>
-              setPassedGates((current) => new Set([...current, activeGate.id]))
-            }
+            onClick={() => {
+              if (gateIndex === 0) {
+                setStage("challenge");
+                return;
+              }
+              setGateIndex((current) => current - 1);
+            }}
           >
-            Confirmar etapa
+            <ArrowLeft aria-hidden="true" weight="light" />
+            {gateIndex === 0 ? "Voltar à escolha" : "Voltar"}
           </button>
-        ) : null}
-        <button
-          type="button"
-          disabled={stage !== "setup" || !currentGatePassed}
-          onClick={() => {
-            if (gateIndex === setupGates.length - 1) {
-              setMessage("");
-              setStage("creating-session");
-              return;
-            }
-            setGateIndex((current) => current + 1);
-          }}
-        >
-          Continuar
-        </button>
-        <button
-          type="button"
-          disabled={stage !== "setup"}
-          onClick={() => {
-            if (gateIndex === 0) {
-              navigate("/");
-              return;
-            }
-            setGateIndex((current) => current - 1);
-          }}
-        >
-          {gateIndex === 0 ? "Voltar para Início" : "Voltar"}
-        </button>
-        <button
-          type="button"
-          disabled={stage !== "setup"}
-          onClick={() => navigate("/")}
-        >
-          Cancelar preparação
-        </button>
+          <button
+            className="setup-cancel"
+            type="button"
+            disabled={stage !== "setup"}
+            onClick={() => navigate("/")}
+          >
+            Cancelar preparação
+          </button>
+        </div>
       </main>
     );
   }
@@ -436,14 +490,19 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
     const uploading = stage === "uploading";
     return (
       <main
-        className="verified-capture"
-        aria-labelledby="verified-capture-heading"
+        className="verified-capture verified-editorial-page"
+        aria-label="Envie o vídeo verificado"
       >
-        <p className="eyebrow">Desafio verificado</p>
-        <h1 id="verified-capture-heading" ref={headingRef} tabIndex={-1}>
-          Envie o vídeo verificado
+        <SetupProgress activeIndex={4} passedGates={new Set(requiredGateIds)} />
+        <h1
+          id="verified-capture-heading"
+          ref={headingRef}
+          tabIndex={-1}
+          aria-label="Envie o vídeo verificado"
+        >
+          Tudo certo. Agora, jogue.
         </h1>
-        <p>
+        <p className="capture-intro">
           Inclua pré-rolagem de calibração de 4 segundos e um intervalo ativo de
           60 segundos. O servidor confirma a elegibilidade.
         </p>
@@ -533,30 +592,67 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
 
   if (stage === "pending") {
     return (
-      <main aria-labelledby="processing-heading">
+      <main
+        className="verified-pending verified-editorial-page"
+        aria-labelledby="processing-heading"
+      >
         <p className="eyebrow">Desafio verificado</p>
-        <h1 id="processing-heading" ref={headingRef} tabIndex={-1}>
-          Processando tentativa
+        <h1
+          id="processing-heading"
+          ref={headingRef}
+          tabIndex={-1}
+          aria-label="Processando tentativa"
+        >
+          Vídeo recebido. Análise em curso.
         </h1>
+        <span className="heading-rule" aria-hidden="true" />
         <p role="status">
           O processamento continua no servidor. Atualize esta tela quando
           voltar; não prometemos uma notificação com o navegador fechado.
         </p>
+        <ol className="processing-timeline" aria-label="Andamento da análise">
+          <li className="is-complete">
+            <CheckCircle aria-hidden="true" weight="fill" />
+            <span>01</span>
+            <strong>Vídeo recebido</strong>
+          </li>
+          <li className="is-current" aria-current="step">
+            <Circle
+              aria-hidden="true"
+              className="timeline-current-dot"
+              weight="fill"
+            />
+            <span>02</span>
+            <strong>Analisando desempenho</strong>
+          </li>
+          <li>
+            <Circle
+              aria-hidden="true"
+              className="timeline-pending-dot"
+              weight="light"
+            />
+            <span>03</span>
+            <strong>Relatório disponível</strong>
+          </li>
+        </ol>
         {message ? <p role="alert">{message}</p> : null}
-        <button
-          type="button"
-          disabled={pendingPolling.refreshing}
-          aria-busy={pendingPolling.refreshing}
-          onClick={() => void pendingPolling.refresh()}
-        >
-          Atualizar agora
-        </button>
+        <div className="pending-actions">
+          <button
+            className="pending-refresh"
+            type="button"
+            disabled={pendingPolling.refreshing}
+            aria-busy={pendingPolling.refreshing}
+            onClick={() => void pendingPolling.refresh()}
+          >
+            Atualizar agora
+          </button>
+          <button type="button" onClick={() => resetToSetup()}>
+            Iniciar outro desafio
+          </button>
+        </div>
         {pendingPolling.refreshing ? (
           <p role="status">Atualizando tentativa.</p>
         ) : null}
-        <button type="button" onClick={() => resetToSetup()}>
-          Iniciar outro desafio
-        </button>
       </main>
     );
   }
@@ -568,6 +664,183 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
       outcome={terminal}
       onRetry={resetToSetup}
     />
+  );
+}
+
+function ChallengeChoice({
+  headingRef,
+  onBack,
+  onPrepare,
+}: Readonly<{
+  headingRef: React.RefObject<HTMLHeadingElement | null>;
+  onBack(): void;
+  onPrepare(): void;
+}>) {
+  return (
+    <main
+      className="challenge-choice verified-editorial-page"
+      aria-labelledby="challenge-choice-heading"
+    >
+      <button className="challenge-back" type="button" onClick={onBack}>
+        <ArrowLeft aria-hidden="true" weight="light" />
+        <span className="sr-only">Voltar para Início</span>
+      </button>
+      <p className="challenge-step">
+        1/5 <span>Desafios</span>
+      </p>
+      <div className="challenge-choice-hero">
+        <div>
+          <h1 id="challenge-choice-heading" ref={headingRef} tabIndex={-1}>
+            Escolha. Prepare. Compita.
+          </h1>
+          <span className="heading-rule" aria-hidden="true" />
+          <p>
+            Escolha um desafio validado e prepare-se para superar seu melhor.
+          </p>
+        </div>
+        <img
+          src="/assets/futsal-hero.png"
+          alt="Jogador treinando passe contra parede em uma quadra de futsal"
+        />
+      </div>
+      <section className="challenge-list" aria-label="Desafios disponíveis">
+        <article className="challenge-card challenge-card--selected">
+          <span className="challenge-number" aria-hidden="true">
+            01
+          </span>
+          <div>
+            <p className="challenge-kicker">Recomendado</p>
+            <h2>Passe contra parede</h2>
+            <p>Máximo de passes contra a parede em 60 segundos.</p>
+            <ul aria-label="Requisitos do desafio passe contra parede">
+              <li>
+                <Timer aria-hidden="true" weight="light" /> 60 segundos
+              </li>
+              <li>
+                <Footprints aria-hidden="true" weight="light" /> ambos os pés
+              </li>
+              <li>
+                <Camera aria-hidden="true" weight="light" /> câmera calibrada
+              </li>
+            </ul>
+          </div>
+        </article>
+        <article className="challenge-card" aria-disabled="true">
+          <span className="challenge-number" aria-hidden="true">
+            02
+          </span>
+          <div>
+            <h2>Controle bilateral</h2>
+            <p>Toques alternados com ambos os pés por 30 segundos.</p>
+          </div>
+          <span>Em breve</span>
+        </article>
+        <article className="challenge-card" aria-disabled="true">
+          <span className="challenge-number" aria-hidden="true">
+            03
+          </span>
+          <div>
+            <h2>Condução em slalom</h2>
+            <p>Conduza entre os cones no menor tempo possível.</p>
+          </div>
+          <span>Em breve</span>
+        </article>
+      </section>
+      <button className="challenge-prepare" type="button" onClick={onPrepare}>
+        Preparar desafio <ArrowRight aria-hidden="true" weight="light" />
+      </button>
+    </main>
+  );
+}
+
+function SetupProgress({
+  activeIndex,
+  passedGates,
+}: Readonly<{
+  activeIndex: number;
+  passedGates: ReadonlySet<SetupGate["id"]>;
+}>) {
+  return (
+    <ol
+      className="verified-progress"
+      aria-label={`Etapa ${activeIndex + 1} de ${setupGates.length}`}
+    >
+      {setupGates.map((gate, index) => {
+        const passed = passedGates.has(gate.id);
+        const active = index === activeIndex;
+        return (
+          <li key={gate.id} data-active={active} data-passed={passed}>
+            {passed ? (
+              <CheckCircle aria-hidden="true" weight="fill" />
+            ) : (
+              <span>{index + 1}</span>
+            )}
+            <small>{gate.title}</small>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function CalibrationGuidance({
+  activeGate,
+  currentGatePassed,
+  currentGateStatus,
+  passedGates,
+}: Readonly<{
+  activeGate: SetupGate;
+  currentGatePassed: boolean;
+  currentGateStatus: string;
+  passedGates: ReadonlySet<SetupGate["id"]>;
+}>) {
+  return (
+    <section
+      className="calibration-guidance"
+      aria-label="Orientação da calibração"
+    >
+      <figure className="calibration-visual">
+        <img
+          src="/assets/futsal-hero.png"
+          alt="Referência visual de atleta diante de uma parede de futsal"
+        />
+        <figcaption>Área de registro para passe contra parede</figcaption>
+      </figure>
+      <p role="status" className="calibration-status">
+        {currentGateStatus}
+      </p>
+      <ul
+        className="calibration-checklist"
+        aria-label="Correções da calibração"
+      >
+        {setupGates.slice(0, 4).map((gate) => {
+          const passed =
+            passedGates.has(gate.id) ||
+            (gate.id === activeGate.id && currentGatePassed);
+          return (
+            <li
+              key={gate.id}
+              data-passed={passed}
+              data-active={gate.id === activeGate.id}
+            >
+              {passed ? (
+                <CheckCircle aria-hidden="true" weight="fill" />
+              ) : (
+                <Warning aria-hidden="true" weight="light" />
+              )}
+              <span>
+                <strong>{gate.title}</strong>
+                <small>{passed ? gate.ready : gate.correction}</small>
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="calibration-truth">
+        <Warning aria-hidden="true" weight="light" /> A ativação só será
+        liberada após a calibração confirmada pelo fluxo.
+      </p>
+    </section>
   );
 }
 
@@ -661,38 +934,37 @@ function VerifiedReport({
       : result.competitiveStatus === "demo"
         ? "Demo — não vale para ranking"
         : "Experimental — não vale para ranking";
+  const isRanked = result.competitiveStatus === "ranked";
   return (
-    <main aria-labelledby="verified-report-heading">
-      <p className="eyebrow">{truth}</p>
-      <h1 id="verified-report-heading" ref={headingRef} tabIndex={-1}>
-        Resultado do desafio verificado
+    <main
+      className="verified-report"
+      aria-label="Resultado do desafio verificado"
+    >
+      <p className="report-truth">{truth}</p>
+      <h1
+        id="verified-report-heading"
+        ref={headingRef}
+        tabIndex={-1}
+        aria-label="Resultado do desafio verificado"
+      >
+        {isRanked ? "Resultado validado." : "Resultado do desafio verificado"}
       </h1>
-      <p>Score: {result.score}</p>
-      <p>Regra: {result.ruleVersion}</p>
-      <p>Concluído em: {result.completedAt}</p>
-      <p>Proveniência: {result.provenance.kind}.</p>
-      {result.provenance.kind === "demo" ? (
-        <dl aria-label="Proveniência demo">
-          <dt>Fixture</dt>
-          <dd>{result.provenance.fixtureId}</dd>
-          <dt>Versão do provider</dt>
-          <dd>{result.provenance.providerVersion}</dd>
-        </dl>
-      ) : (
-        <dl aria-label="Proveniência Roboflow">
-          <dt>Workspace</dt>
-          <dd>{result.provenance.workspaceId}</dd>
-          <dt>Workflow</dt>
-          <dd>{result.provenance.workflowId}</dd>
-          <dt>Versão do workflow</dt>
-          <dd>{result.provenance.workflowVersion}</dd>
-          <dt>Bundle do modelo</dt>
-          <dd>{result.provenance.modelBundleId}</dd>
-          <dt>Versão do provider</dt>
-          <dd>{result.provenance.providerVersion}</dd>
-        </dl>
-      )}
-      <dl>
+      <p className="report-challenge">Passe contra parede · 60 s</p>
+      <p className="sr-only">Score: {result.score}</p>
+      <section className="report-scorecard" aria-label="Resumo da validação">
+        <div>
+          <span>Score</span>
+          <strong>{result.score}</strong>
+          <small>/ 100</small>
+        </div>
+        {isRanked ? (
+          <div>
+            <span>Posição no ranking</span>
+            <strong>Top {result.rankingSnapshot.topPercent}%</strong>
+          </div>
+        ) : null}
+      </section>
+      <dl className="report-metrics">
         <dt>Passes válidos</dt>
         <dd>{result.metrics.validPasses} passes</dd>
         <dt>Precisão</dt>
@@ -704,37 +976,72 @@ function VerifiedReport({
         <dt>Pé direito</dt>
         <dd>{result.metrics.rightFootPercent}%</dd>
       </dl>
-      {result.competitiveStatus === "ranked" ? (
-        <section aria-label="Snapshot de ranking congelado">
-          <h2>Ranking no resultado</h2>
-          <p>Snapshot: {result.rankingSnapshot.kind}</p>
-          <p>
-            Desafio do snapshot: {result.rankingSnapshot.challengeId} v
-            {result.rankingSnapshot.challengeVersion}
-          </p>
-          <p>Regra do snapshot: {result.rankingSnapshot.ruleVersion}</p>
-          <p>Posição: {result.rankingSnapshot.rank}</p>
-          <p>Coorte: {result.rankingSnapshot.cohortSize}</p>
-          <p>
-            Percentil: {result.rankingSnapshot.percentile}% — percentual da
-            coorte com pontuação igual ou menor.
-          </p>
-          <p>
-            Top percent: {result.rankingSnapshot.topPercent}% — distância até o
-            topo, não um sinônimo de percentil.
-          </p>
-          <p>
-            Pontuações no cálculo:{" "}
-            {result.rankingSnapshot.scoreCountAtFinalization}
-          </p>
-          <p>Calculado em: {result.rankingSnapshot.calculatedAt}</p>
-          <p>Tentativa do snapshot: {result.rankingSnapshot.asOfAttemptId}</p>
+      {isRanked ? (
+        <section className="report-insight">
+          <h2>Insight principal</h2>
+          <p>Continue alternando os dois pés para sustentar o ritmo.</p>
         </section>
       ) : null}
-      <Link to="/verified?view=ranking">Ver Ranking atual</Link>
-      <button type="button" onClick={onRetry}>
-        Novo desafio
-      </button>
+      <details className="report-details">
+        <summary>Detalhes da validação</summary>
+        <p>Regra: {result.ruleVersion}</p>
+        <p>Concluído em: {result.completedAt}</p>
+        <p>Proveniência: {result.provenance.kind}.</p>
+        {result.provenance.kind === "demo" ? (
+          <dl aria-label="Proveniência demo">
+            <dt>Fixture</dt>
+            <dd>{result.provenance.fixtureId}</dd>
+            <dt>Versão do provider</dt>
+            <dd>{result.provenance.providerVersion}</dd>
+          </dl>
+        ) : (
+          <dl aria-label="Proveniência Roboflow">
+            <dt>Workspace</dt>
+            <dd>{result.provenance.workspaceId}</dd>
+            <dt>Workflow</dt>
+            <dd>{result.provenance.workflowId}</dd>
+            <dt>Versão do workflow</dt>
+            <dd>{result.provenance.workflowVersion}</dd>
+            <dt>Bundle do modelo</dt>
+            <dd>{result.provenance.modelBundleId}</dd>
+            <dt>Versão do provider</dt>
+            <dd>{result.provenance.providerVersion}</dd>
+          </dl>
+        )}
+        {isRanked ? (
+          <section aria-label="Snapshot de ranking congelado">
+            <h2>Ranking no resultado</h2>
+            <p>Snapshot: {result.rankingSnapshot.kind}</p>
+            <p>
+              Desafio do snapshot: {result.rankingSnapshot.challengeId} v
+              {result.rankingSnapshot.challengeVersion}
+            </p>
+            <p>Regra do snapshot: {result.rankingSnapshot.ruleVersion}</p>
+            <p>Posição: {result.rankingSnapshot.rank}</p>
+            <p>Coorte: {result.rankingSnapshot.cohortSize}</p>
+            <p>
+              Percentil: {result.rankingSnapshot.percentile}% — percentual da
+              coorte com pontuação igual ou menor.
+            </p>
+            <p>
+              Top percent: {result.rankingSnapshot.topPercent}% — distância até
+              o topo, não um sinônimo de percentil.
+            </p>
+            <p>
+              Pontuações no cálculo:{" "}
+              {result.rankingSnapshot.scoreCountAtFinalization}
+            </p>
+            <p>Calculado em: {result.rankingSnapshot.calculatedAt}</p>
+            <p>Tentativa do snapshot: {result.rankingSnapshot.asOfAttemptId}</p>
+          </section>
+        ) : null}
+      </details>
+      <div className="report-actions">
+        <Link to="/verified?view=ranking">Ver Ranking atual</Link>
+        <button type="button" onClick={onRetry}>
+          Novo desafio
+        </button>
+      </div>
     </main>
   );
 }

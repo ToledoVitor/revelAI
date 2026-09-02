@@ -153,7 +153,7 @@ test("captures the approved mobile reference matrix through stable public states
 
   await page.getByRole("button", { name: "Desafio verificado" }).click();
   await expect(
-    page.getByRole("heading", { name: "Preparação do desafio verificado" }),
+    page.getByRole("heading", { name: "Escolha. Prepare. Compita." }),
   ).toBeVisible();
   captures.push(
     await captureReferenceVisualArtifacts({
@@ -164,9 +164,10 @@ test("captures the approved mobile reference matrix through stable public states
     }),
   );
 
+  await page.getByRole("button", { name: "Preparar desafio" }).click();
   await page.getByRole("button", { name: "Usar vídeo existente" }).click();
   await page.getByRole("button", { name: "Continuar" }).click();
-  await expect(page.getByText("Etapa 2 de 5")).toBeVisible();
+  await expect(page.getByText("Calibre o espaço.")).toBeVisible();
   captures.push(
     await captureReferenceVisualArtifacts({
       page,

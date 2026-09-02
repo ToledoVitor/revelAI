@@ -59,6 +59,7 @@ export function ProductionCapture({
   const [active, setActive] = useState(0);
   const [cameraNotice, setCameraNotice] = useState("");
   const [localMedia, setLocalMedia] = useState<LocalProductionMedia>();
+  const [hasLivePreview, setHasLivePreview] = useState(false);
 
   const clearTimers = () => {
     for (const timer of timerIdsRef.current) window.clearTimeout(timer);
@@ -75,6 +76,7 @@ export function ProductionCapture({
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = undefined;
     if (previewRef.current) previewRef.current.srcObject = null;
+    if (mountedRef.current) setHasLivePreview(false);
   };
   const releaseLocalMedia = (notifyParent = false) => {
     const current = localMediaRef.current;
@@ -261,6 +263,7 @@ export function ProductionCapture({
         return;
       }
       streamRef.current = stream;
+      setHasLivePreview(true);
       if (previewRef.current) {
         previewRef.current.srcObject = stream;
         void previewRef.current.play().catch(() => undefined);
@@ -344,9 +347,12 @@ export function ProductionCapture({
     "stopping",
   ].includes(state);
   return (
-    <section aria-label="Captura do vídeo verificado">
-      <section aria-label="Requisitos da captura">
-        <h2>Antes de gravar ou selecionar</h2>
+    <section
+      className="production-capture"
+      aria-label="Captura do vídeo verificado"
+    >
+      <details className="capture-requirements">
+        <summary>Requisitos da captura</summary>
         <ul>
           <li>{captureRequirementLines[0]}</li>
           <li>
@@ -358,10 +364,22 @@ export function ProductionCapture({
             <li key={requirement}>{requirement}</li>
           ))}
         </ul>
-      </section>
-      <section aria-label="Prévia da câmera">
+      </details>
+      <section
+        className="capture-preview"
+        aria-label="Prévia da câmera"
+        data-live={hasLivePreview}
+      >
+        {!hasLivePreview ? (
+          <img
+            className="capture-fallback-image"
+            src="/assets/futsal-hero.png"
+            alt="Referência visual de uma jogadora treinando futsal"
+          />
+        ) : null}
         <video
           ref={previewRef}
+          className="capture-live-preview"
           autoPlay
           muted
           playsInline
@@ -381,14 +399,16 @@ export function ProductionCapture({
           <p>Duração ativa: {active} de 60 segundos</p>
         ) : null}
       </section>
-      <button
-        type="button"
-        disabled={disabled || busy}
-        onClick={() => void start()}
-      >
-        {state === "error" ? "Tentar novamente" : "Iniciar gravação"}
-      </button>
-      <label htmlFor="production-video-input">Enviar vídeo existente</label>
+      <div className="capture-actions">
+        <button
+          type="button"
+          disabled={disabled || busy}
+          onClick={() => void start()}
+        >
+          {state === "error" ? "Tentar novamente" : "Iniciar gravação"}
+        </button>
+        <label htmlFor="production-video-input">Enviar vídeo existente</label>
+      </div>
       <input
         id="production-video-input"
         data-testid="production-video-input"

@@ -544,7 +544,7 @@ test("served production keeps same-task History cleanup retries causally matched
   ]);
 });
 
-test("served production verified setup uses real camera controls without review simulation copy", async ({
+test("served production verified choice exposes wall-pass before any calibration owner mounts", async ({
   page,
 }) => {
   const apiRequests: string[] = [];
@@ -555,17 +555,15 @@ test("served production verified setup uses real camera controls without review 
 
   await page.goto("/verified");
 
-  const setup = page.getByRole("main", {
-    name: "Preparação do desafio verificado",
+  const choice = page.getByRole("main", {
+    name: "Escolha. Prepare. Compita.",
   });
-  await expect(setup).toBeVisible();
-  await expect(setup).not.toContainText(/simular|simulação|simulada/i);
+  await expect(choice).toBeVisible();
+  await expect(choice).not.toContainText(/simular|simulação|simulada/i);
   await expect(
-    setup.getByRole("button", { name: "Ativar câmera" }),
+    choice.getByRole("button", { name: "Preparar desafio" }),
   ).toBeVisible();
-  await expect(
-    setup.getByRole("button", { name: "Usar vídeo existente" }),
-  ).toBeVisible();
+  await expect(choice.getByText("Passe contra parede")).toBeVisible();
   expect(apiRequests).toEqual([]);
 });
 
@@ -579,6 +577,10 @@ test("served production verified setup keeps its real device gate coherent acros
   });
 
   await page.goto("/verified");
+  const choice = page.getByRole("main", {
+    name: "Escolha. Prepare. Compita.",
+  });
+  await choice.getByRole("button", { name: "Preparar desafio" }).click();
   const setup = page.getByRole("main", {
     name: "Preparação do desafio verificado",
   });

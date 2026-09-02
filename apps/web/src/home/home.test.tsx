@@ -133,7 +133,7 @@ describe("the web home", () => {
 
     expect(
       screen.getByRole("heading", {
-        name: "Preparação do desafio verificado",
+        name: "Escolha. Prepare. Compita.",
         level: 1,
       }),
     ).toHaveFocus();

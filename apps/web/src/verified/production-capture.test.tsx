@@ -98,6 +98,21 @@ describe("production verified capture", () => {
     Reflect.deleteProperty(navigator, "mediaDevices");
   });
 
+  it("shows the approved visual fallback while retaining the real camera and expandable requirements", () => {
+    render(<ProductionCapture disabled={false} onMedia={vi.fn()} />);
+
+    expect(
+      screen.getByRole("img", {
+        name: "Referência visual de uma jogadora treinando futsal",
+      }),
+    ).toHaveAttribute("src", "/assets/futsal-hero.png");
+    expect(
+      screen.getByRole("button", { name: "Iniciar gravação" }),
+    ).toBeEnabled();
+    expect(screen.getByLabelText("Enviar vídeo existente")).toBeEnabled();
+    expect(screen.getByText("Requisitos da captura")).toBeVisible();
+  });
+
   it("uses the exact MIME preference and 5 + 4 + 60 second automatic capture timeline", async () => {
     const { stream } = streamHarness();
     const getUserMedia = vi.fn().mockResolvedValue(stream);
