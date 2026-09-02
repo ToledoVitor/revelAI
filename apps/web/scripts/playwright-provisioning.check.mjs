@@ -8,7 +8,7 @@ import test from "node:test";
 const webRoot = new URL("..", import.meta.url);
 const repositoryRoot = new URL("../..", webRoot);
 
-function runWebTest(browserCache) {
+function runWebCommand(browserCache, commandArguments) {
   const command = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
   const environment = {
     ...process.env,
@@ -18,10 +18,14 @@ function runWebTest(browserCache) {
   delete environment.NODE_TEST_CONTEXT;
 
   return new Promise((resolve, reject) => {
-    const child = spawn(command, ["--filter", "@revelai/web", "test"], {
-      cwd: repositoryRoot,
-      env: environment,
-    });
+    const child = spawn(
+      command,
+      ["--filter", "@revelai/web", ...commandArguments],
+      {
+        cwd: repositoryRoot,
+        env: environment,
+      },
+    );
     let output = "";
 
     child.stdout.on("data", (chunk) => {
@@ -44,7 +48,28 @@ test(
     );
 
     try {
-      const result = await runWebTest(browserCache);
+      const result = await runWebCommand(browserCache, ["test"]);
+
+      assert.equal(result.exitCode, 0, result.output);
+    } finally {
+      await rm(browserCache, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "provisions an empty browser cache for the direct structural visual command",
+  { timeout: 180_000 },
+  async () => {
+    const browserCache = await mkdtemp(
+      join(tmpdir(), "revelai-web-structural-browser-cache-"),
+    );
+
+    try {
+      const result = await runWebCommand(browserCache, [
+        "run",
+        "test:visual:structural",
+      ]);
 
       assert.equal(result.exitCode, 0, result.output);
     } finally {

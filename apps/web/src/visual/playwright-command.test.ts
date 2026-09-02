@@ -17,7 +17,7 @@ describe("Playwright command", () => {
     expect(commandDarwinRenderer).toBe(DARWIN_ARM64_RENDERER);
   });
 
-  it("keeps public visual-mode scripts portable", async () => {
+  it("keeps public visual-mode scripts portable with one provisioning hook", async () => {
     const packageJson = JSON.parse(
       await readFile(
         fileURLToPath(new URL("../../package.json", import.meta.url)),
@@ -25,7 +25,25 @@ describe("Playwright command", () => {
       ),
     ) as { scripts: Record<string, string> };
 
+    expect(packageJson.scripts.pretest).toBe(
+      "node scripts/ensure-chromium.mjs",
+    );
+    expect(packageJson.scripts.test).toContain(
+      "pnpm run test:visual:structural:run",
+    );
+    expect(packageJson.scripts["pretest:visual"]).toBe(
+      "node scripts/ensure-chromium.mjs",
+    );
+    expect(packageJson.scripts["test:visual"]).toBe(
+      "pnpm run test:visual:structural:run",
+    );
+    expect(packageJson.scripts["pretest:visual:structural"]).toBe(
+      "node scripts/ensure-chromium.mjs",
+    );
     expect(packageJson.scripts["test:visual:structural"]).toBe(
+      "pnpm run test:visual:structural:run",
+    );
+    expect(packageJson.scripts["test:visual:structural:run"]).toBe(
       "node scripts/run-playwright.mjs --revelai-visual-mode structural",
     );
     expect(packageJson.scripts["test:visual:darwin"]).toBe(
