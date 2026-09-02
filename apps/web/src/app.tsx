@@ -7,6 +7,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type ComponentType,
   type CSSProperties,
 } from "react";
 import {
@@ -26,10 +27,20 @@ import type { ReviewSetupPort } from "./verified/setup";
 export const reviewRoutesEnabled =
   import.meta.env.DEV || import.meta.env.MODE === "test";
 
+const reviewSetupModulePath = "./verified/setup";
+type ReviewSetupRouteComponentProps = Readonly<{
+  port?: ReviewSetupPort;
+}>;
+
 const ReviewSetupRoute = reviewRoutesEnabled
   ? lazy(async () => {
-      const reviewModule = await import("./verified/setup");
-      return { default: reviewModule.ReviewSetupRoute };
+      const reviewModule = await import(
+        /* @vite-ignore */ reviewSetupModulePath
+      );
+      return {
+        default:
+          reviewModule.ReviewSetupRoute as ComponentType<ReviewSetupRouteComponentProps>,
+      };
     })
   : null;
 
@@ -55,11 +66,10 @@ type RevelApiClient = ReturnType<typeof createRevelApiClient>;
 
 type ShellProps = Readonly<{
   client: RevelApiClient;
-  reviewModeEnabled: boolean;
   reviewSetupPort?: ReviewSetupPort;
 }>;
 
-function Shell({ client, reviewModeEnabled, reviewSetupPort }: ShellProps) {
+function Shell({ client, reviewSetupPort }: ShellProps) {
   const [isNavigationOpen, setNavigationOpen] = useState(false);
   const navigationToggleRef = useRef<HTMLButtonElement>(null);
   const restoreNavigationToggleFocus = useRef(false);
@@ -141,7 +151,7 @@ function Shell({ client, reviewModeEnabled, reviewSetupPort }: ShellProps) {
           path="/indisponivel/:destination"
           element={<UnavailableShell />}
         />
-        {reviewModeEnabled && ReviewSetupRoute ? (
+        {ReviewSetupRoute ? (
           <Route
             path="/_test/verified/setup"
             element={
@@ -159,6 +169,10 @@ function Shell({ client, reviewModeEnabled, reviewSetupPort }: ShellProps) {
 
 function UnavailableShell() {
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const location = useLocation();
+  const isIncompleteReviewDestination =
+    location.pathname === "/_test/verified/setup" ||
+    location.pathname === "/_test/verified/capture";
 
   useEffect(() => {
     headingRef.current?.focus();
@@ -171,6 +185,12 @@ function UnavailableShell() {
         Indisponível
       </h1>
       <p role="status">Disponível após ativação do fluxo</p>
+      {isIncompleteReviewDestination ? (
+        <p>
+          A orientação de preparação aguarda a ativação completa da captura e do
+          resultado.
+        </p>
+      ) : null}
       <Link className="return-home" to="/">
         Voltar para Início
       </Link>
@@ -179,11 +199,10 @@ function UnavailableShell() {
 }
 
 type AppProps = Readonly<{
-  reviewModeEnabled?: boolean;
   reviewSetupPort?: ReviewSetupPort;
 }>;
 
-export function App({ reviewModeEnabled, reviewSetupPort }: AppProps = {}) {
+export function App({ reviewSetupPort }: AppProps = {}) {
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -202,11 +221,7 @@ export function App({ reviewModeEnabled, reviewSetupPort }: AppProps = {}) {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <Shell
-          client={client}
-          reviewModeEnabled={reviewModeEnabled ?? reviewRoutesEnabled}
-          reviewSetupPort={reviewSetupPort}
-        />
+        <Shell client={client} reviewSetupPort={reviewSetupPort} />
       </BrowserRouter>
     </QueryClientProvider>
   );

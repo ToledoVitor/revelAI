@@ -19,6 +19,7 @@
     "pretest:visual:structural": "node scripts/ensure-chromium.mjs",
     "test:visual:structural": "pnpm run test:visual:structural:run",
     "test:visual:structural:run": "node scripts/run-playwright.mjs --revelai-visual-mode structural",
+    "build:production-router": "node scripts/build-production-router-artifact.mjs",
     "test:production-router": "node scripts/run-playwright.mjs --revelai-visual-mode structural --config playwright.production.config.ts",
     "pretest:visual:darwin": "node scripts/ensure-chromium.mjs",
     "test:visual:darwin": "node scripts/run-playwright.mjs --revelai-visual-mode darwin",

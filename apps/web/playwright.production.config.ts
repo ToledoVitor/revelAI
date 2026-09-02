@@ -9,7 +9,8 @@ export default defineConfig({
     screenshot: "only-on-failure",
   },
   webServer: {
-    command: "pnpm exec vite preview --host 127.0.0.1 --port 4175",
+    command:
+      "pnpm run build:production-router && pnpm exec vite preview --host 127.0.0.1 --port 4175 --outDir coverage/production-router-dist",
     url: "http://127.0.0.1:4175",
     reuseExistingServer: false,
   },

@@ -21,6 +21,11 @@ for (const path of reviewPaths) {
     await expect(
       page.getByRole("main", { name: "Indisponível" }),
     ).not.toContainText("Preparação para passe na parede");
+    await expect(
+      page.getByRole("main", { name: "Indisponível" }),
+    ).toContainText(
+      "A orientação de preparação aguarda a ativação completa da captura e do resultado.",
+    );
     expect(
       await page.evaluate(
         () =>
@@ -56,6 +61,11 @@ for (const path of reviewPaths) {
     await expect(
       page.getByRole("main", { name: "Indisponível" }),
     ).not.toContainText("Preparação para passe na parede");
+    await expect(
+      page.getByRole("main", { name: "Indisponível" }),
+    ).toContainText(
+      "A orientação de preparação aguarda a ativação completa da captura e do resultado.",
+    );
     expect(
       await page.evaluate(
         () =>

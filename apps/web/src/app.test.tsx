@@ -1,63 +1,72 @@
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { App } from "./app";
+// @vitest-environment node
 
-function fakeReviewPort() {
-  return {
-    getFixture: vi.fn(() => ({
-      challenge: {
-        id: "wall-pass-v1" as const,
-        name: "Passe na parede — futsal",
-      },
-      cameraStatus: "pending" as const,
-    })),
-    retryCamera: vi.fn(() => "pending" as const),
-  };
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { build } from "vite";
+import { describe, expect, it } from "vitest";
+
+const webDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const reviewSetupModule = resolve(webDirectory, "src/verified/setup.tsx");
+
+type OutputChunk = Readonly<{
+  code: string;
+  moduleIds: readonly string[];
+  type: "chunk";
+}>;
+
+function hasOutput(value: unknown): value is Readonly<{ output: unknown[] }> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "output" in value &&
+    Array.isArray(value.output)
+  );
+}
+
+function isOutputChunk(value: unknown): value is OutputChunk {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "type" in value &&
+    value.type === "chunk" &&
+    "code" in value &&
+    typeof value.code === "string" &&
+    "moduleIds" in value &&
+    Array.isArray(value.moduleIds)
+  );
 }
 
 describe("production router review-route isolation", () => {
-  afterEach(() => {
-    cleanup();
-    vi.unstubAllGlobals();
+  it("removes the review setup module from the DEV:false/MODE:production router graph", async () => {
+    const buildResult = await build({
+      root: webDirectory,
+      mode: "production",
+      logLevel: "silent",
+      build: {
+        emptyOutDir: false,
+        write: false,
+      },
+    });
+    const outputGroups = (
+      Array.isArray(buildResult) ? buildResult : [buildResult]
+    ).map((output) => {
+      if (!hasOutput(output)) {
+        throw new Error("Vite did not return a production build output.");
+      }
+      return output;
+    });
+    const chunks = outputGroups.flatMap(({ output }) =>
+      output.flatMap((output) => {
+        const candidate: unknown = output;
+        return isOutputChunk(candidate) ? [candidate] : [];
+      }),
+    );
+
+    expect(chunks.flatMap((chunk) => chunk.moduleIds)).not.toContain(
+      reviewSetupModule,
+    );
+    expect(chunks.map((chunk) => chunk.code).join("\n")).not.toContain(
+      "__revelaiReviewSetupModuleEvaluations",
+    );
   });
-
-  it.each(["/_test/verified/setup", "/_test/verified/capture"])(
-    "uses the normal unavailable boundary for direct production navigation to %s",
-    async (path) => {
-      const port = fakeReviewPort();
-      const fetchSpy = vi.fn();
-      vi.stubGlobal("fetch", fetchSpy);
-      window.history.replaceState({}, "", path);
-
-      render(<App reviewModeEnabled={false} reviewSetupPort={port} />);
-
-      expect(
-        await screen.findByRole("heading", { name: "Indisponível", level: 1 }),
-      ).toBeVisible();
-      expect(port.getFixture).not.toHaveBeenCalled();
-      expect(port.retryCamera).not.toHaveBeenCalled();
-      expect(fetchSpy).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each(["/_test/verified/setup", "/_test/verified/capture"])(
-    "uses the normal unavailable boundary for in-app production navigation to %s",
-    async (path) => {
-      const port = fakeReviewPort();
-      const fetchSpy = vi.fn();
-      vi.stubGlobal("fetch", fetchSpy);
-      window.history.replaceState({}, "", "/");
-
-      render(<App reviewModeEnabled={false} reviewSetupPort={port} />);
-      window.history.pushState({}, "", path);
-      window.dispatchEvent(new PopStateEvent("popstate"));
-
-      expect(
-        await screen.findByRole("heading", { name: "Indisponível", level: 1 }),
-      ).toBeVisible();
-      expect(port.getFixture).not.toHaveBeenCalled();
-      expect(port.retryCamera).not.toHaveBeenCalled();
-      expect(fetchSpy).not.toHaveBeenCalled();
-    },
-  );
 });

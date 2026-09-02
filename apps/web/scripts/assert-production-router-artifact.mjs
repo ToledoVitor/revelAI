@@ -1,0 +1,43 @@
+import { readFile, readdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { dirname, extname, resolve } from "node:path";
+
+const webDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const outputDirectory = resolve(
+  webDirectory,
+  "coverage/production-router-dist",
+);
+const forbiddenReviewArtifacts = [
+  "__revelaiReviewSetupModuleEvaluations",
+  "Preparação para passe na parede",
+];
+
+async function emittedFiles(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files = await Promise.all(
+    entries.map(async (entry) => {
+      const entryPath = resolve(directory, entry.name);
+      return entry.isDirectory() ? emittedFiles(entryPath) : [entryPath];
+    }),
+  );
+
+  return files.flat();
+}
+
+const files = await emittedFiles(outputDirectory);
+const javascriptFiles = files.filter((file) => extname(file) === ".js");
+
+if (javascriptFiles.length === 0) {
+  throw new Error("The isolated production router artifact has no JavaScript.");
+}
+
+for (const file of javascriptFiles) {
+  const content = await readFile(file, "utf8");
+  for (const forbiddenArtifact of forbiddenReviewArtifacts) {
+    if (content.includes(forbiddenArtifact)) {
+      throw new Error(
+        `Review setup artifact leaked into production output: ${forbiddenArtifact}`,
+      );
+    }
+  }
+}
