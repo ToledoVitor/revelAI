@@ -23,10 +23,13 @@ export type VerifiedDraft = Readonly<{
   challengeVersion: 1;
 }>;
 
+type AcceptedMediaMime = "video/mp4" | "video/quicktime" | "video/webm";
+
 type LocalMedia = Readonly<{
   file: File;
   name: string;
-  mime: "video/mp4" | "video/quicktime" | "video/webm";
+  declaredMime: string;
+  wireMime: AcceptedMediaMime;
   size: number;
   previewUrl?: string;
 }>;
@@ -110,6 +113,26 @@ const knownMediaErrorCodes = new Set(
   ),
 );
 
+const fakeUploadPhaseMs = 250;
+
+function waitForFakeUploadPhase(signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }, fakeUploadPhaseMs);
+    const abort = () => {
+      window.clearTimeout(timeoutId);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
 function defaultReviewCapturePort(): ReviewCapturePort {
   return Object.freeze({
     getDraft: () =>
@@ -121,13 +144,21 @@ function defaultReviewCapturePort(): ReviewCapturePort {
     async upload({ media, onProgress, signal }) {
       if (signal.aborted) throw new DOMException("Aborted", "AbortError");
       onProgress({ kind: "preparing" });
+      await waitForFakeUploadPhase(signal);
+      onProgress({
+        kind: "progress",
+        loaded: Math.floor(media.size / 2),
+        total: media.size,
+      });
+      await waitForFakeUploadPhase(signal);
       onProgress({ kind: "progress", loaded: media.size, total: media.size });
+      await waitForFakeUploadPhase(signal);
       return { kind: "accepted" };
     },
   });
 }
 
-function selectedMediaMime(file: File): LocalMedia["mime"] | undefined {
+function selectedMediaMime(file: File): AcceptedMediaMime | undefined {
   const extension = file.name.toLowerCase().split(".").at(-1);
   const expectedMime =
     extension === "mp4"
@@ -146,8 +177,7 @@ function selectedMediaMime(file: File): LocalMedia["mime"] | undefined {
 }
 
 function formatBytes(size: number) {
-  if (size < 1024) return `${size} bytes`;
-  return `${(size / 1024).toFixed(1)} KiB`;
+  return `${size} bytes`;
 }
 
 function selectedRecorderCandidate() {
@@ -210,6 +240,7 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
   const chunksRef = useRef<Blob[]>([]);
   const assetRef = useRef<LocalMedia | undefined>(undefined);
   const activeUploadRef = useRef<AbortController | undefined>(undefined);
+  const uploadGenerationRef = useRef(0);
   const automaticStopRef = useRef(false);
   const mountedRef = useRef(true);
   const timeoutIdsRef = useRef<Set<number>>(new Set());
@@ -248,6 +279,10 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
     intervalIdsRef.current.clear();
   };
 
+  const clearCaptureChunks = () => {
+    chunksRef.current = [];
+  };
+
   const scheduleTimeout = (callback: () => void, delay: number) => {
     const timeoutId = window.setTimeout(() => {
       timeoutIdsRef.current.delete(timeoutId);
@@ -283,6 +318,11 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
     if (updateState && mountedRef.current) setAsset(undefined);
   };
 
+  const isCurrentUpload = (generation: number, controller: AbortController) =>
+    mountedRef.current &&
+    uploadGenerationRef.current === generation &&
+    activeUploadRef.current === controller;
+
   const finishCaptureError = (
     message: string,
     state: BrowserCaptureState = "error",
@@ -293,6 +333,7 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
     recorderRef.current = undefined;
     if (recorder && recorder.state !== "inactive") recorder.stop();
     stopTracks();
+    clearCaptureChunks();
     releaseLocalMedia();
     if (!mountedRef.current) return;
     setCaptureState(state);
@@ -300,15 +341,22 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
   };
 
   const makeLocalMedia = (
+    sourceFile: File,
     file: File,
-    name: string,
-    mime: LocalMedia["mime"],
+    wireMime: AcceptedMediaMime,
   ): LocalMedia => {
     const previewUrl =
       typeof URL.createObjectURL === "function"
-        ? URL.createObjectURL(file)
+        ? URL.createObjectURL(sourceFile)
         : undefined;
-    return { file, name, mime, size: file.size, previewUrl };
+    return {
+      file,
+      name: sourceFile.name,
+      declaredMime: sourceFile.type,
+      wireMime,
+      size: sourceFile.size,
+      previewUrl,
+    };
   };
 
   const completeRecording = (candidate: RecorderCandidate) => {
@@ -322,7 +370,9 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
       );
       return;
     }
-    const blob = new Blob(chunksRef.current, { type: candidate.declaredMime });
+    const chunks = chunksRef.current;
+    clearCaptureChunks();
+    const blob = new Blob(chunks, { type: candidate.declaredMime });
     if (blob.size === 0) {
       finishCaptureError(
         "A gravação não produziu um vídeo utilizável. Descarte e tente novamente.",
@@ -332,11 +382,7 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
     const file = new File([blob], candidate.name, {
       type: candidate.declaredMime,
     });
-    const recordedMedia = makeLocalMedia(
-      file,
-      candidate.name,
-      candidate.declaredMime,
-    );
+    const recordedMedia = makeLocalMedia(file, file, candidate.declaredMime);
     assetRef.current = recordedMedia;
     setAsset(recordedMedia);
     setCaptureState("preview");
@@ -347,6 +393,7 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
     const candidate = selectedRecorderCandidate();
     if (!candidate) {
       stopTracks();
+      clearCaptureChunks();
       setCaptureState("unavailable");
       setCaptureMessage(
         "Este navegador não consegue gravar em um formato aceito. Envie um vídeo existente.",
@@ -416,7 +463,9 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
   };
 
   const startCapture = async () => {
+    if (activeUploadRef.current) return;
     releaseLocalMedia();
+    clearCaptureChunks();
     clearTimers();
     detachRecorderListeners();
     stopTracks();
@@ -443,7 +492,11 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
         return;
       }
       streamRef.current = stream;
-      if (previewRef.current) previewRef.current.srcObject = stream;
+      if (previewRef.current) {
+        previewRef.current.srcObject = stream;
+        const playback = previewRef.current.play();
+        if (playback) void playback.catch(() => undefined);
+      }
       const facingMode = stream.getVideoTracks()[0]?.getSettings?.().facingMode;
       if (facingMode && facingMode !== "environment") {
         setCameraNotice(
@@ -467,8 +520,9 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
   };
 
   const selectExistingVideo = (file?: File) => {
-    if (!file) return;
+    if (!file || activeUploadRef.current) return;
     releaseLocalMedia();
+    clearCaptureChunks();
     const mime = selectedMediaMime(file);
     if (!mime) {
       finishCaptureError(
@@ -490,11 +544,7 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
     }
     const normalizedFile =
       file.type === mime ? file : new File([file], file.name, { type: mime });
-    const localMedia = makeLocalMedia(
-      normalizedFile,
-      normalizedFile.name,
-      mime,
-    );
+    const localMedia = makeLocalMedia(file, normalizedFile, mime);
     assetRef.current = localMedia;
     setAsset(localMedia);
     setCaptureState("preview");
@@ -506,8 +556,10 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
 
   const startUpload = async () => {
     const localMedia = assetRef.current;
-    if (!localMedia) return;
+    if (!localMedia || activeUploadRef.current) return;
     const controller = new AbortController();
+    const generation = uploadGenerationRef.current + 1;
+    uploadGenerationRef.current = generation;
     activeUploadRef.current = controller;
     setUploadState("preparing");
     setUploadMessage("Preparando o vídeo para o envio de revisão.");
@@ -519,7 +571,7 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
         formData: buildMediaFormData(localMedia),
         signal: controller.signal,
         onProgress: (progress) => {
-          if (controller.signal.aborted || !mountedRef.current) return;
+          if (!isCurrentUpload(generation, controller)) return;
           if (progress.kind === "preparing") {
             setUploadState("preparing");
             setUploadMessage("Preparando o vídeo para o envio de revisão.");
@@ -530,11 +582,15 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
           setUploadMessage("Enviando o vídeo para a revisão local.");
         },
       });
-      if (controller.signal.aborted || !mountedRef.current) return;
+      if (!isCurrentUpload(generation, controller)) return;
       activeUploadRef.current = undefined;
       if (result.kind === "accepted") {
         releaseLocalMedia();
+        clearCaptureChunks();
+        setCaptureState("idle");
+        setCaptureMessage("Pronto para gravar ou selecionar outro vídeo.");
         setUploadState("accepted");
+        setUploadProgress(undefined);
         setUploadMessage(
           "Envio de revisão concluído localmente. Nenhuma tentativa foi criada no servidor.",
         );
@@ -548,14 +604,15 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
         setUploadMessage(uploadErrorMessage(result.error));
       }
     } catch {
+      if (!isCurrentUpload(generation, controller)) return;
+      activeUploadRef.current = undefined;
       if (controller.signal.aborted) {
-        if (mountedRef.current) {
-          setUploadState("cancelled");
-          setUploadMessage(
-            "Envio cancelado. Nenhuma resposta do servidor foi simulada.",
-          );
-        }
-      } else if (mountedRef.current) {
+        setUploadState("cancelled");
+        setUploadProgress(undefined);
+        setUploadMessage(
+          "Envio cancelado. Nenhuma resposta do servidor foi simulada.",
+        );
+      } else {
         setUploadState("retryable-error");
         setUploadMessage(
           "A conexão foi interrompida antes do envio de revisão. Tente novamente com o mesmo vídeo.",
@@ -564,17 +621,35 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
     }
   };
 
+  const cancelUpload = () => {
+    const controller = activeUploadRef.current;
+    if (!controller) return;
+    uploadGenerationRef.current += 1;
+    activeUploadRef.current = undefined;
+    controller.abort();
+    if (!mountedRef.current) return;
+    setUploadState("cancelled");
+    setUploadProgress(undefined);
+    setUploadMessage(
+      "Envio cancelado. Nenhuma resposta do servidor foi simulada.",
+    );
+  };
+
   useEffect(() => {
+    mountedRef.current = true;
     headingRef.current?.focus();
     return () => {
       mountedRef.current = false;
       activeUploadRef.current?.abort();
+      activeUploadRef.current = undefined;
+      uploadGenerationRef.current += 1;
       clearTimers();
       detachRecorderListeners();
       const recorder = recorderRef.current;
       recorderRef.current = undefined;
       if (recorder && recorder.state !== "inactive") recorder.stop();
       stopTracks();
+      clearCaptureChunks();
       releaseLocalMedia(false);
     };
   }, []);
@@ -625,6 +700,7 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
       <section aria-label="Prévia da câmera" className="capture-preview">
         <video
           ref={previewRef}
+          autoPlay
           muted
           playsInline
           aria-label="Prévia da câmera"
@@ -649,14 +725,14 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
       <div className="capture-actions">
         <button
           type="button"
-          disabled={isRecording}
+          disabled={isRecording || isUploading}
           onClick={() => void startCapture()}
         >
           Iniciar gravação
         </button>
         <button
           type="button"
-          disabled={isRecording}
+          disabled={isRecording || isUploading}
           onClick={() => fileInputRef.current?.click()}
         >
           Enviar vídeo existente
@@ -668,6 +744,7 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
           accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm"
           tabIndex={-1}
           aria-hidden="true"
+          disabled={isUploading}
           onChange={(event) => {
             selectExistingVideo(event.currentTarget.files?.[0]);
             event.currentTarget.value = "";
@@ -692,11 +769,18 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
             />
           ) : null}
           <p>{asset.name}</p>
-          <p>{asset.mime}</p>
+          <p>
+            Tipo declarado:{" "}
+            {asset.declaredMime || "não declarado pelo arquivo."}
+          </p>
+          <p>Formato de envio normalizado: {asset.wireMime}.</p>
           <p>{formatBytes(asset.size)}</p>
           <button
             type="button"
+            disabled={isUploading}
             onClick={() => {
+              if (activeUploadRef.current) return;
+              clearCaptureChunks();
               releaseLocalMedia();
               setCaptureState("idle");
               setCaptureMessage(
@@ -718,7 +802,7 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
         </section>
       ) : null}
       {isUploading ? (
-        <button type="button" onClick={() => activeUploadRef.current?.abort()}>
+        <button type="button" onClick={cancelUpload}>
           Cancelar envio
         </button>
       ) : null}

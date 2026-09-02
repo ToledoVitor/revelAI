@@ -225,6 +225,13 @@ function expectUnavailableBoundary(
       }
     ).__revelaiReviewSetupModuleEvaluations,
   ).toBeUndefined();
+  expect(
+    (
+      dom.window as typeof window & {
+        __revelaiReviewCaptureModuleEvaluations?: number;
+      }
+    ).__revelaiReviewCaptureModuleEvaluations,
+  ).toBeUndefined();
 }
 
 async function waitForUnavailableBoundary(
@@ -280,6 +287,10 @@ describe("transformed production router harness", () => {
     fetchSpy.mockReset();
     vi.stubGlobal("fetch", fetchSpy);
     Reflect.deleteProperty(dom.window, "__revelaiReviewSetupModuleEvaluations");
+    Reflect.deleteProperty(
+      dom.window,
+      "__revelaiReviewCaptureModuleEvaluations",
+    );
   });
 
   afterAll(async () => {

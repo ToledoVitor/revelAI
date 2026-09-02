@@ -1,6 +1,7 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { mediaUploadFixtures } from "@revelai/contracts";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../app";
 
@@ -113,11 +114,13 @@ async function selectExistingVideo(
 describe("review verified capture", () => {
   beforeEach(() => {
     window.history.replaceState({}, "", "/_test/verified/capture");
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
   });
 
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     Reflect.deleteProperty(navigator, "mediaDevices");
   });
@@ -190,6 +193,25 @@ describe("review verified capture", () => {
     expect(screen.getByText("wall-pass.webm")).toBeVisible();
   });
 
+  it("plays the live camera preview throughout the countdown", async () => {
+    const { stream } = createStream();
+    installMediaDevices(vi.fn().mockResolvedValue(stream));
+    installRecorder();
+
+    render(<App />);
+    await screen.findByRole("heading", {
+      name: "Captura para passe na parede",
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: "Iniciar gravação" }).click();
+    });
+    await settleCaptureRequest();
+
+    expect(screen.getAllByLabelText("Prévia da câmera")[1]).toHaveAttribute(
+      "autoplay",
+    );
+  });
+
   it("probes recording MIME candidates in order and announces a non-rear camera fallback", async () => {
     const { stream } = createStream("user");
     installMediaDevices(vi.fn().mockResolvedValue(stream));
@@ -246,7 +268,7 @@ describe("review verified capture", () => {
     ).toHaveAttribute("role", "alert");
     await selectExistingVideo(user);
     expect(screen.getByText("existing-wall-pass.webm")).toBeVisible();
-    expect(screen.getByText("video/webm")).toBeVisible();
+    expect(screen.getByText("Tipo declarado: video/webm")).toBeVisible();
   });
 
   it("falls back truthfully without constructing a recorder when no MIME candidate is supported", async () => {
@@ -406,6 +428,49 @@ describe("review verified capture", () => {
     expect(upload).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps the source metadata exact while normalizing an undeclared type only for the wire file", async () => {
+    const user = userEvent.setup();
+    let submittedFormData: FormData | undefined;
+    const port = {
+      getDraft: () => ({
+        kind: "review-verified-draft" as const,
+        challengeId: "wall-pass" as const,
+        challengeVersion: 1 as const,
+      }),
+      upload: vi.fn(async ({ formData }: { formData: FormData }) => {
+        submittedFormData = formData;
+        return { kind: "connection-error" as const };
+      }),
+    };
+    const source = new File(["x".repeat(2050)], "source-wall-pass.webm");
+
+    render(<App reviewCapturePort={port} />);
+    await screen.findByRole("heading", {
+      name: "Captura para passe na parede",
+    });
+    await selectExistingVideo(user, source);
+
+    expect(
+      screen.getByText("Tipo declarado: não declarado pelo arquivo."),
+    ).toBeVisible();
+    expect(
+      screen.getByText("Formato de envio normalizado: video/webm."),
+    ).toBeVisible();
+    expect(screen.getByText("2050 bytes")).toBeVisible();
+
+    await user.click(
+      screen.getByRole("button", { name: "Enviar para upload de revisão" }),
+    );
+    const wireFile = Array.from(submittedFormData?.entries() ?? [])[0]?.[1];
+    expect(wireFile).toMatchObject({
+      name: source.name,
+      size: source.size,
+      type: "video/webm",
+    });
+    expect(screen.getByText("source-wall-pass.webm")).toBeVisible();
+    expect(screen.getByText("2050 bytes")).toBeVisible();
+  });
+
   it("allows cancellation without inventing a server response and maps safe C2 media errors", async () => {
     const user = userEvent.setup();
     const pendingUpload = vi.fn(
@@ -538,6 +603,125 @@ describe("review verified capture", () => {
     expect(
       await screen.findByText(/Envio de revisão concluído localmente/),
     ).toBeVisible();
+  });
+
+  it("keeps the default fake upload cancellable across StrictMode's effect replay", async () => {
+    const user = userEvent.setup();
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+    await screen.findByRole("heading", {
+      name: "Captura para passe na parede",
+    });
+    await selectExistingVideo(user);
+    vi.useFakeTimers();
+    await act(async () => {
+      screen
+        .getByRole("button", { name: "Enviar para upload de revisão" })
+        .click();
+    });
+
+    expect(
+      screen.getByText("Preparando o vídeo para o envio de revisão."),
+    ).toHaveAttribute("role", "status");
+    expect(
+      screen.getByRole("button", { name: "Cancelar envio" }),
+    ).toBeVisible();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(
+      screen.getByText(/Envio de revisão concluído localmente/),
+    ).toHaveAttribute("role", "status");
+    expect(screen.getByText(/Estado da captura: idle\./)).toBeVisible();
+  });
+
+  it("keeps the default fake upload cancellable after preparation starts", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("heading", {
+      name: "Captura para passe na parede",
+    });
+    await selectExistingVideo(user);
+    vi.useFakeTimers();
+    await act(async () => {
+      screen
+        .getByRole("button", { name: "Enviar para upload de revisão" })
+        .click();
+    });
+
+    expect(
+      screen.getByText("Preparando o vídeo para o envio de revisão."),
+    ).toHaveAttribute("role", "status");
+    await act(async () => {
+      screen.getByRole("button", { name: "Cancelar envio" }).click();
+    });
+    expect(
+      screen.getByText(
+        "Envio cancelado. Nenhuma resposta do servidor foi simulada.",
+      ),
+    ).toHaveAttribute("role", "status");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(
+      screen.getByText(
+        "Envio cancelado. Nenhuma resposta do servidor foi simulada.",
+      ),
+    ).toBeVisible();
+  });
+
+  it("ignores a late upload result after cancellation and locks capture changes while it is active", async () => {
+    const user = userEvent.setup();
+    let resolveUpload: ((result: { kind: "accepted" }) => void) | undefined;
+    const port = {
+      getDraft: () => ({
+        kind: "review-verified-draft" as const,
+        challengeId: "wall-pass" as const,
+        challengeVersion: 1 as const,
+      }),
+      upload: vi.fn(
+        () =>
+          new Promise<{ kind: "accepted" }>((resolve) => {
+            resolveUpload = resolve;
+          }),
+      ),
+    };
+
+    render(<App reviewCapturePort={port} />);
+    await screen.findByRole("heading", {
+      name: "Captura para passe na parede",
+    });
+    const file = await selectExistingVideo(user);
+    await user.click(
+      screen.getByRole("button", { name: "Enviar para upload de revisão" }),
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Iniciar gravação" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Enviar vídeo existente" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Descartar" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Cancelar envio" }));
+    expect(
+      await screen.findByText(
+        "Envio cancelado. Nenhuma resposta do servidor foi simulada.",
+      ),
+    ).toHaveAttribute("role", "status");
+
+    await act(async () => {
+      resolveUpload?.({ kind: "accepted" });
+    });
+    expect(
+      screen.getByText(
+        "Envio cancelado. Nenhuma resposta do servidor foi simulada.",
+      ),
+    ).toBeVisible();
+    expect(screen.getByText(file.name)).toBeVisible();
   });
 
   it("releases local preview URLs on discard, unmount, and accepted fake handoff", async () => {
