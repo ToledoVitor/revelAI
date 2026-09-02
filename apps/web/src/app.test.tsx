@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 const webDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const reviewSetupModule = resolve(webDirectory, "src/verified/setup.tsx");
+const productionGraphIntegrationTimeoutMs = 15_000;
 
 type OutputChunk = Readonly<{
   code: string;
@@ -60,28 +61,32 @@ async function buildWithProductionEnvironment() {
 }
 
 describe("production router review-route isolation", () => {
-  it("removes the review setup module from the DEV:false/MODE:production router graph", async () => {
-    const buildResult = await buildWithProductionEnvironment();
-    const outputGroups = (
-      Array.isArray(buildResult) ? buildResult : [buildResult]
-    ).map((output) => {
-      if (!hasOutput(output)) {
-        throw new Error("Vite did not return a production build output.");
-      }
-      return output;
-    });
-    const chunks = outputGroups.flatMap(({ output }) =>
-      output.flatMap((output) => {
-        const candidate: unknown = output;
-        return isOutputChunk(candidate) ? [candidate] : [];
-      }),
-    );
+  it(
+    "removes the review setup module from the DEV:false/MODE:production router graph",
+    async () => {
+      const buildResult = await buildWithProductionEnvironment();
+      const outputGroups = (
+        Array.isArray(buildResult) ? buildResult : [buildResult]
+      ).map((output) => {
+        if (!hasOutput(output)) {
+          throw new Error("Vite did not return a production build output.");
+        }
+        return output;
+      });
+      const chunks = outputGroups.flatMap(({ output }) =>
+        output.flatMap((output) => {
+          const candidate: unknown = output;
+          return isOutputChunk(candidate) ? [candidate] : [];
+        }),
+      );
 
-    expect(chunks.flatMap((chunk) => chunk.moduleIds)).not.toContain(
-      reviewSetupModule,
-    );
-    expect(chunks.map((chunk) => chunk.code).join("\n")).not.toContain(
-      "__revelaiReviewSetupModuleEvaluations",
-    );
-  });
+      expect(chunks.flatMap((chunk) => chunk.moduleIds)).not.toContain(
+        reviewSetupModule,
+      );
+      expect(chunks.map((chunk) => chunk.code).join("\n")).not.toContain(
+        "__revelaiReviewSetupModuleEvaluations",
+      );
+    },
+    productionGraphIntegrationTimeoutMs,
+  );
 });
