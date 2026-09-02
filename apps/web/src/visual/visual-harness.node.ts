@@ -5,9 +5,12 @@ import type { Page } from "@playwright/test";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 import {
+  assessUiInkCoverage,
   createCaptureMetadata,
+  getUiInkCoverageBaselines,
   selectFixture,
   type CaptureMetadata,
+  type VisualRenderer,
   type Viewport,
 } from "./visual-harness";
 
@@ -35,6 +38,7 @@ type UiInkCoverage = {
 };
 
 type ComparisonResult = {
+  renderer: VisualRenderer;
   reference: string;
   mask: {
     rationale: string;
@@ -124,15 +128,14 @@ function getUiInkRegions(viewport: Viewport): readonly MaskRegion[] {
   return [{ x: 1035, y: 20, width: 375, height: 44 }];
 }
 
-function getUiInkCoverageBaselines(viewport: Viewport) {
-  // Captured after `document.fonts.ready` at the approved CSS viewports. The
-  // gate allows a 10% rasterisation margin below while making a removed control
-  // unambiguously fail without depending on the variable hero photograph.
-  if (viewport.width <= 700) {
-    return [1040, 17232, 2287] as const;
+function getVisualRenderer(): VisualRenderer {
+  if (process.platform === "darwin" || process.platform === "linux") {
+    return process.platform;
   }
 
-  return [416] as const;
+  throw new Error(
+    `The visual pixel gate supports only Darwin and the pinned Linux renderer; received ${process.platform}. Run the structural visual suite on this platform.`,
+  );
 }
 
 function getVisualBudgets(viewport: Viewport) {
@@ -463,7 +466,11 @@ export async function captureHomeVisualArtifacts({
     regions: mask.regions,
   });
   const uiInkRegions = getUiInkRegions(viewport);
-  const uiInkCoverageBaselines = getUiInkCoverageBaselines(viewport);
+  const renderer = getVisualRenderer();
+  const uiInkCoverageBaselines = getUiInkCoverageBaselines({
+    viewport,
+    renderer,
+  });
   const budgets = getVisualBudgets(viewport);
   const uiInkCapture = PNG.sync.read(uiInkCaptureFile);
   const {
@@ -485,17 +492,18 @@ export async function captureHomeVisualArtifacts({
     mismatchRatio: changedPixels / comparedPixels,
     maxMismatchRatio: budgets.imageMaxMismatchRatio,
   };
-  const coverage = uiInkRegions.map((region, index) => {
-    const baselineCaptureInkPixels = uiInkCoverageBaselines[index];
-    const minCaptureInkPixels = Math.floor(baselineCaptureInkPixels * 0.9);
-    const capturedInkPixels = countInkPixels(captureInk, region);
+  const capturedInkPixels = uiInkRegions.map((region) =>
+    countInkPixels(captureInk, region),
+  );
+  const coverage = assessUiInkCoverage({
+    baselineCaptureInkPixels: uiInkCoverageBaselines,
+    capturedInkPixels,
+  }).map((metrics, index) => {
+    const region = uiInkRegions[index];
 
     return {
       region,
-      baselineCaptureInkPixels,
-      minCaptureInkPixels,
-      capturedInkPixels,
-      passes: capturedInkPixels >= minCaptureInkPixels,
+      ...metrics,
     };
   });
   const uiInk: ComparisonResult["uiInk"] = {
@@ -510,6 +518,7 @@ export async function captureHomeVisualArtifacts({
     maxMismatchRatio: budgets.uiInkMaxMismatchRatio,
   };
   const comparison: ComparisonResult = {
+    renderer,
     reference: referenceName,
     mask,
     image,

@@ -25,6 +25,15 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @revelai/web exec playwright install --with-deps chromium
       - run: pnpm check
+      - name: Run canonical Linux visual gate
+        run: >-
+          docker run --rm
+          --env CI=true
+          --env PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+          --volume "$GITHUB_WORKSPACE:/work"
+          --workdir /work
+          mcr.microsoft.com/playwright:v1.62.1-noble
+          bash -lc 'corepack enable && corepack pnpm@11.20.0 --filter @revelai/design-system run build && corepack pnpm@11.20.0 --filter @revelai/web run test:visual:canonical'
       - run: pnpm --filter @revelai/api run openapi:check
       - run: pnpm --filter @revelai/api exec vitest run src/http/operability-routes.test.ts src/startup.test.ts src/http/openapi.test.ts
 

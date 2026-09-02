@@ -8,6 +8,8 @@ export type Viewport = {
   height: number;
 };
 
+export type VisualRenderer = "darwin" | "linux";
+
 export type CaptureMetadata = {
   viewport: Viewport;
   dpr: number;
@@ -29,6 +31,20 @@ const fixtures = [
     state: "ui-ink-mutation",
   },
 ] as const;
+
+const uiInkCoverageBaselines = {
+  darwin: {
+    desktop: [416],
+    mobile: [1040, 17232, 2287],
+  },
+  linux: {
+    desktop: [165],
+    mobile: [865, 15673, 1578],
+  },
+} as const satisfies Record<
+  VisualRenderer,
+  Record<"desktop" | "mobile", readonly number[]>
+>;
 
 function routeFilePart(route: string) {
   return route === "/"
@@ -62,6 +78,42 @@ export function createCaptureMetadata({
   const screenshot = `${fixture}--${viewport.width}x${viewport.height}--dpr-${dpr}--${routeFilePart(route)}--${state}.png`;
 
   return { viewport, dpr, route, state, fixture, screenshot };
+}
+
+export function getUiInkCoverageBaselines({
+  viewport,
+  renderer,
+}: {
+  viewport: Viewport;
+  renderer: VisualRenderer;
+}) {
+  return uiInkCoverageBaselines[renderer][
+    viewport.width <= 700 ? "mobile" : "desktop"
+  ];
+}
+
+export function assessUiInkCoverage({
+  baselineCaptureInkPixels,
+  capturedInkPixels,
+}: {
+  baselineCaptureInkPixels: readonly number[];
+  capturedInkPixels: readonly number[];
+}) {
+  if (baselineCaptureInkPixels.length !== capturedInkPixels.length) {
+    throw new Error("UI ink coverage inputs must have matching regions.");
+  }
+
+  return capturedInkPixels.map((capturedInkPixelsForRegion, index) => {
+    const baselineInkPixels = baselineCaptureInkPixels[index];
+    const minCaptureInkPixels = Math.floor(baselineInkPixels * 0.9);
+
+    return {
+      baselineCaptureInkPixels: baselineInkPixels,
+      minCaptureInkPixels,
+      capturedInkPixels: capturedInkPixelsForRegion,
+      passes: capturedInkPixelsForRegion >= minCaptureInkPixels,
+    };
+  });
 }
 
 export function createOverlayPlan({

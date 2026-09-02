@@ -11,11 +11,13 @@
     "lint": "eslint src",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "pretest": "node scripts/ensure-chromium.mjs",
-    "test": "node --test scripts/ensure-chromium.check.mjs && vitest run --config vitest.config.ts && pnpm run test:visual:run",
+    "test": "node --test scripts/ensure-chromium.check.mjs && vitest run --config vitest.config.ts && pnpm run test:visual:structural",
     "test:ensure-chromium": "node --test scripts/ensure-chromium.check.mjs",
     "test:provisioning": "node --test scripts/playwright-provisioning.check.mjs",
     "pretest:visual": "node scripts/ensure-chromium.mjs",
     "test:visual": "pnpm run test:visual:run",
+    "test:visual:structural": "REVELAI_VISUAL_MODE=structural pnpm run test:visual:run",
+    "test:visual:canonical": "REVELAI_VISUAL_MODE=canonical pnpm run test:visual:run",
     "test:visual:run": "node scripts/run-playwright.mjs"
   },
   "dependencies": {

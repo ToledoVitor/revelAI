@@ -2,6 +2,8 @@ import { access, readFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { captureHomeVisualArtifacts } from "./visual-harness.node";
 
+const isStructuralVisualRun = process.env.REVELAI_VISUAL_MODE === "structural";
+
 test("loads the bundled display and body fonts before visual capture", async ({
   page,
 }) => {
@@ -121,6 +123,10 @@ test("renders the exact mobile viewport without browser warnings or errors", asy
 test("writes normalized capture, metadata, overlay, and diff for each approved reference", async ({
   page,
 }, testInfo) => {
+  test.skip(
+    isStructuralVisualRun,
+    "Reference-pixel comparisons run in the pinned Linux visual renderer.",
+  );
   await page.goto("/");
 
   const artifacts = await captureHomeVisualArtifacts({
@@ -134,6 +140,9 @@ test("writes normalized capture, metadata, overlay, and diff for each approved r
 
   expect(artifacts.metadata.route).toBe("/");
   expect(artifacts.metadata.state).toBe("ready");
+  expect((artifacts.comparison as { renderer?: string }).renderer).toBe(
+    process.platform === "linux" ? "linux" : "darwin",
+  );
   await Promise.all(Object.values(artifacts.files).map((file) => access(file)));
   const persistedMetadata = JSON.parse(
     await readFile(artifacts.files.metadata, "utf8"),
@@ -150,7 +159,18 @@ test("writes normalized capture, metadata, overlay, and diff for each approved r
   expect(artifacts.comparison.reference).toMatch(
     /(?:desktop|mobile)-home\.png$/,
   );
-  expect(artifacts.comparison.exceedsBudget).toBe(false);
+  expect(
+    artifacts.comparison.exceedsBudget,
+    JSON.stringify(
+      {
+        renderer: artifacts.comparison.renderer,
+        image: artifacts.comparison.image,
+        uiInk: artifacts.comparison.uiInk,
+      },
+      null,
+      2,
+    ),
+  ).toBe(false);
   expect(artifacts.comparison.image.mismatchRatio).toBeLessThanOrEqual(
     artifacts.comparison.image.maxMismatchRatio,
   );
@@ -165,6 +185,10 @@ test("writes normalized capture, metadata, overlay, and diff for each approved r
 test("rejects deliberate UI regressions that sit over the masked photo", async ({
   page,
 }, testInfo) => {
+  test.skip(
+    isStructuralVisualRun,
+    "Reference-pixel comparisons run in the pinned Linux visual renderer.",
+  );
   await page.goto("/");
 
   await page.evaluate((isMobile) => {
