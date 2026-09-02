@@ -305,3 +305,55 @@ The stored limits are independently specified source policy, not candidate-deriv
 The browser assertions cover named controls, Tab/Enter/Space, visible focus, disabled/enabled/loading states, reduced motion, responsive bounds, and console/page errors at `390×844`; this is observed browser evidence, not a full WCAG certification. No screenshot, copied court art, invented asset, custom SVG art, or non-Phosphor icon was added.
 
 This machine still lacks FFmpeg, so the normal codec-backed C10 demo acceptance cannot produce a local green. The check-fact smoke remains separate and is not substituted. The codec-provisioned hosted CI normal-runtime run is **pending hosted green after controller push**. Canonical visual pixels remain Linux/x64-only. Final result remains pending independent Sol acceptance.
+
+## Round-3 reviewer remediation — 2026-09-02
+
+### Status and commit ledger
+
+`DONE_WITH_CONCERNS`. Review base: `168f16a`. Functional/test remediation is committed separately as `62f1072` (`fix(web): tighten W6 mobile visual gates`); this report/evidence update follows in its own documentation commit. No push was made.
+
+| Path | Change and reason |
+| --- | --- |
+| `apps/web/src/styles.css` | Restored V02's three-line white-column paragraph; calibrated V03/V04 headline scale, line-height, offset, and the V03 visual/V04 preview rhythm against the selected mobile sources. |
+| `apps/web/src/visual/visual-harness.ts` | Added independent headline-height and sibling-gap policy for V03/V04, with runtime enforcement before accepted capture evidence is returned. W0 remains untouched. |
+| `apps/web/src/visual/visual-harness.test.ts` | Added state-specific negative mutations for wrong V03/V04 headline height, bottom, and inter-landmark gap. |
+| `apps/web/src/visual/approved-reference.visual.spec.ts` | Passes the per-state stored gap policy into browser landmark verification. |
+| `apps/web/src/visual/visual-harness.node.ts` | Corrected the harness contract comment: artifacts are recorded, the independently approved non-home budget is enforced, and no candidate UI is hidden. |
+| `apps/web/design-qa.md` and this report | Recorded reviewer findings, exact fixes, complete fresh capture/inspection evidence, RED/GREEN outcomes, limits, and pending acceptance. |
+
+### RED/GREEN evidence
+
+| Phase | Exact command / observed result |
+| --- | --- |
+| RED | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts --reporter=dot` — **1 file failed; 2 failed, 6 passed (8)** because V03/V04 gate policy lacked required height/bottom/gap values. |
+| GREEN | The same command — **1 file passed; 8 passed** after independent stored ranges and runtime enforcement. |
+| RED | The same command after tightening expected source-relative values — **1 file failed; 2 failed, 6 passed (8)** until the policy was updated. |
+| GREEN | The same command — **1 file passed; 8 passed** after final calibrated ranges. |
+| RED | `rtk pnpm --filter @revelai/web exec playwright test src/visual/approved-reference.visual.spec.ts --reporter=line` — **1 failed, 1 passed, 2 skipped** while the denser V04 line-height moved preview top to `314.9375`, below stored `320–334`. This identified flow-height, not a capture flake. |
+| GREEN | The same browser command — **2 passed, 2 skipped** after setting the existing production-capture top margin to retain preview y=`326.14`. |
+| GREEN | `rtk pnpm --filter @revelai/web exec vitest run src/app.test.tsx src/visual/visual-harness.test.ts src/verified/production-capture.test.tsx --reporter=dot` — **3 files, 21 passed**. |
+| GREEN | `rtk pnpm --filter @revelai/web run test:visual:structural:run` — **26 passed, 14 skipped**. |
+| GREEN | `rtk pnpm check` — exit **0**: format; **7/7 lint**, **12/12 typecheck**, **12/12 test**, and **7/7 build** tasks successful. |
+| GREEN | `rtk git diff --check` — exit **0** before the functional commit. |
+
+### Fresh visual matrix and inspection
+
+The final approved-reference run regenerated and I individually opened the reference-normalized PNG, candidate PNG, 50% overlay, and complete diff for every V02–V06 state at `390×844`, DPR 2, CSS scale, normalized density 1. All five comparisons are unmasked; the home-only W0 mask and budget were not changed.
+
+| State | Artifact stem | Mismatch / independently stored cap | Inspection conclusion |
+| --- | --- | ---: | --- |
+| V02 challenge choice | `verified-challenge-default--390x844--dpr-2--verified--challenge-choice` | **21.154% / 25.0%** | The source-like three-line paragraph stays wholly within the white column; card, `3 metros`, disabled rows, and CTA remain visible. |
+| V03 calibration | `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` | **27.834% / 40.0%** | The heading's raster ink matches source rows y=`134–188`; rail, real visual region, blocker, corrections, and controls remain present. |
+| V04 capture | `verified-record-default--390x844--dpr-2--verified--recording-capture` | **31.061% / 36.0%** | Headline and preview now hold the selected source-relative height/rhythm; real-camera/approved-fallback, accessible controls, and disclosure remain visible. |
+| V05 pending | `verified-processing-demo--390x844--dpr-2--verified--processing-pending` | **24.992% / 30.0%** | Truthful foreground/manual refresh timeline remains; no notification promise/control appears. |
+| V06 ranked | `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report` | **16.670% / 20.0%** | Isolated ranked truth, scorecard, and metrics remain; demo/experimental arms structurally lack ranking fields. |
+
+Required fidelity surfaces inspected: Bebas/Arimo family, weight, scale, wrap, and hierarchy; margins, borders, card/rail/CTA rhythm; warm-white/deep-emerald/border tokens; approved runtime hero quality/crop and its intentionally variable subject; Portuguese truth copy; semantic native controls and Phosphor-only icons. Focused review covered V02 paragraph/image boundary, V03 heading/visual gap, V04 heading/preview gap, V05 manual refresh truth, and V06 rank-only fields.
+
+The only remaining visible deltas are named P3 candidates: approved runtime hero/court subject variance, required removal of the source notification promise, and a 3–5px V04 type-raster offset. They do not change truth, layout bounds, interaction, or capture gating. No actionable P0/P1/P2 remains in implementation; independent Sol must decide acceptance.
+
+### Acceptance limits and concerns
+
+The V03/V04 policy is stored before candidate evaluation and is not derived from a candidate artifact. V03 accepts heading height `64–74`, bottom `195–207`, and heading→visual gap `28–38`; V04 accepts heading height `166–180`, bottom `303–317`, and heading→preview gap `10–22`. The added negative proofs make current-style underscaling, wrong bottom, or excessive gap fail. Full-screen caps, required semantic landmarks, scroll reset, viewport overflow checks, and W0 budgets remain in force.
+
+Concerns remain external: FFmpeg is unavailable locally, so normal codec-backed C10 demo acceptance is pending CI after controller push; canonical pixels are Linux/x64-only; final independent Sol acceptance remains pending. `apps/web/design-qa.md` intentionally ends with `final result: pending independent Sol acceptance.`
