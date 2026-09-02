@@ -44,9 +44,9 @@ function runPlaywrightRunner(args: readonly string[]): Promise<RunnerResult> {
 describe("Playwright runner", () => {
   it("removes NO_COLOR before Playwright forces color in descendant processes", async () => {
     const result = await runPlaywrightRunner([
-      "src/visual/home.visual.spec.ts",
+      "src/visual/playwright-runner-smoke.visual.spec.ts",
       "--grep",
-      "starts the desktop photo",
+      "launches Chromium for runner environment checks",
       "--project",
       "desktop-home",
     ]);

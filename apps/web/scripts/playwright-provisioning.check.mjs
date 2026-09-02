@@ -15,6 +15,7 @@ function runWebTest(browserCache) {
     CI: "true",
     PLAYWRIGHT_BROWSERS_PATH: browserCache,
   };
+  delete environment.NODE_TEST_CONTEXT;
 
   return new Promise((resolve, reject) => {
     const child = spawn(command, ["--filter", "@revelai/web", "test"], {
