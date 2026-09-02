@@ -24,6 +24,7 @@ import { createRevelApiClient } from "./lib/api/client";
 import { getDeviceAthleteId } from "./lib/api/identity";
 import type { ReviewCapturePort } from "./verified/capture";
 import type { ReviewSetupPort } from "./verified/setup";
+import { VerifiedTracer } from "./verified/tracer";
 
 export const reviewRoutesEnabled =
   import.meta.env.DEV || import.meta.env.MODE === "test";
@@ -110,6 +111,14 @@ function Shell({ client, reviewCapturePort, reviewSetupPort }: ShellProps) {
     closeNavigation();
     navigate(`/indisponivel/${destination}`);
   };
+  const openVerified = () => {
+    closeNavigation();
+    navigate("/verified");
+  };
+  const openRanking = () => {
+    closeNavigation();
+    navigate("/verified?view=ranking");
+  };
 
   return (
     <div className="app-shell" style={appTheme}>
@@ -154,13 +163,19 @@ function Shell({ client, reviewCapturePort, reviewSetupPort }: ShellProps) {
           <Link to="/training/history" onClick={() => closeNavigation()}>
             Meus treinos
           </Link>
-          <button type="button" onClick={() => openUnavailable("ranking")}>
+          <button type="button" onClick={openRanking}>
             Ranking
           </button>
         </nav>
       </header>
       <Routes>
-        <Route path="/" element={<Home onUnavailable={openUnavailable} />} />
+        <Route
+          path="/"
+          element={
+            <Home onUnavailable={openUnavailable} onVerified={openVerified} />
+          }
+        />
+        <Route path="/verified" element={<VerifiedTracer client={client} />} />
         <Route
           path="/training/history"
           element={<TrainingHistory client={client} />}

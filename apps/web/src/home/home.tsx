@@ -2,6 +2,7 @@ import { ArrowRight } from "@phosphor-icons/react";
 
 type HomeProps = {
   onUnavailable(destination: string): void;
+  onVerified(): void;
 };
 
 type TrainingChoice = {
@@ -33,7 +34,7 @@ const choices: readonly TrainingChoice[] = [
   },
 ];
 
-export function Home({ onUnavailable }: HomeProps) {
+export function Home({ onUnavailable, onVerified }: HomeProps) {
   return (
     <main className="home-page">
       <img
@@ -63,7 +64,11 @@ export function Home({ onUnavailable }: HomeProps) {
                   ? `${choice.id}-kicker ${choice.id}-description`
                   : `${choice.id}-description`
               }
-              onClick={() => onUnavailable(choice.destination)}
+              onClick={() =>
+                choice.id === "verified-challenge"
+                  ? onVerified()
+                  : onUnavailable(choice.destination)
+              }
             >
               <span className="choice-number" aria-hidden="true">
                 {choice.number}

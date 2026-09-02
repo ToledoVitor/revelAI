@@ -280,18 +280,13 @@ test("respects reduced motion", async ({ page }) => {
 
 test("opens each unavailable destination without an API or follow-up network request", async ({
   page,
-}, testInfo) => {
+}) => {
   const requests: string[] = [];
   page.on("request", (request) => {
     requests.push(request.url());
   });
 
-  for (const control of [
-    "Ranking",
-    "Treino livre",
-    "Desafio verificado",
-    "Analisar treino",
-  ]) {
+  for (const control of ["Treino livre", "Analisar treino"]) {
     await page.goto("/");
     await expect(
       page.getByRole("img", {
@@ -300,10 +295,6 @@ test("opens each unavailable destination without an API or follow-up network req
     ).toHaveJSProperty("complete", true);
     await page.evaluate(() => document.fonts.ready);
     const requestCountBeforeInteraction = requests.length;
-
-    if (testInfo.project.name === "mobile-home" && control === "Ranking") {
-      await page.getByRole("button", { name: "Abrir navegação" }).click();
-    }
 
     await page.getByRole("button", { name: control }).click();
 
@@ -321,9 +312,7 @@ test("keeps keyboard focus visible and activates every unavailable control", asy
   page,
 }, testInfo) => {
   const controls = [
-    { name: "Ranking", isNavigationControl: true },
     { name: "Treino livre", isNavigationControl: false },
-    { name: "Desafio verificado", isNavigationControl: false },
     { name: "Analisar treino", isNavigationControl: false },
   ];
 

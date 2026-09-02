@@ -1,5 +1,6 @@
 // @vitest-environment node
 
+import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
@@ -62,6 +63,12 @@ async function buildWithProductionEnvironment() {
 }
 
 describe("production router review-route isolation", () => {
+  it("declares exactly one production verified route owned by VerifiedTracer", async () => {
+    const source = await readFile(resolve(webDirectory, "src/app.tsx"), "utf8");
+    expect(source.match(/<Route\s+path="\/verified"/g)).toHaveLength(1);
+    expect(source).toContain("<VerifiedTracer client={client} />");
+  });
+
   it(
     "removes the review setup and capture modules from the DEV:false/MODE:production router graph",
     async () => {

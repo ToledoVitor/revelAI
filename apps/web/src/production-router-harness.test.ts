@@ -335,4 +335,19 @@ describe("transformed production router harness", () => {
       expect(fetchSpy).not.toHaveBeenCalled();
     },
   );
+
+  it("mounts the sole production verified owner directly without review ports or mutations", async () => {
+    const setupPort = fakeReviewPort();
+    const capturePort = fakeCapturePort();
+    const host = await mountAt("/verified", setupPort, capturePort);
+
+    await waitForHarnessRender(host, () => {
+      expect(host.querySelector("h1#verified-setup-heading")).toHaveTextContent(
+        "Preparação do desafio verificado",
+      );
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(setupPort.getFixture).not.toHaveBeenCalled();
+    expect(capturePort.getDraft).not.toHaveBeenCalled();
+  });
 });

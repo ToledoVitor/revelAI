@@ -100,7 +100,7 @@ describe("the web home", () => {
     expect(window.location.pathname).toBe("/");
   });
 
-  it.each(["Ranking", "Treino livre", "Desafio verificado", "Analisar treino"])(
+  it.each(["Treino livre", "Analisar treino"])(
     "opens a truthful unavailable shell for %s without making an API call",
     async (control) => {
       const user = userEvent.setup();
@@ -120,4 +120,58 @@ describe("the web home", () => {
       expect(fetchSpy).not.toHaveBeenCalled();
     },
   );
+
+  it("opens the sole verified tracer from Home before making a mutation", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+
+    expect(
+      screen.getByRole("heading", {
+        name: "Preparação do desafio verificado",
+        level: 1,
+      }),
+    ).toHaveFocus();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("opens the live ranking through the verified tracer", async () => {
+    const user = userEvent.setup();
+    let rankingUrl: URL | undefined;
+    const fetchSpy = vi.fn((input: RequestInfo | URL) => {
+      rankingUrl = new URL(input.toString());
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            view: "live",
+            challengeId: "wall-pass",
+            challengeVersion: 1,
+            ruleVersion: "wall-pass-v1-score-1",
+            calculatedAt: "2026-08-30T12:00:00.000Z",
+            cohortSize: 0,
+            entries: [],
+            nextCursor: null,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "Ranking" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Ranking atual", level: 1 }),
+    ).toHaveFocus();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Ainda não há resultados no ranking atual.",
+    );
+    expect(rankingUrl?.pathname).toBe("/v1/leaderboards/wall-pass");
+  });
 });

@@ -46,7 +46,12 @@ export type RevelApiAbort = Readonly<{ kind: "aborted" }>;
 export type RevelApiRequestOptions = Readonly<{ signal?: AbortSignal }>;
 
 function isAbortWithoutResponse(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    (error as { name?: unknown }).name === "AbortError"
+  );
 }
 
 function routeErrorForClient(
