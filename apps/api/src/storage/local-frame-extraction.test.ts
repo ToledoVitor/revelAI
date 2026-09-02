@@ -40,10 +40,25 @@ const verifiedProbe: MediaProbe = {
   codec: "h264",
   sourceRotationDegrees: 90,
 };
+const portableFfmpegIntegrationTimeoutMilliseconds = 15_000;
+// Match the production runner's bounded TERM-to-KILL grace; cleanup awaits close.
+const testProcessTerminationGraceMilliseconds = 1_000;
+
+type TrackedProcess = Readonly<{
+  terminate: () => Promise<void>;
+}>;
+
+type ProcessResult = Readonly<{
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}>;
 
 describe("LocalFrameExtraction", () => {
   const roots: string[] = [];
+  const trackedProcesses = new Set<TrackedProcess>();
   afterEach(async () => {
+    await terminateTrackedProcesses(trackedProcesses);
     await Promise.all(
       roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
     );
@@ -200,6 +215,24 @@ describe("LocalFrameExtraction", () => {
     await expect(
       ffmpegHasPortableExtractionCapability(executable),
     ).resolves.toBe(false);
+  });
+
+  it("waits for a tracked subprocess before removing its owned root", async () => {
+    const root = await setupRoot(roots);
+    const processes = new Set<TrackedProcess>();
+    const completed = runProcess(
+      process.execPath,
+      ["-e", "setTimeout(() => process.exit(0), 1_000)"],
+      processes,
+    );
+
+    expect(processes.size).toBe(1);
+    await terminateTrackedProcesses(processes);
+    expect(processes.size).toBe(0);
+    await expect(completed).resolves.toMatchObject({ exitCode: 1 });
+    await expect(
+      rm(root, { recursive: true, force: true }),
+    ).resolves.toBeUndefined();
   });
 
   it("rejects a claimed source digest before it can issue a durable receipt", async () => {
@@ -581,73 +614,90 @@ describe("LocalFrameExtraction", () => {
     ).rejects.toThrow("media_probe_failed");
   });
 
-  it("smokes the owned argv against an explicit portable FFmpeg extraction capability", async (context) => {
-    if (!(await ffmpegHasPortableExtractionCapability())) return context.skip();
-    const root = await setupRoot(roots);
-    const staged = join(root, "temporary", `${mediaId}.uploading`);
-    const generated = await runProcess("ffmpeg", [
-      "-nostdin",
-      "-y",
-      "-f",
-      "lavfi",
-      "-i",
-      "color=c=black:s=1280x720:r=10:d=64",
-      "-c:v",
-      "mpeg4",
-      "-pix_fmt",
-      "yuv420p",
-      "-f",
-      "mp4",
-      staged,
-    ]);
-    expect(generated.exitCode).toBe(0);
-    const generatedSourceSha256 = createHash("sha256")
-      .update(await readFile(staged))
-      .digest("hex");
-    const extractor = createLocalFrameExtraction({
-      root,
-      ids: { next: () => batchId },
-      runner: {
-        run: async (command) => {
-          const result = await runProcess(
-            command.executable,
-            command.arguments,
-          );
-          return {
-            exitCode: result.exitCode,
-            termination: "completed" as const,
-            stdout: result.stdout,
-            stderr: result.stderr,
-          };
+  it(
+    "smokes the owned argv against an explicit portable FFmpeg extraction capability",
+    async (context) => {
+      if (
+        !(await ffmpegHasPortableExtractionCapability(
+          "ffmpeg",
+          trackedProcesses,
+        ))
+      )
+        return context.skip();
+      const root = await setupRoot(roots);
+      const staged = join(root, "temporary", `${mediaId}.uploading`);
+      const generated = await runProcess(
+        "ffmpeg",
+        [
+          "-nostdin",
+          "-y",
+          "-f",
+          "lavfi",
+          "-i",
+          "color=c=black:s=1280x720:r=10:d=64",
+          "-c:v",
+          "mpeg4",
+          "-pix_fmt",
+          "yuv420p",
+          "-f",
+          "mp4",
+          staged,
+        ],
+        trackedProcesses,
+      );
+      expect(generated.exitCode).toBe(0);
+      const generatedSourceSha256 = createHash("sha256")
+        .update(await readFile(staged))
+        .digest("hex");
+      const extractor = createLocalFrameExtraction({
+        root,
+        ids: { next: () => batchId },
+        runner: {
+          run: async (command) => {
+            const result = await runProcess(
+              command.executable,
+              command.arguments,
+              trackedProcesses,
+            );
+            return {
+              exitCode: result.exitCode,
+              termination: "completed" as const,
+              stdout: result.stdout,
+              stderr: result.stderr,
+            };
+          },
         },
-      },
-      retention: { schedule: async () => ({ kind: "created" as const }) },
-    });
+        retention: { schedule: async () => ({ kind: "created" as const }) },
+      });
 
-    await expect(
-      extractor.extract({
-        mode: "verified",
-        attemptId,
-        generation: 1,
-        mediaId,
-        mediaSha256: generatedSourceSha256,
-        probe: { ...verifiedProbe, sourceRotationDegrees: 0 },
-        uploadedAt: "2030-01-15T12:00:00.000Z",
-        source: "staged",
-        authority: verifiedFrameAuthority,
-      }),
-    ).resolves.toMatchObject({
-      frames: { count: 640 },
-      preRoll: { count: 40 },
-      active: { count: 600 },
-    });
-    expect(
-      (await readFile(join(root, "frames", batchId, "frame-0000.jpg"))).length,
-    ).toBeGreaterThan(0);
-    expect(
-      (await readFile(join(root, "frames", batchId, "frame-0639.jpg"))).length,
-    ).toBeGreaterThan(0);
-  });
+      await expect(
+        extractor.extract({
+          mode: "verified",
+          attemptId,
+          generation: 1,
+          mediaId,
+          mediaSha256: generatedSourceSha256,
+          probe: { ...verifiedProbe, sourceRotationDegrees: 0 },
+          uploadedAt: "2030-01-15T12:00:00.000Z",
+          source: "staged",
+          authority: verifiedFrameAuthority,
+        }),
+      ).resolves.toMatchObject({
+        frames: { count: 640 },
+        preRoll: { count: 40 },
+        active: { count: 600 },
+      });
+      expect(
+        (await readFile(join(root, "frames", batchId, "frame-0000.jpg")))
+          .length,
+      ).toBeGreaterThan(0);
+      expect(
+        (await readFile(join(root, "frames", batchId, "frame-0639.jpg")))
+          .length,
+      ).toBeGreaterThan(0);
+    },
+    portableFfmpegIntegrationTimeoutMilliseconds,
+  );
 });
 
 async function setupRoot(roots: string[]): Promise<string> {
@@ -890,54 +940,63 @@ function insertBeforeEoi(bytes: Uint8Array, insert: Uint8Array): Uint8Array {
 /** Skip only when a real invocation cannot execute the complete owned pipeline. */
 async function ffmpegHasPortableExtractionCapability(
   executable = "ffmpeg",
+  trackedProcesses?: Set<TrackedProcess>,
 ): Promise<boolean> {
   const root = await mkdtemp(join(tmpdir(), "revelai-ffmpeg-capability-"));
   const source = join(root, "source.mp4");
   const outputPattern = join(root, "frame-%06d.jpg");
   try {
-    const generated = await runProcess(executable, [
-      "-nostdin",
-      "-y",
-      "-f",
-      "lavfi",
-      "-i",
-      "color=c=black:s=16x16:r=10:d=1",
-      "-c:v",
-      "mpeg4",
-      "-pix_fmt",
-      "yuv420p",
-      "-f",
-      "mp4",
-      source,
-    ]);
+    const generated = await runProcess(
+      executable,
+      [
+        "-nostdin",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=16x16:r=10:d=1",
+        "-c:v",
+        "mpeg4",
+        "-pix_fmt",
+        "yuv420p",
+        "-f",
+        "mp4",
+        source,
+      ],
+      trackedProcesses,
+    );
     if (generated.exitCode !== 0) return false;
-    const extracted = await runProcess(executable, [
-      "-nostdin",
-      "-v",
-      "info",
-      "-i",
-      source,
-      "-filter_complex",
-      "[0:v]fps=10,split=2[decoded][active];[decoded]showinfo[frames];[active]select='gte(t,0)*lt(t,1)*gte(scene,0)',metadata=print:file=-[scene]",
-      "-map",
-      "[frames]",
-      "-vsync",
-      "0",
-      "-start_number",
-      "0",
-      "-y",
-      "-c:v",
-      "mjpeg",
-      "-pix_fmt",
-      "yuvj420p",
-      "-bitexact",
-      outputPattern,
-      "-map",
-      "[scene]",
-      "-f",
-      "null",
-      "-",
-    ]);
+    const extracted = await runProcess(
+      executable,
+      [
+        "-nostdin",
+        "-v",
+        "info",
+        "-i",
+        source,
+        "-filter_complex",
+        "[0:v]fps=10,split=2[decoded][active];[decoded]showinfo[frames];[active]select='gte(t,0)*lt(t,1)*gte(scene,0)',metadata=print:file=-[scene]",
+        "-map",
+        "[frames]",
+        "-vsync",
+        "0",
+        "-start_number",
+        "0",
+        "-y",
+        "-c:v",
+        "mjpeg",
+        "-pix_fmt",
+        "yuvj420p",
+        "-bitexact",
+        outputPattern,
+        "-map",
+        "[scene]",
+        "-f",
+        "null",
+        "-",
+      ],
+      trackedProcesses,
+    );
     if (extracted.exitCode !== 0) return false;
     return (await readFile(join(root, "frame-000000.jpg"))).length > 0;
   } catch {
@@ -950,18 +1009,57 @@ async function ffmpegHasPortableExtractionCapability(
 async function runProcess(
   executable: string,
   arguments_: readonly string[],
-): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(executable, arguments_, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.once("error", reject);
-    child.once("close", (code) => {
-      resolve(
+  trackedProcesses?: Set<TrackedProcess>,
+): Promise<ProcessResult> {
+  const child = spawn(executable, arguments_, {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  let forceKill: ReturnType<typeof setTimeout> | undefined;
+  let finished = false;
+  let terminating = false;
+  let resolveClosed: () => void;
+  let resolveCompleted: (result: ProcessResult) => void;
+  let rejectCompleted: (error: Error) => void;
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
+  const completed = new Promise<ProcessResult>((resolve, reject) => {
+    resolveCompleted = resolve;
+    rejectCompleted = reject;
+  });
+  const tracked: TrackedProcess = Object.freeze({
+    terminate: async () => {
+      if (!finished && !terminating) {
+        terminating = true;
+        child.kill("SIGTERM");
+        forceKill = setTimeout(() => {
+          if (!finished) child.kill("SIGKILL");
+        }, testProcessTerminationGraceMilliseconds);
+        forceKill.unref();
+      }
+      await closed;
+    },
+  });
+  const finish = (settle: () => void): void => {
+    if (finished) return;
+    finished = true;
+    if (forceKill) clearTimeout(forceKill);
+    trackedProcesses?.delete(tracked);
+    resolveClosed();
+    settle();
+  };
+
+  trackedProcesses?.add(tracked);
+  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  child.once("error", (error: Error) => {
+    finish(() => rejectCompleted(error));
+  });
+  child.once("close", (code) => {
+    finish(() => {
+      resolveCompleted(
         Object.freeze({
           exitCode: code ?? 1,
           stdout: Buffer.concat(stdout).toString("utf8"),
@@ -970,4 +1068,11 @@ async function runProcess(
       );
     });
   });
+  return completed;
+}
+
+async function terminateTrackedProcesses(
+  processes: Set<TrackedProcess>,
+): Promise<void> {
+  await Promise.all([...processes].map((process) => process.terminate()));
 }
