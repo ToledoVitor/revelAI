@@ -135,3 +135,41 @@ The second review found that the first production graph test needed a separate, 
 - The harness mutates `NODE_ENV` only around Vite's module transformation and restores its previous value in `finally`; it does not fake an environment after router evaluation.
 - The clean probe targets two explicit workspace `dist` folders, not a broad workspace path, and restores their prior contents. The artifact itself remains scoped to the ignored web coverage folder.
 - No known functional concern remains. No push was made.
+
+## Review fix round 3 (commit `fe3f9bb`)
+
+Reviewer verdict: the clean-output probe was `CHANGES_REQUIRED`. Its original staging loop could move the first dependency and then throw while staging the second without returning recovery state; it also deleted a deterministic backup name before using it, and parent termination could bypass restoration. This round narrows the fix to the clean production-router probe. W3 capture/timer work and the review router are unchanged.
+
+### Changes made
+
+- `apps/web/scripts/production-router-clean-dist.mjs` separates the executable recovery logic from its Node check. It stages only the two explicit web dependency outputs into collision-safe, unique `mkdtemp` directories under the operating system temporary directory. Staging never removes an existing backup: every planned backup is checked first, and a collision fails closed before either source is moved.
+- A failed second `lstat`/rename rolls back already staged outputs immediately. When that rollback itself partially fails, the error retains the mutable staged state; the outer cleanup retries only entries that have not already been restored. Recovery checks that a backup exists before deleting a rebuilt source, so it never deletes the only recoverable original.
+- The clean probe owns `SIGINT`, `SIGTERM`, and `SIGHUP` listeners from staging through cleanup. A first parent signal is forwarded once to the spawned production-router child; the async flow waits for that child to settle, restores outputs, removes its own temporary directory after successful recovery, removes every listener, and only then rejects with the signal. No path calls `process.exit`.
+- The production child runner also has one-settlement handling for spawn errors, child signals, and normal exits. A non-zero completed check remains an error, and the command verifies that its dependency outputs exist after the real rebuild and before originals are restored.
+
+### RED → GREEN evidence
+
+1. The new narrow check suite was RED while the imported recovery module did not exist (`ERR_MODULE_NOT_FOUND`). The extracted module made the initial rollback, collision, signal, and real clean-build scenarios GREEN.
+2. The real clean-build probe then exposed an additional production boundary: staging below `apps/web/coverage` left `dependency-0` absent after the Playwright production command, before restoration. The command uses that coverage space for its own artifacts. Moving the unique staging root to `mkdtemp(tmpdir())` was the minimal isolation change; the same real probe became GREEN while still rebuilding and restoring both dependency outputs.
+3. A further RED test injected a first rollback failure after the second dependency staging error. Before the fix, the outer cleanup received an empty staged list and the original contracts output was missing. The staged-state error payload plus per-entry `restored` state lets the outer cleanup retry the unfinished rollback. GREEN restores the original marker exactly and leaves no backup residue.
+
+### Deterministic recovery checks
+
+- Second dependency staging failure after the first move: exact first output is rolled back and both planned backup paths are absent.
+- Pre-existing backup collision: the source outputs remain intact and the collision contents are preserved; no backup is deleted.
+- Parent `SIGTERM` after staging: only one signal is forwarded to the child, its exit settles the flow, exact original outputs return, and `SIGINT`/`SIGTERM`/`SIGHUP` listeners are all removed.
+- A real `test:production-router` run from staged outputs still builds the dependencies, serves the isolated production artifact, and restores the pre-existing dependency output directories afterward.
+
+### Fix-round verification
+
+- `rtk pnpm --dir apps/web run test:production-router:clean` → 5/5 recovery and real clean-build checks passed.
+- `rtk pnpm --dir apps/web run test:production-router` → 4/4 served production setup/capture isolation checks passed.
+- `rtk pnpm --dir apps/web run lint`, `typecheck`, `build`, and `test` → all passed; the web test includes 10 Node checks, 14 Vitest files / 114 tests, and 20 structural browser checks with 8 established skips.
+- `rtk pnpm check` → root format, lint, typecheck, test, and build completed with exit 0.
+- `rtk git diff --check` and cached diff check passed before the functional commit.
+
+### Final self-review
+
+- The cleanup scope is limited to explicit contracts/design-system `dist` sources and a fresh, validated temporary staging directory; it does not delete a workspace, coverage root, or a pre-existing backup.
+- If recovery cannot safely complete, the process rejects and leaves a remaining backup rather than deleting it. If it can complete, it restores the original directory identity via rename before removing only the temporary staging directory it created.
+- Production graph/harness, served artifact proof, development lazy-import smoke, W1 production unavailability, and W2's no-session/no-attempt boundaries are unaffected. No push was made.
