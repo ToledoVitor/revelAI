@@ -2,7 +2,9 @@
 
 ## Outcome
 
-W3 foi entregue no commit funcional `17c38c30eb88ef7cb61d521ecb6dfa87858cfd1f`.
+W3 foi entregue inicialmente no commit funcional
+`17c38c30eb88ef7cb61d521ecb6dfa87858cfd1f`. O round de revisão Sol foi
+resolvido no commit funcional `1b2f761939a7d5022369c043518706ce46e0a3fe`.
 
 O cliente agora oferece `/_test/verified/capture` somente em DEV/teste. A tela
 de revisão orienta a gravação do passe na parede, grava localmente quando o
@@ -107,3 +109,56 @@ continuam cobrindo setup e agora também captura.
 Nenhuma bloqueadora. A conclusão de upload deliberadamente é local e deixa
 qualquer criação de sessão/tentativa, upload real, polling, resultado e decisão
 de integridade para W4, conforme a fronteira de ownership do plano.
+
+## Round de revisão Sol — CHANGES_REQUIRED → resolvido
+
+O review reproduziu cinco regressões públicas em `capture.test.tsx`: preview
+sem autoplay, metadados de arquivo vazio falsificados, upload bloqueado pelo
+cleanup do primeiro effect em `StrictMode`, fake upload padrão síncrono sem
+janela para cancelar e controles de troca/descarte ainda ativos durante upload.
+Um segundo RED no navegador DEV real verificou que o vídeo tinha `srcObject` e
+`autoplay`, mas permanecia com `paused: true`.
+
+A correção preserva as fronteiras W2/W3 e acrescenta:
+
+- lifetime seguro em replay de `StrictMode`: cada setup restaura o indicador de
+  montagem; cleanup invalida a geração de upload e aborta o controlador ativo;
+- preview de câmera com `autoPlay`, `muted`, `playsInline` e chamada a `play()`
+  com rejeição tratada;
+- fake port em três fases assíncronas de 250 ms, canceláveis por `AbortSignal`
+  e controláveis pelos timers falsos de Vitest;
+- exclusão mútua durante upload, geração/controlador por upload e descarte de
+  callbacks/resultados tardios após cancelamento; a confirmação aceita retorna
+  a captura para `idle` e mensagem coerente;
+- liberação dos chunks depois de materializar o `Blob`, em erro, handoff
+  aceito, descarte, nova captura/seleção e unmount;
+- separação entre tipo declarado pelo arquivo e MIME normalizado do wire. A UI
+  conserva nome/tamanho/tipo original, declara ausência de tipo quando vazia e
+  exibe bytes exatos; somente o `File` no `FormData` é normalizado;
+- harness de router de produção que limpa e exige `undefined` tanto para os
+  marcadores de setup quanto de capture.
+
+### RED → GREEN da revisão
+
+1. A bateria pública expandida chegou a 5 falhas em 17 casos antes da
+   implementação: faltavam a janela de preparação/cancelamento, exclusão mútua
+   de controles, metadata fiel, e o lifetime correto em `StrictMode`.
+2. O teste Playwright DEV injetou um `MediaStream` de canvas, mediu
+   `{ autoplay: true, hasStream: true, paused: true }` em RED e depois ficou
+   verde com `paused: false`, além de verificar cancelamento do fake local.
+3. Em GREEN, 17 testes de captura e 4 do harness passaram; a matriz focada de
+   rota/router/setup/capture ficou em 34 testes verdes. O browser estrutural
+   passou nos dois viewports e a rota produzida preservou 4/4 fronteiras
+   indisponíveis.
+
+### Verificações após a revisão
+
+| Comando | Resultado |
+| --- | --- |
+| `rtk pnpm --filter @revelai/web exec vitest run src/app.test.tsx src/production-router-harness.test.ts src/verified/setup.test.tsx src/verified/capture-route.test.tsx src/verified/capture.test.tsx --config vitest.config.ts` | 5 arquivos, 34 testes verdes |
+| `rtk pnpm --filter @revelai/web run lint` e `rtk pnpm --filter @revelai/web run typecheck` | verdes |
+| `rtk pnpm --filter @revelai/web run test:visual:structural:run` | 24 passados, 8 skips estruturais previstos; teste DEV real de StrictMode verde em desktop e mobile |
+| `rtk pnpm --filter @revelai/web run build` | verde |
+| `rtk pnpm --filter @revelai/web run build:production-router` e `rtk pnpm --filter @revelai/web run test:production-router` | verde; 4 testes Playwright de setup/capture, URL direta/in-app |
+| `rtk pnpm check` | exit 0: format, lint, typecheck, todos os testes e builds de todos os pacotes |
+| `rtk git diff --check` | verde antes do commit funcional |
