@@ -432,7 +432,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           />
         )}
         {message ? <p role="alert">{message}</p> : null}
-        <div className="setup-actions">
+        <div className="setup-actions" data-visual-landmark="setup-actions">
           {activeGate && activeGate.id !== "device" ? (
             <button
               type="button"
@@ -857,7 +857,10 @@ function CalibrationGuidance({
       className="calibration-guidance"
       aria-label="Orientação da calibração"
     >
-      <figure className="calibration-visual">
+      <figure
+        className="calibration-visual"
+        data-visual-landmark="calibration-visual"
+      >
         <img
           src="/assets/futsal-hero.png"
           alt="Referência visual de atleta diante de uma parede de futsal"

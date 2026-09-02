@@ -1,4 +1,5 @@
 import {
+  assertReferenceVisualLandmarkGeometry,
   assertReferenceVisualLandmarks,
   getReferenceVisualGate,
 } from "./visual-harness";
@@ -118,6 +119,10 @@ async function assertApprovedViewport(
   assertReferenceVisualLandmarks({
     viewport,
     requiredLandmarks: gate.requiredLandmarks,
+    landmarks,
+  });
+  assertReferenceVisualLandmarkGeometry({
+    geometry: gate.referenceGeometry,
     landmarks,
   });
   expect(
@@ -307,6 +312,8 @@ test("captures the approved mobile reference matrix through stable public states
   await expect(
     page.getByRole("button", { name: "Enviar vídeo", exact: true }),
   ).toBeDisabled();
+  await existingVideo.press("Tab");
+  await expect(page.getByTestId("capture-requirements-toggle")).toBeFocused();
   captures.push(
     await captureApprovedState({ page, state: "recording-capture" }),
   );

@@ -124,6 +124,10 @@ describe("production verified capture", () => {
     expect(
       screen.getByRole("button", { name: "Enviar vídeo existente" }),
     ).toHaveFocus();
+    await user.tab();
+    expect(
+      screen.getByRole("button", { name: "Requisitos da captura" }),
+    ).toHaveFocus();
   });
 
   it("uses the exact MIME preference and 5 + 4 + 60 second automatic capture timeline", async () => {

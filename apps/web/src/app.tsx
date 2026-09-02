@@ -157,10 +157,14 @@ function Shell({ client, reviewCapturePort, reviewSetupPort }: ShellProps) {
     closeNavigation();
     navigate("/verified?view=ranking");
   };
+  const isVerifiedRoute = location.pathname === "/verified";
 
   return (
     <div className="app-shell" style={appTheme}>
-      <header className="site-header" data-visual-landmark="site-header">
+      <header
+        className={`site-header${isVerifiedRoute ? " site-header--verified" : ""}`}
+        data-visual-landmark="site-header"
+      >
         <Brand />
         <button
           ref={navigationToggleRef}

@@ -62,6 +62,7 @@ export function ProductionCapture({
   const [cameraNotice, setCameraNotice] = useState("");
   const [localMedia, setLocalMedia] = useState<LocalProductionMedia>();
   const [hasLivePreview, setHasLivePreview] = useState(false);
+  const [requirementsOpen, setRequirementsOpen] = useState(false);
 
   const clearTimers = () => {
     for (const timer of timerIdsRef.current) window.clearTimeout(timer);
@@ -353,20 +354,6 @@ export function ProductionCapture({
       className="production-capture"
       aria-label="Captura do vídeo verificado"
     >
-      <details className="capture-requirements">
-        <summary>Requisitos da captura</summary>
-        <ul>
-          <li>{captureRequirementLines[0]}</li>
-          <li>
-            Tamanho máximo de {MAX_UPLOAD_BYTES / 1024 / 1024} MiB. Esta
-            conferência no navegador é apenas orientação; o servidor decide a
-            aceitação.
-          </li>
-          {captureRequirementLines.slice(1).map((requirement) => (
-            <li key={requirement}>{requirement}</li>
-          ))}
-        </ul>
-      </details>
       <section
         className="capture-preview"
         aria-label="Prévia da câmera"
@@ -402,7 +389,7 @@ export function ProductionCapture({
           <p>Duração ativa: {active} de 60 segundos</p>
         ) : null}
       </section>
-      <div className="capture-actions">
+      <div className="capture-actions" data-visual-landmark="capture-actions">
         <button
           type="button"
           data-visual-landmark="capture-start"
@@ -427,6 +414,8 @@ export function ProductionCapture({
         ref={fileInputRef}
         data-testid="production-video-input"
         type="file"
+        tabIndex={-1}
+        aria-hidden="true"
         accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm"
         disabled={disabled || busy}
         onChange={(event) => {
@@ -434,6 +423,30 @@ export function ProductionCapture({
           event.currentTarget.value = "";
         }}
       />
+      <section className="capture-requirements">
+        <button
+          type="button"
+          data-testid="capture-requirements-toggle"
+          aria-expanded={requirementsOpen}
+          aria-controls="capture-requirements-list"
+          onClick={() => setRequirementsOpen((current) => !current)}
+        >
+          Requisitos da captura
+        </button>
+        {requirementsOpen ? (
+          <ul id="capture-requirements-list">
+            <li>{captureRequirementLines[0]}</li>
+            <li>
+              Tamanho máximo de {MAX_UPLOAD_BYTES / 1024 / 1024} MiB. Esta
+              conferência no navegador é apenas orientação; o servidor decide a
+              aceitação.
+            </li>
+            {captureRequirementLines.slice(1).map((requirement) => (
+              <li key={requirement}>{requirement}</li>
+            ))}
+          </ul>
+        ) : null}
+      </section>
       {localMedia ? (
         <section aria-label="Prévia do vídeo selecionado">
           {localMedia.previewUrl ? (

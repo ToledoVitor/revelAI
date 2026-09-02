@@ -1286,11 +1286,15 @@ a:focus-visible {
   border-bottom: 1px solid var(--border-gray);
 }
 
-.capture-requirements summary {
+.capture-requirements > button {
+  width: 100%;
   padding: 0.65rem 0;
   color: var(--deep-emerald);
+  border: 0;
+  background: transparent;
   font-size: 0.82rem;
   font-weight: 700;
+  text-align: left;
   cursor: pointer;
 }
 
@@ -1654,28 +1658,72 @@ a:focus-visible {
   }
 
   .challenge-choice {
+    gap: 0.8rem;
     width: 100%;
     padding-right: 7%;
     padding-left: 7%;
+    overflow: visible;
+  }
+
+  .app-shell:has(.challenge-choice) .site-header--verified .brand {
+    margin-left: 2.25rem;
+  }
+
+  .site-header--verified .brand {
+    transform: translateY(0.45rem);
+  }
+
+  .site-header--verified .navigation-toggle,
+  .site-header--verified .primary-navigation {
+    display: none;
+  }
+
+  .challenge-back {
+    position: absolute;
+    z-index: 2;
+    top: -2.5rem;
+    left: 0;
   }
 
   .challenge-choice-hero {
-    grid-template-columns: minmax(0, 1fr) 45%;
-    min-height: 18rem;
+    display: block;
+    min-height: 22rem;
     margin-right: -7%;
+    border-bottom: 0;
   }
 
   .challenge-choice-hero > div {
-    padding-top: 0.8rem;
+    min-height: 22rem;
+    padding: 0;
   }
 
   .challenge-choice-hero h1 {
+    position: absolute;
+    top: 1.1rem;
+    left: 0;
     font-size: 4rem;
+    transform: scaleX(0.78) scaleY(1.45);
   }
 
   .challenge-choice-hero p {
-    max-width: 10.5rem;
+    position: absolute;
+    top: 18rem;
+    left: 0;
     font-size: 0.75rem;
+  }
+
+  .challenge-choice-hero .heading-rule {
+    position: absolute;
+    top: 16.5rem;
+    left: 0;
+  }
+
+  .challenge-choice-hero img {
+    position: absolute;
+    top: -6.6rem;
+    right: -7%;
+    width: 60%;
+    height: 28rem;
   }
 
   .challenge-card {
@@ -1708,6 +1756,10 @@ a:focus-visible {
     font-size: 0.57rem;
   }
 
+  .challenge-prepare {
+    margin-top: 1.4rem;
+  }
+
   .verified-progress {
     margin-bottom: 0.9rem;
   }
@@ -1717,7 +1769,7 @@ a:focus-visible {
   }
 
   .calibration-setup {
-    padding-top: 0.5rem;
+    padding-top: 1.1rem;
     padding-bottom: 0.75rem;
   }
 
@@ -1726,26 +1778,31 @@ a:focus-visible {
   }
 
   .calibration-setup h1 {
+    max-width: none;
     font-size: 3.4rem;
+    transform: scaleX(0.76);
+    transform-origin: top left;
   }
 
   .setup-challenge-name {
-    margin: 0.2rem 0 0.35rem;
+    margin: 1.75rem 0 0;
     font-size: 0.85rem;
   }
 
   .calibration-guidance {
-    margin-top: 0.35rem;
+    margin-top: 1rem;
   }
 
   .calibration-visual {
-    height: 8.5rem;
+    width: 100vw;
+    height: 13.6rem;
+    margin-left: calc((100vw - 100%) / -2);
   }
 
   .calibration-checklist li {
     grid-template-columns: 1.1rem minmax(0, 1fr);
     gap: 0.45rem;
-    padding: 0.28rem 0;
+    padding: 0.5rem 0;
   }
 
   .calibration-checklist li > svg {
@@ -1754,13 +1811,13 @@ a:focus-visible {
   }
 
   .calibration-checklist strong {
-    font-size: 0.74rem;
+    font-size: 0.82rem;
   }
 
   .calibration-checklist small {
-    margin-top: 0.04rem;
-    font-size: 0.56rem;
-    line-height: 1.15;
+    margin-top: 0.08rem;
+    font-size: 0.62rem;
+    line-height: 1.25;
   }
 
   .calibration-status {
@@ -1771,9 +1828,9 @@ a:focus-visible {
 
   .calibration-truth {
     gap: 0.35rem;
-    margin-top: 0.4rem;
-    padding: 0.42rem;
-    font-size: 0.62rem;
+    margin-top: 0.65rem;
+    padding: 0.55rem;
+    font-size: 0.68rem;
     line-height: 1.2;
   }
 
@@ -1786,11 +1843,11 @@ a:focus-visible {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.3rem;
-    margin-top: 0.45rem;
+    margin-top: 1.6rem;
   }
 
   .calibration-setup .setup-actions button {
-    min-height: 2.05rem;
+    min-height: 2.2rem;
     padding: 0.3rem 0.45rem;
     font-size: 0.68rem;
   }
@@ -1801,7 +1858,8 @@ a:focus-visible {
   }
 
   .capture-preview {
-    height: 11rem;
+    height: 15.5rem;
+    margin-bottom: 3rem;
   }
 
   .verified-capture {
@@ -1811,14 +1869,18 @@ a:focus-visible {
 
   .verified-capture h1 {
     max-width: 12ch;
-    font-size: 3.2rem;
+    font-size: 4.4rem;
     line-height: 0.88;
+    transform: scaleX(0.8);
+    transform-origin: top left;
   }
 
   .verified-capture .capture-intro {
-    margin: 0.35rem 0 0.55rem;
-    font-size: 0.72rem;
-    line-height: 1.2;
+    display: none;
+  }
+
+  .verified-capture .production-capture {
+    margin-top: 2rem;
   }
 
   .capture-actions {
@@ -1827,7 +1889,7 @@ a:focus-visible {
 
   .capture-actions button,
   .capture-actions .capture-file-select {
-    min-height: 2.55rem;
+    min-height: 3rem;
     padding: 0.45rem 0.7rem;
     font-size: 0.84rem;
   }

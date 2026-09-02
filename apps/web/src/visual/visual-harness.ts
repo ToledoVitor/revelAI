@@ -34,6 +34,17 @@ export type VisualLandmark = Readonly<{
 export type ReferenceVisualGate = Readonly<{
   maxMismatchRatio: number;
   requiredLandmarks: readonly string[];
+  referenceGeometry: readonly ReferenceLandmarkGeometry[];
+}>;
+
+type ReferenceAxisRange = Readonly<{ min: number; max: number }>;
+
+export type ReferenceLandmarkGeometry = Readonly<{
+  id: string;
+  left: ReferenceAxisRange;
+  top: ReferenceAxisRange;
+  right: ReferenceAxisRange;
+  bottom: ReferenceAxisRange;
 }>;
 
 type VisualFixture = Readonly<{
@@ -103,6 +114,29 @@ const referenceVisualGates = {
       "challenge-card",
       "challenge-prepare",
     ],
+    referenceGeometry: [
+      {
+        id: "challenge-heading",
+        left: { min: 20, max: 36 },
+        top: { min: 108, max: 132 },
+        right: { min: 110, max: 180 },
+        bottom: { min: 330, max: 375 },
+      },
+      {
+        id: "challenge-card",
+        left: { min: 20, max: 36 },
+        top: { min: 450, max: 500 },
+        right: { min: 350, max: 370 },
+        bottom: { min: 560, max: 630 },
+      },
+      {
+        id: "challenge-prepare",
+        left: { min: 20, max: 36 },
+        top: { min: 740, max: 775 },
+        right: { min: 350, max: 370 },
+        bottom: { min: 785, max: 815 },
+      },
+    ],
   },
   "calibration-guidance": {
     maxMismatchRatio: 0.4,
@@ -116,6 +150,29 @@ const referenceVisualGates = {
       "setup-back",
       "setup-cancel",
     ],
+    referenceGeometry: [
+      {
+        id: "setup-heading",
+        left: { min: 20, max: 36 },
+        top: { min: 120, max: 150 },
+        right: { min: 225, max: 290 },
+        bottom: { min: 170, max: 210 },
+      },
+      {
+        id: "calibration-visual",
+        left: { min: 0, max: 5 },
+        top: { min: 220, max: 250 },
+        right: { min: 385, max: 390 },
+        bottom: { min: 430, max: 470 },
+      },
+      {
+        id: "setup-actions",
+        left: { min: 20, max: 36 },
+        top: { min: 735, max: 775 },
+        right: { min: 350, max: 370 },
+        bottom: { min: 805, max: 844 },
+      },
+    ],
   },
   "recording-capture": {
     maxMismatchRatio: 0.36,
@@ -127,6 +184,29 @@ const referenceVisualGates = {
       "capture-start",
       "capture-file-select",
     ],
+    referenceGeometry: [
+      {
+        id: "capture-heading",
+        left: { min: 20, max: 36 },
+        top: { min: 120, max: 155 },
+        right: { min: 220, max: 330 },
+        bottom: { min: 260, max: 315 },
+      },
+      {
+        id: "capture-preview",
+        left: { min: 20, max: 36 },
+        top: { min: 310, max: 345 },
+        right: { min: 350, max: 370 },
+        bottom: { min: 560, max: 600 },
+      },
+      {
+        id: "capture-actions",
+        left: { min: 20, max: 36 },
+        top: { min: 610, max: 650 },
+        right: { min: 350, max: 370 },
+        bottom: { min: 720, max: 755 },
+      },
+    ],
   },
   "processing-pending": {
     maxMismatchRatio: 0.3,
@@ -137,6 +217,7 @@ const referenceVisualGates = {
       "pending-refresh",
       "pending-reset",
     ],
+    referenceGeometry: [],
   },
   "ranked-report": {
     maxMismatchRatio: 0.2,
@@ -147,6 +228,7 @@ const referenceVisualGates = {
       "report-scorecard",
       "report-metrics",
     ],
+    referenceGeometry: [],
   },
 } as const satisfies Record<string, ReferenceVisualGate>;
 
@@ -243,6 +325,29 @@ export function assertReferenceVisualLandmarks({
       throw new Error(
         `Visual landmark is cropped: ${id} (${landmark.left},${landmark.top},${landmark.right},${landmark.bottom}) outside ${viewport.width}×${viewport.height}.`,
       );
+  }
+}
+
+export function assertReferenceVisualLandmarkGeometry({
+  geometry,
+  landmarks,
+}: Readonly<{
+  geometry: readonly ReferenceLandmarkGeometry[];
+  landmarks: readonly VisualLandmark[];
+}>): void {
+  const byId = new Map(landmarks.map((landmark) => [landmark.id, landmark]));
+  for (const reference of geometry) {
+    const landmark = byId.get(reference.id);
+    if (!landmark)
+      throw new Error(`Missing reference geometry landmark: ${reference.id}.`);
+    for (const axis of ["left", "top", "right", "bottom"] as const) {
+      const actual = landmark[axis];
+      const expected = reference[axis];
+      if (actual < expected.min || actual > expected.max)
+        throw new Error(
+          `Visual landmark reference geometry drift: ${reference.id}.${axis} ${actual} outside ${expected.min}–${expected.max}.`,
+        );
+    }
   }
 }
 

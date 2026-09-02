@@ -6,6 +6,7 @@ import {
   createCaptureMetadata,
   createOverlayPlan,
   assertReferenceVisualMismatch,
+  assertReferenceVisualLandmarkGeometry,
   getReferenceVisualGate,
   getVisualReference,
   getUiInkCoverageBaselines,
@@ -160,6 +161,64 @@ describe("visual harness", () => {
         })),
       }),
     ).toThrow("setup-cancel");
+  });
+
+  it("rejects W6 landmark position and size drift from reference geometry", () => {
+    const gate = getReferenceVisualGate({
+      route: "/verified",
+      state: "challenge-choice",
+      viewport: { width: 390, height: 844 },
+    });
+
+    expect(gate.referenceGeometry).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "challenge-heading" }),
+        expect.objectContaining({ id: "challenge-card" }),
+        expect.objectContaining({ id: "challenge-prepare" }),
+      ]),
+    );
+    expect(() =>
+      assertReferenceVisualLandmarkGeometry({
+        geometry: gate.referenceGeometry,
+        landmarks: gate.referenceGeometry.map((reference) => ({
+          id: reference.id,
+          left: reference.left.min,
+          top: reference.top.min,
+          right: reference.right.min,
+          bottom: reference.bottom.min,
+        })),
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertReferenceVisualLandmarkGeometry({
+        geometry: gate.referenceGeometry,
+        landmarks: gate.referenceGeometry.map((reference) => ({
+          id: reference.id,
+          left: reference.left.min,
+          top:
+            reference.id === "challenge-heading"
+              ? reference.top.max + 1
+              : reference.top.min,
+          right: reference.right.min,
+          bottom: reference.bottom.min,
+        })),
+      }),
+    ).toThrow("reference geometry");
+    expect(() =>
+      assertReferenceVisualLandmarkGeometry({
+        geometry: gate.referenceGeometry,
+        landmarks: gate.referenceGeometry.map((reference) => ({
+          id: reference.id,
+          left: reference.left.min,
+          top: reference.top.min,
+          right:
+            reference.id === "challenge-card"
+              ? reference.right.min - 1
+              : reference.right.min,
+          bottom: reference.bottom.min,
+        })),
+      }),
+    ).toThrow("reference geometry");
   });
 
   it("keeps an independent Linux ink floor so a missing normal control fails", () => {
