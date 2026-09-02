@@ -55,3 +55,29 @@ All completed after the final pagination self-review adjustment:
 ## Concerns
 
 No known functional concerns. The Node test environment selection for client multipart inspection is intentional and documented above; browser behavior is separately validated through jsdom history tests and structural Playwright.
+
+## Fix round 1/5 — important review findings
+
+Follow-up functional commit: `dcb68bf375acc42e9406ed88845174c59d01ef8a` (`fix(web): harden history interactions`). This round fixes only the three open Important findings. The deferred Minor request-descriptor item was not changed.
+
+### Implementation and coverage
+
+- `apps/web/src/lib/api/client.test.ts`: adds negative RouteError boundary cases for unknown code, non-allowlisted message, retryability mismatch, extra transport field, and a valid RouteError at the wrong HTTP status. Each malformed response must reject as a `ZodError`; the status mismatch must reject with the contract-mismatch error. Neither path may emit the normalized `RevelApiError` shape.
+- `apps/web/src/history/history.tsx` and `history.test.tsx`: deletion clears any old completion message on mutation, gives the pending control the accessible name “Excluindo treino”, announces “Treino excluído.” via `role="status"` on success, and moves focus to the retained history heading. The new test uses two attempts and a deferred DELETE to prove pending name, announcement, removal, and focus recovery.
+- `apps/web/src/app.tsx`, `home/home.test.tsx`, and `visual/home.visual.spec.ts`: place the mobile toggle before its navigation in DOM order, add Escape close with toggle-focus restoration, and test a real browser Tab sequence through Início, Meus treinos, and Ranking. Existing jsdom keyboard tests were aligned to that visible DOM order.
+
+### RED → GREEN evidence
+
+1. New RouteError tests were first added while the existing parser was correct. To prove the regression test was not vacuous, `client.ts` was temporarily and only locally mutated from `const parsed = RouteErrorSchema.parse(value);` to `const parsed = value as RouteError;`. `rtk pnpm --filter @revelai/web exec vitest run src/lib/api/client.test.ts` then produced `4 failed | 59 passed`: malformed message/retryability/extra-field values were normalized and the unknown code reached the status branch instead of failing Zod validation. The exact schema parse was restored before any GREEN run or commit.
+2. `rtk pnpm --filter @revelai/web exec vitest run src/lib/api/client.test.ts src/history/history.test.tsx` first produced the intended history RED: `Unable to find an accessible element with the role "button" and name "Excluindo treino"`; the pending text was masked by the fixed `aria-label`, and no completion/focus behavior existed.
+3. `rtk pnpm --filter @revelai/web run test:visual:structural:run` first produced the intended mobile navigation RED: after opening the menu with real keyboard input, `Início` was inactive after Tab because the toggle followed the nav in DOM order. The test also proves Escape restoration after the fix.
+4. GREEN focused runs: `rtk pnpm --filter @revelai/web exec vitest run src/lib/api/client.test.ts src/history/history.test.tsx` → 69 passed; `rtk pnpm --filter @revelai/web run test:visual:structural:run` → 18 passed, 8 intentional structural skips.
+
+### Final verification and self-review
+
+- `rtk pnpm --filter @revelai/web run lint`, `typecheck`, and `build` → passed.
+- `rtk pnpm --filter @revelai/web run test` → 11 files / 98 Vitest tests passed; structural Playwright 18 passed / 8 intentional skips.
+- `rtk pnpm check && rtk git diff --check` → exit 0 before the functional commit.
+- Self-review verified: RouteError schema and status branch are now both negatively covered without changing the client implementation; delete success preserves the API order/cache behavior while giving an accessible pending name, live completion, and deterministic heading focus; the desktop nav remains visually unchanged while mobile keyboard navigation follows its actual DOM order and Escape returns focus to the toggle. No request-descriptor changes were included.
+
+No new functional concerns identified.
