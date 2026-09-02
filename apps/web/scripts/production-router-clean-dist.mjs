@@ -236,7 +236,7 @@ export async function runCleanProductionRouterCheck({
   };
 
   for (const [signal, handler] of signalHandlers) {
-    processRef.once(signal, handler);
+    processRef.on(signal, handler);
   }
 
   let result;

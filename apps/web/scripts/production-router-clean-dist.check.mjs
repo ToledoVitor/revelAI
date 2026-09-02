@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
+import { EventEmitter, once } from "node:events";
 import {
   lstat,
   mkdir,
@@ -10,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
@@ -23,6 +24,55 @@ const forwardedSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
 const pnpmFixturePath = fileURLToPath(
   new URL("./test-fixtures/pnpm-entry.mjs", import.meta.url),
 );
+const signalProbePath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "test-fixtures/production-router-clean-dist-signal-probe.mjs",
+);
+
+function delay(milliseconds) {
+  return new Promise((resolvePromise) => {
+    setTimeout(resolvePromise, milliseconds);
+  });
+}
+
+async function waitForProbeOutput(probe, output, expected, description) {
+  const deadline = Date.now() + 5_000;
+  while (!output().includes(expected)) {
+    if (probe.exitCode !== null || probe.signalCode !== null) {
+      throw new Error(
+        `${description} exited before writing ${expected}: ${probe.exitCode ?? probe.signalCode}`,
+      );
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `${description} did not write ${expected} within 5000ms.`,
+      );
+    }
+    await delay(25);
+  }
+}
+
+async function waitForProbeExit(probe, timeout = 5_000) {
+  if (probe.exitCode !== null || probe.signalCode !== null) {
+    return { code: probe.exitCode, signal: probe.signalCode };
+  }
+
+  let timeoutId;
+  try {
+    return await Promise.race([
+      once(probe, "exit").then(([code, signal]) => ({ code, signal })),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(
+          () =>
+            reject(new Error(`Signal probe did not exit within ${timeout}ms.`)),
+          timeout,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 async function assertMissing(path) {
   await assert.rejects(lstat(path), { code: "ENOENT" });
@@ -191,6 +241,8 @@ test("restores staged outputs after a parent termination signal settles the chil
 
   processRef.emit("SIGTERM");
   processRef.emit("SIGTERM");
+  processRef.emit("SIGHUP");
+  processRef.emit("SIGINT");
   assert.deepEqual(childFixture.signals, ["SIGTERM"]);
   childFixture.child.emit("exit", null, "SIGTERM");
 
@@ -198,6 +250,67 @@ test("restores staged outputs after a parent termination signal settles the chil
   await assertOriginalOutputs(fixture);
   assertSignalListenersRemoved(processRef);
 });
+
+test(
+  "keeps handling repeated SIGTERM until real-process restoration and cleanup finish",
+  { timeout: 15_000 },
+  async (t) => {
+    const root = await mkdtemp(
+      resolve(tmpdir(), "revelai-clean-dist-signal-probe-"),
+    );
+    let probe;
+    t.after(async () => {
+      if (probe && probe.exitCode === null && probe.signalCode === null) {
+        probe.kill("SIGKILL");
+        await waitForProbeExit(probe, 1_000).catch(() => {});
+      }
+      await rm(root, { force: true, recursive: true });
+    });
+
+    let output = "";
+    probe = spawn(process.execPath, [signalProbePath], {
+      env: { ...process.env, REVELAI_CLEAN_SIGNAL_PROBE_ROOT: root },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    probe.stdout.on("data", (chunk) => {
+      output += chunk;
+    });
+    probe.stderr.on("data", (chunk) => {
+      output += chunk;
+    });
+
+    await waitForProbeOutput(
+      probe,
+      () => output,
+      "child-ready",
+      "signal probe",
+    );
+    assert.equal(probe.kill("SIGTERM"), true);
+    await waitForProbeOutput(
+      probe,
+      () => output,
+      "restoration-held",
+      "signal probe",
+    );
+
+    assert.equal(probe.kill("SIGTERM"), true);
+    assert.equal(probe.kill("SIGTERM"), true);
+    await delay(100);
+    assert.equal(probe.exitCode, null, output);
+    assert.equal(probe.signalCode, null, output);
+
+    probe.stdin.end("release-restoration\n");
+    const result = await waitForProbeExit(probe);
+
+    assert.deepEqual(result, { code: 0, signal: null }, output);
+    assert.equal(output.split("forwarded:SIGTERM").length - 1, 1, output);
+    assert.match(output, /sentinel-written/);
+    assert.equal(
+      await readFile(resolve(root, "restoration-sentinel.txt"), "utf8"),
+      "restored-after-listener-cleanup",
+    );
+  },
+);
 
 test(
   "builds the production router from clean web dependency outputs and restores them",
