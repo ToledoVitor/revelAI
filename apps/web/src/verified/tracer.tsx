@@ -4,6 +4,7 @@ import type {
   VerifiedResult,
 } from "@revelai/contracts";
 import {
+  ArrowsLeftRight,
   ArrowLeft,
   ArrowRight,
   Camera,
@@ -99,7 +100,7 @@ function hasRouteErrorCode(
 }
 
 function focusHeading(ref: React.RefObject<HTMLHeadingElement | null>) {
-  ref.current?.focus();
+  ref.current?.focus({ preventScroll: true });
 }
 
 type VerifiedTracerProps = Readonly<{ client: RevelApiClient }>;
@@ -392,10 +393,12 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
         <SetupProgress
           activeIndex={gateIndex}
           passedGates={displayedPassedGates}
+          landmark="setup-progress"
         />
         <p className="eyebrow">Passe contra parede</p>
         <h1
           id="verified-setup-heading"
+          data-visual-landmark="setup-heading"
           ref={headingRef}
           tabIndex={-1}
           aria-label="Preparação do desafio verificado"
@@ -433,6 +436,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           {activeGate && activeGate.id !== "device" ? (
             <button
               type="button"
+              data-visual-landmark="setup-confirm"
               disabled={stage !== "setup"}
               onClick={() =>
                 setPassedGates(
@@ -446,6 +450,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           <button
             className="setup-continue"
             type="button"
+            data-visual-landmark="setup-continue"
             disabled={stage !== "setup" || !currentGatePassed}
             onClick={() => {
               if (gateIndex === setupGates.length - 1) {
@@ -461,6 +466,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           <button
             className="setup-back"
             type="button"
+            data-visual-landmark="setup-back"
             disabled={stage !== "setup"}
             onClick={() => {
               if (gateIndex === 0) {
@@ -476,6 +482,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           <button
             className="setup-cancel"
             type="button"
+            data-visual-landmark="setup-cancel"
             disabled={stage !== "setup"}
             onClick={() => navigate("/")}
           >
@@ -493,9 +500,14 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
         className="verified-capture verified-editorial-page"
         aria-label="Envie o vídeo verificado"
       >
-        <SetupProgress activeIndex={4} passedGates={new Set(requiredGateIds)} />
+        <SetupProgress
+          activeIndex={4}
+          passedGates={new Set(requiredGateIds)}
+          landmark="capture-progress"
+        />
         <h1
           id="verified-capture-heading"
+          data-visual-landmark="capture-heading"
           ref={headingRef}
           tabIndex={-1}
           aria-label="Envie o vídeo verificado"
@@ -503,8 +515,8 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           Tudo certo. Agora, jogue.
         </h1>
         <p className="capture-intro">
-          Inclua pré-rolagem de calibração de 4 segundos e um intervalo ativo de
-          60 segundos. O servidor confirma a elegibilidade.
+          Pré-rolagem de 4 s e intervalo ativo de 60 s. O servidor confirma a
+          elegibilidade.
         </p>
         {!attemptId ? (
           <p role="status">
@@ -551,7 +563,9 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           </button>
         ) : null}
         <button
+          className="capture-submit"
           type="button"
+          data-visual-landmark="capture-submit"
           disabled={!attemptId || !media || uploading}
           onClick={() => {
             uploadGenerationRef.current += 1;
@@ -599,6 +613,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
         <p className="eyebrow">Desafio verificado</p>
         <h1
           id="processing-heading"
+          data-visual-landmark="processing-heading"
           ref={headingRef}
           tabIndex={-1}
           aria-label="Processando tentativa"
@@ -610,7 +625,11 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           O processamento continua no servidor. Atualize esta tela quando
           voltar; não prometemos uma notificação com o navegador fechado.
         </p>
-        <ol className="processing-timeline" aria-label="Andamento da análise">
+        <ol
+          className="processing-timeline"
+          aria-label="Andamento da análise"
+          data-visual-landmark="processing-timeline"
+        >
           <li className="is-complete">
             <CheckCircle aria-hidden="true" weight="fill" />
             <span>01</span>
@@ -640,13 +659,18 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           <button
             className="pending-refresh"
             type="button"
+            data-visual-landmark="pending-refresh"
             disabled={pendingPolling.refreshing}
             aria-busy={pendingPolling.refreshing}
             onClick={() => void pendingPolling.refresh()}
           >
             Atualizar agora
           </button>
-          <button type="button" onClick={() => resetToSetup()}>
+          <button
+            type="button"
+            data-visual-landmark="pending-reset"
+            onClick={() => resetToSetup()}
+          >
             Iniciar outro desafio
           </button>
         </div>
@@ -690,7 +714,12 @@ function ChallengeChoice({
       </p>
       <div className="challenge-choice-hero">
         <div>
-          <h1 id="challenge-choice-heading" ref={headingRef} tabIndex={-1}>
+          <h1
+            id="challenge-choice-heading"
+            ref={headingRef}
+            tabIndex={-1}
+            data-visual-landmark="challenge-heading"
+          >
             Escolha. Prepare. Compita.
           </h1>
           <span className="heading-rule" aria-hidden="true" />
@@ -704,7 +733,10 @@ function ChallengeChoice({
         />
       </div>
       <section className="challenge-list" aria-label="Desafios disponíveis">
-        <article className="challenge-card challenge-card--selected">
+        <article
+          className="challenge-card challenge-card--selected"
+          data-visual-landmark="challenge-card"
+        >
           <span className="challenge-number" aria-hidden="true">
             01
           </span>
@@ -720,12 +752,15 @@ function ChallengeChoice({
                 <Footprints aria-hidden="true" weight="light" /> ambos os pés
               </li>
               <li>
+                <ArrowsLeftRight aria-hidden="true" weight="light" /> 3 metros
+              </li>
+              <li>
                 <Camera aria-hidden="true" weight="light" /> câmera calibrada
               </li>
             </ul>
           </div>
         </article>
-        <article className="challenge-card" aria-disabled="true">
+        <article className="challenge-card">
           <span className="challenge-number" aria-hidden="true">
             02
           </span>
@@ -733,9 +768,15 @@ function ChallengeChoice({
             <h2>Controle bilateral</h2>
             <p>Toques alternados com ambos os pés por 30 segundos.</p>
           </div>
-          <span>Em breve</span>
+          <button
+            type="button"
+            disabled
+            aria-describedby="challenge-upcoming-explanation"
+          >
+            Em breve
+          </button>
         </article>
-        <article className="challenge-card" aria-disabled="true">
+        <article className="challenge-card">
           <span className="challenge-number" aria-hidden="true">
             03
           </span>
@@ -743,10 +784,24 @@ function ChallengeChoice({
             <h2>Condução em slalom</h2>
             <p>Conduza entre os cones no menor tempo possível.</p>
           </div>
-          <span>Em breve</span>
+          <button
+            type="button"
+            disabled
+            aria-describedby="challenge-upcoming-explanation"
+          >
+            Em breve
+          </button>
         </article>
       </section>
-      <button className="challenge-prepare" type="button" onClick={onPrepare}>
+      <p id="challenge-upcoming-explanation" className="sr-only">
+        Este desafio estará disponível em breve.
+      </p>
+      <button
+        className="challenge-prepare"
+        type="button"
+        data-visual-landmark="challenge-prepare"
+        onClick={onPrepare}
+      >
         Preparar desafio <ArrowRight aria-hidden="true" weight="light" />
       </button>
     </main>
@@ -756,14 +811,17 @@ function ChallengeChoice({
 function SetupProgress({
   activeIndex,
   passedGates,
+  landmark,
 }: Readonly<{
   activeIndex: number;
   passedGates: ReadonlySet<SetupGate["id"]>;
+  landmark?: string;
 }>) {
   return (
     <ol
       className="verified-progress"
       aria-label={`Etapa ${activeIndex + 1} de ${setupGates.length}`}
+      data-visual-landmark={landmark}
     >
       {setupGates.map((gate, index) => {
         const passed = passedGates.has(gate.id);
@@ -836,7 +894,7 @@ function CalibrationGuidance({
           );
         })}
       </ul>
-      <p className="calibration-truth">
+      <p className="calibration-truth" data-visual-landmark="calibration-truth">
         <Warning aria-hidden="true" weight="light" /> A ativação só será
         liberada após a calibração confirmada pelo fluxo.
       </p>
@@ -940,9 +998,12 @@ function VerifiedReport({
       className="verified-report"
       aria-label="Resultado do desafio verificado"
     >
-      <p className="report-truth">{truth}</p>
+      <p className="report-truth" data-visual-landmark="report-truth">
+        {truth}
+      </p>
       <h1
         id="verified-report-heading"
+        data-visual-landmark="report-heading"
         ref={headingRef}
         tabIndex={-1}
         aria-label="Resultado do desafio verificado"
@@ -951,7 +1012,11 @@ function VerifiedReport({
       </h1>
       <p className="report-challenge">Passe contra parede · 60 s</p>
       <p className="sr-only">Score: {result.score}</p>
-      <section className="report-scorecard" aria-label="Resumo da validação">
+      <section
+        className="report-scorecard"
+        aria-label="Resumo da validação"
+        data-visual-landmark="report-scorecard"
+      >
         <div>
           <span>Score</span>
           <strong>{result.score}</strong>
@@ -964,7 +1029,7 @@ function VerifiedReport({
           </div>
         ) : null}
       </section>
-      <dl className="report-metrics">
+      <dl className="report-metrics" data-visual-landmark="report-metrics">
         <dt>Passes válidos</dt>
         <dd>{result.metrics.validPasses} passes</dd>
         <dt>Precisão</dt>

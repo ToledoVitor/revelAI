@@ -234,6 +234,25 @@ describe("production verified tracer", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("states the three-metre wall-pass requirement and exposes upcoming choices as disabled buttons", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+
+    expect(screen.getByText("3 metros")).toBeVisible();
+    const upcoming = screen.getAllByRole("button", { name: "Em breve" });
+    expect(upcoming).toHaveLength(2);
+    for (const button of upcoming) {
+      expect(button).toBeDisabled();
+      expect(button).toHaveAccessibleDescription(
+        "Este desafio estará disponível em breve.",
+      );
+    }
+  });
+
   it("mounts the verified owner before running the exact session-ready-attempt-media sequence", async () => {
     const user = userEvent.setup();
     const fetchSpy = vi.fn(

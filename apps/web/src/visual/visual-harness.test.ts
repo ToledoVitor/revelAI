@@ -5,9 +5,12 @@ import {
   comparePixels,
   createCaptureMetadata,
   createOverlayPlan,
+  assertReferenceVisualMismatch,
+  getReferenceVisualGate,
   getVisualReference,
   getUiInkCoverageBaselines,
   selectFixture,
+  assertReferenceVisualLandmarks,
 } from "./visual-harness";
 import { CANONICAL_LINUX_RENDERER } from "./visual-gate";
 
@@ -111,6 +114,52 @@ describe("visual harness", () => {
         }),
       ).toBe(reference);
     }
+  });
+
+  it("keeps independently approved non-home pixel limits and rejects missing or cropped landmarks", () => {
+    const gate = getReferenceVisualGate({
+      route: "/verified",
+      state: "calibration-guidance",
+      viewport: { width: 390, height: 844 },
+    });
+
+    expect(gate.maxMismatchRatio).toBeLessThan(1);
+    expect(gate.requiredLandmarks).toContain("setup-confirm");
+    expect(() =>
+      assertReferenceVisualMismatch({
+        state: "calibration-guidance",
+        mismatchRatio: gate.maxMismatchRatio + 0.001,
+        gate,
+      }),
+    ).toThrow("exceeded");
+    expect(() =>
+      assertReferenceVisualLandmarks({
+        viewport: { width: 390, height: 844 },
+        requiredLandmarks: gate.requiredLandmarks,
+        landmarks: gate.requiredLandmarks
+          .filter((id) => id !== "setup-confirm")
+          .map((id) => ({
+            id,
+            left: 12,
+            top: 12,
+            right: 378,
+            bottom: 48,
+          })),
+      }),
+    ).toThrow("setup-confirm");
+    expect(() =>
+      assertReferenceVisualLandmarks({
+        viewport: { width: 390, height: 844 },
+        requiredLandmarks: gate.requiredLandmarks,
+        landmarks: gate.requiredLandmarks.map((id) => ({
+          id,
+          left: 12,
+          top: 12,
+          right: 378,
+          bottom: id === "setup-cancel" ? 845 : 48,
+        })),
+      }),
+    ).toThrow("setup-cancel");
   });
 
   it("keeps an independent Linux ink floor so a missing normal control fails", () => {

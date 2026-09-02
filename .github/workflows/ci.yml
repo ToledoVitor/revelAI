@@ -23,6 +23,8 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Provision codec-backed C10 demo media acceptance
+        run: sudo apt-get update && sudo apt-get install --yes ffmpeg
       - run: pnpm --filter @revelai/web exec playwright install --with-deps chromium
       - run: pnpm check
       - run: pnpm --filter @revelai/web run test:production-router

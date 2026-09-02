@@ -160,7 +160,7 @@ function Shell({ client, reviewCapturePort, reviewSetupPort }: ShellProps) {
 
   return (
     <div className="app-shell" style={appTheme}>
-      <header className="site-header">
+      <header className="site-header" data-visual-landmark="site-header">
         <Brand />
         <button
           ref={navigationToggleRef}

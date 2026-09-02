@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createDemoMediaFixtures } from "./demo-media-fixtures.mjs";
 const webRoot = fileURLToPath(new URL("../", import.meta.url));
 const repositoryRoot = resolve(webRoot, "../..");
 const apiRoot = resolve(repositoryRoot, "apps/api");
@@ -19,8 +20,9 @@ const mediaDirectory = resolve(webRoot, "coverage/demo-media");
 const apiPort = 4174;
 const webPort = 4175;
 const apiOrigin = `http://127.0.0.1:${apiPort}`;
-// The C10 check runtime supplies the compatible media probe/extraction fact;
-// these bytes exercise the same multipart storage boundary without a host codec.
+const serveCheck = process.argv.includes("--serve-check");
+// This is kept only for the explicit --serve-check smoke server. Required
+// demo-browser acceptance uses the codec-generated C10 fixtures instead.
 const c10CheckMedia = Buffer.from([
   0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 1, 2, 3, 4,
 ]);
@@ -56,7 +58,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 function startDemoApi(root) {
   return spawn(
     process.execPath,
-    ["scripts/start-local-demo.mjs", "--serve-check"],
+    ["scripts/start-local-demo.mjs", ...(serveCheck ? ["--serve-check"] : [])],
     {
       cwd: apiRoot,
       env: {
@@ -72,6 +74,10 @@ function startDemoApi(root) {
 }
 
 async function createMediaFixtures() {
+  if (!serveCheck) {
+    await createDemoMediaFixtures({ directory: mediaDirectory });
+    return;
+  }
   await Promise.all([
     writeFile(join(mediaDirectory, "free-portrait.mp4"), c10CheckMedia),
     writeFile(join(mediaDirectory, "verified-landscape.mp4"), c10CheckMedia),

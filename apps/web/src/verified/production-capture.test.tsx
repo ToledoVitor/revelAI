@@ -109,8 +109,21 @@ describe("production verified capture", () => {
     expect(
       screen.getByRole("button", { name: "Iniciar gravação" }),
     ).toBeEnabled();
-    expect(screen.getByLabelText("Enviar vídeo existente")).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Enviar vídeo existente" }),
+    ).toBeEnabled();
     expect(screen.getByText("Requisitos da captura")).toBeVisible();
+  });
+
+  it("uses a focusable button for existing-video selection", async () => {
+    const user = userEvent.setup();
+    render(<ProductionCapture disabled={false} onMedia={vi.fn()} />);
+
+    await user.tab();
+    await user.tab();
+    expect(
+      screen.getByRole("button", { name: "Enviar vídeo existente" }),
+    ).toHaveFocus();
   });
 
   it("uses the exact MIME preference and 5 + 4 + 60 second automatic capture timeline", async () => {
@@ -183,7 +196,9 @@ describe("production verified capture", () => {
     installRecorder();
     render(<ProductionCapture disabled={false} onMedia={vi.fn()} />);
 
-    expect(screen.getByLabelText("Enviar vídeo existente")).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Enviar vídeo existente" }),
+    ).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Iniciar gravação" }));
     expect(
       await screen.findByRole("button", { name: "Tentar novamente" }),

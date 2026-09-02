@@ -1,4 +1,5 @@
 import { MAX_UPLOAD_BYTES } from "@revelai/contracts";
+import { UploadSimple } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import {
   captureRequirementLines,
@@ -33,6 +34,7 @@ export function ProductionCapture({
   onMedia(file?: File): void;
 }>) {
   const previewRef = useRef<HTMLVideoElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const streamRef = useRef<MediaStream | undefined>(undefined);
   const recorderRef = useRef<MediaRecorder | undefined>(undefined);
   const recorderListenersRef = useRef<
@@ -369,6 +371,7 @@ export function ProductionCapture({
         className="capture-preview"
         aria-label="Prévia da câmera"
         data-live={hasLivePreview}
+        data-visual-landmark="capture-preview"
       >
         {!hasLivePreview ? (
           <img
@@ -402,15 +405,26 @@ export function ProductionCapture({
       <div className="capture-actions">
         <button
           type="button"
+          data-visual-landmark="capture-start"
           disabled={disabled || busy}
           onClick={() => void start()}
         >
           {state === "error" ? "Tentar novamente" : "Iniciar gravação"}
         </button>
-        <label htmlFor="production-video-input">Enviar vídeo existente</label>
+        <button
+          className="capture-file-select"
+          type="button"
+          data-visual-landmark="capture-file-select"
+          disabled={disabled || busy}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <UploadSimple aria-hidden="true" weight="light" />
+          Enviar vídeo existente
+        </button>
       </div>
       <input
         id="production-video-input"
+        ref={fileInputRef}
         data-testid="production-video-input"
         type="file"
         accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm"

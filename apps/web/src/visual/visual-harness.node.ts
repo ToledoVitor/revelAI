@@ -6,9 +6,12 @@ import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 import {
   assessUiInkCoverage,
+  assertReferenceVisualMismatch,
   createCaptureMetadata,
+  getReferenceVisualGate,
   getVisualReference,
   getUiInkCoverageBaselines,
+  type VisualLandmark,
   selectFixture,
   type CaptureMetadata,
   type Viewport,
@@ -85,6 +88,7 @@ type ReferenceVisualArtifacts = {
       regions: readonly MaskRegion[];
     }>;
     image: VisualMetric;
+    exceedsBudget: boolean;
   }>;
 };
 
@@ -574,11 +578,13 @@ export async function captureReferenceVisualArtifacts({
   viewport,
   dpr,
   state,
+  landmarks,
 }: {
   page: Page;
   viewport: Viewport;
   dpr: number;
   state: string;
+  landmarks?: readonly VisualLandmark[];
 }): Promise<ReferenceVisualArtifacts> {
   const route = new URL(page.url()).pathname;
   const fixture = selectFixture({ route, state });
@@ -626,14 +632,23 @@ export async function captureReferenceVisualArtifacts({
     capture,
     regions: mask.regions,
   });
+  const gate =
+    route === "/verified"
+      ? getReferenceVisualGate({ route, state, viewport })
+      : undefined;
   const image: VisualMetric = {
     threshold,
     changedPixels,
     comparedPixels,
     mismatchRatio: changedPixels / comparedPixels,
-    maxMismatchRatio: 1,
+    maxMismatchRatio: gate?.maxMismatchRatio ?? 1,
   };
-  const comparison = { reference: referenceName, mask, image } as const;
+  const comparison = {
+    reference: referenceName,
+    mask,
+    image,
+    exceedsBudget: image.mismatchRatio > image.maxMismatchRatio,
+  } as const;
 
   await Promise.all([
     writeFile(files.normalizedReference, PNG.sync.write(reference)),
@@ -649,12 +664,20 @@ export async function captureReferenceVisualArtifacts({
           captureDimensions: { width: capture.width, height: capture.height },
           reference: referenceName,
           comparison,
+          landmarks,
         },
         null,
         2,
       )}\n`,
     ),
   ]);
+
+  if (gate)
+    assertReferenceVisualMismatch({
+      state,
+      mismatchRatio: image.mismatchRatio,
+      gate,
+    });
 
   return { metadata, files, comparison };
 }

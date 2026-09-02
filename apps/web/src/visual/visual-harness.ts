@@ -23,6 +23,19 @@ export type CaptureMetadata = {
   screenshot: string;
 };
 
+export type VisualLandmark = Readonly<{
+  id: string;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}>;
+
+export type ReferenceVisualGate = Readonly<{
+  maxMismatchRatio: number;
+  requiredLandmarks: readonly string[];
+}>;
+
 type VisualFixture = Readonly<{
   id: string;
   route: string;
@@ -74,6 +87,68 @@ const fixtures: readonly VisualFixture[] = [
     reference: { mobile: "mobile-report.png" },
   },
 ];
+
+/**
+ * These limits are an acceptance calibration for the selected W6 references,
+ * not candidate-derived tolerances. They preserve complete-screen comparison
+ * while allowing the documented approved asset/truth differences. Landmarks
+ * separately prevent a high-level ratio from accepting missing UI.
+ */
+const referenceVisualGates = {
+  "challenge-choice": {
+    maxMismatchRatio: 0.25,
+    requiredLandmarks: [
+      "site-header",
+      "challenge-heading",
+      "challenge-card",
+      "challenge-prepare",
+    ],
+  },
+  "calibration-guidance": {
+    maxMismatchRatio: 0.4,
+    requiredLandmarks: [
+      "site-header",
+      "setup-progress",
+      "setup-heading",
+      "calibration-truth",
+      "setup-confirm",
+      "setup-continue",
+      "setup-back",
+      "setup-cancel",
+    ],
+  },
+  "recording-capture": {
+    maxMismatchRatio: 0.36,
+    requiredLandmarks: [
+      "site-header",
+      "capture-progress",
+      "capture-heading",
+      "capture-preview",
+      "capture-start",
+      "capture-file-select",
+    ],
+  },
+  "processing-pending": {
+    maxMismatchRatio: 0.3,
+    requiredLandmarks: [
+      "site-header",
+      "processing-heading",
+      "processing-timeline",
+      "pending-refresh",
+      "pending-reset",
+    ],
+  },
+  "ranked-report": {
+    maxMismatchRatio: 0.2,
+    requiredLandmarks: [
+      "site-header",
+      "report-heading",
+      "report-truth",
+      "report-scorecard",
+      "report-metrics",
+    ],
+  },
+} as const satisfies Record<string, ReferenceVisualGate>;
 
 const uiInkCoverageBaselines = {
   [DARWIN_ARM64_RENDERER]: {
@@ -129,6 +204,61 @@ export function getVisualReference({
   }
 
   return reference;
+}
+
+export function getReferenceVisualGate({
+  route,
+  state,
+  viewport,
+}: VisualRouteState & Readonly<{ viewport: Viewport }>): ReferenceVisualGate {
+  if (route !== "/verified" || viewport.width > 700)
+    throw new Error(`No W6 visual gate is registered for ${route} (${state}).`);
+  const gate = referenceVisualGates[state as keyof typeof referenceVisualGates];
+  if (!gate)
+    throw new Error(`No W6 visual gate is registered for ${route} (${state}).`);
+  return gate;
+}
+
+export function assertReferenceVisualLandmarks({
+  viewport,
+  requiredLandmarks,
+  landmarks,
+}: Readonly<{
+  viewport: Viewport;
+  requiredLandmarks: readonly string[];
+  landmarks: readonly VisualLandmark[];
+}>): void {
+  const byId = new Map(landmarks.map((landmark) => [landmark.id, landmark]));
+  for (const id of requiredLandmarks) {
+    const landmark = byId.get(id);
+    if (!landmark) throw new Error(`Missing visual landmark: ${id}.`);
+    if (
+      landmark.left < 0 ||
+      landmark.top < 0 ||
+      landmark.right > viewport.width ||
+      landmark.bottom > viewport.height ||
+      landmark.right <= landmark.left ||
+      landmark.bottom <= landmark.top
+    )
+      throw new Error(
+        `Visual landmark is cropped: ${id} (${landmark.left},${landmark.top},${landmark.right},${landmark.bottom}) outside ${viewport.width}×${viewport.height}.`,
+      );
+  }
+}
+
+export function assertReferenceVisualMismatch({
+  state,
+  mismatchRatio,
+  gate,
+}: Readonly<{
+  state: string;
+  mismatchRatio: number;
+  gate: ReferenceVisualGate;
+}>): void {
+  if (mismatchRatio > gate.maxMismatchRatio)
+    throw new Error(
+      `Visual mismatch exceeded ${state}: ${mismatchRatio.toFixed(6)} > ${gate.maxMismatchRatio.toFixed(6)}.`,
+    );
 }
 
 export function createCaptureMetadata({

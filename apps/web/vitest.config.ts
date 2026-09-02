@@ -5,7 +5,11 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: "jsdom",
-    exclude: [...configDefaults.exclude, "**/*.visual.spec.ts"],
+    exclude: [
+      ...configDefaults.exclude,
+      "**/*.visual.spec.ts",
+      "scripts/**/*.test.mjs",
+    ],
     setupFiles: ["./src/test/setup.ts"],
   },
 });

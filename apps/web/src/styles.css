@@ -987,10 +987,22 @@ a:focus-visible {
   line-height: 1.35;
 }
 
-.challenge-card > span:last-child {
+.challenge-card > span:last-child,
+.challenge-card > button:last-child {
   padding-top: 0.2rem;
   color: var(--muted-gray);
   font-size: 0.76rem;
+}
+
+.challenge-card > button:last-child {
+  padding-right: 0;
+  padding-left: 0;
+  border: 0;
+  background: transparent;
+}
+
+.challenge-card > button:last-child:disabled {
+  opacity: 1;
 }
 
 .challenge-number {
@@ -1364,6 +1376,16 @@ a:focus-visible {
   cursor: pointer;
 }
 
+.capture-actions .capture-file-select {
+  color: var(--deep-emerald);
+  background: transparent;
+}
+
+.capture-actions .capture-file-select svg {
+  width: 1.2rem;
+  height: 1.2rem;
+}
+
 .production-capture > input {
   position: absolute;
   width: 1px;
@@ -1672,7 +1694,8 @@ a:focus-visible {
   }
 
   .challenge-card p:not(.challenge-kicker),
-  .challenge-card > span:last-child {
+  .challenge-card > span:last-child,
+  .challenge-card > button:last-child {
     font-size: 0.63rem;
   }
 
@@ -1693,24 +1716,119 @@ a:focus-visible {
     font-size: 0.55rem;
   }
 
+  .calibration-setup {
+    padding-top: 0.5rem;
+    padding-bottom: 0.75rem;
+  }
+
+  .calibration-setup .eyebrow {
+    display: none;
+  }
+
+  .calibration-setup h1 {
+    font-size: 3.4rem;
+  }
+
+  .setup-challenge-name {
+    margin: 0.2rem 0 0.35rem;
+    font-size: 0.85rem;
+  }
+
+  .calibration-guidance {
+    margin-top: 0.35rem;
+  }
+
   .calibration-visual {
-    height: 13.6rem;
+    height: 8.5rem;
   }
 
   .calibration-checklist li {
-    padding: 0.5rem 0;
+    grid-template-columns: 1.1rem minmax(0, 1fr);
+    gap: 0.45rem;
+    padding: 0.28rem 0;
+  }
+
+  .calibration-checklist li > svg {
+    width: 1rem;
+    height: 1rem;
+  }
+
+  .calibration-checklist strong {
+    font-size: 0.74rem;
   }
 
   .calibration-checklist small {
-    font-size: 0.63rem;
+    margin-top: 0.04rem;
+    font-size: 0.56rem;
+    line-height: 1.15;
+  }
+
+  .calibration-status {
+    margin: 0.4rem 0 0.3rem;
+    font-size: 0.69rem;
+    line-height: 1.2;
+  }
+
+  .calibration-truth {
+    gap: 0.35rem;
+    margin-top: 0.4rem;
+    padding: 0.42rem;
+    font-size: 0.62rem;
+    line-height: 1.2;
+  }
+
+  .calibration-truth svg {
+    width: 0.9rem;
+    height: 0.9rem;
+  }
+
+  .calibration-setup .setup-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.3rem;
+    margin-top: 0.45rem;
+  }
+
+  .calibration-setup .setup-actions button {
+    min-height: 2.05rem;
+    padding: 0.3rem 0.45rem;
+    font-size: 0.68rem;
+  }
+
+  .setup-continue,
+  .setup-cancel {
+    flex-basis: auto;
   }
 
   .capture-preview {
-    height: 14rem;
+    height: 11rem;
+  }
+
+  .verified-capture {
+    padding-top: 0.5rem;
+    padding-bottom: 0.75rem;
+  }
+
+  .verified-capture h1 {
+    max-width: 12ch;
+    font-size: 3.2rem;
+    line-height: 0.88;
   }
 
   .verified-capture .capture-intro {
-    margin-top: 0.65rem;
+    margin: 0.35rem 0 0.55rem;
+    font-size: 0.72rem;
+    line-height: 1.2;
+  }
+
+  .capture-actions {
+    gap: 0.35rem;
+  }
+
+  .capture-actions button,
+  .capture-actions .capture-file-select {
+    min-height: 2.55rem;
+    padding: 0.45rem 0.7rem;
     font-size: 0.84rem;
   }
 
