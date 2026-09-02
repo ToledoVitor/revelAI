@@ -570,8 +570,8 @@ export async function captureHomeVisualArtifacts({
 }
 
 /**
- * Records approved state captures through the W0 artifact pipeline without
- * enforcing its independently approved non-home pixel budget or hiding any candidate UI.
+ * Records approved state artifacts through the W0 pipeline, enforces the
+ * independently approved non-home pixel budget, and hides no candidate UI.
  */
 export async function captureReferenceVisualArtifacts({
   page,

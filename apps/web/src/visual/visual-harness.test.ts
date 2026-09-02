@@ -221,6 +221,154 @@ describe("visual harness", () => {
     ).toThrow("reference geometry");
   });
 
+  it("rejects calibration headline height, bottom, and visual-gap drift", () => {
+    const gate = getReferenceVisualGate({
+      route: "/verified",
+      state: "calibration-guidance",
+      viewport: { width: 390, height: 844 },
+    });
+    const landmarks = [
+      { id: "setup-heading", left: 27, top: 132, right: 282, bottom: 201 },
+      { id: "calibration-visual", left: 0, top: 232, right: 390, bottom: 450 },
+      { id: "setup-actions", left: 27, top: 741, right: 363, bottom: 816 },
+    ];
+    const referenceGaps = [
+      {
+        before: "setup-heading",
+        after: "calibration-visual",
+        min: 28,
+        max: 38,
+      },
+    ];
+
+    expect(gate).toMatchObject({
+      referenceGaps,
+      referenceGeometry: expect.arrayContaining([
+        expect.objectContaining({
+          id: "setup-heading",
+          height: { min: 64, max: 74 },
+          bottom: { min: 195, max: 207 },
+        }),
+      ]),
+    });
+    expect(() =>
+      assertReferenceVisualLandmarkGeometry({
+        geometry: gate.referenceGeometry,
+        referenceGaps,
+        landmarks,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertReferenceVisualLandmarkGeometry({
+        geometry: gate.referenceGeometry,
+        referenceGaps,
+        landmarks: landmarks.map((landmark) =>
+          landmark.id === "setup-heading"
+            ? { ...landmark, top: 134, bottom: 197 }
+            : landmark,
+        ),
+      }),
+    ).toThrow("setup-heading.height");
+    expect(() =>
+      assertReferenceVisualLandmarkGeometry({
+        geometry: gate.referenceGeometry,
+        referenceGaps,
+        landmarks: landmarks.map((landmark) =>
+          landmark.id === "setup-heading"
+            ? { ...landmark, top: 135, bottom: 208 }
+            : landmark,
+        ),
+      }),
+    ).toThrow("setup-heading.bottom");
+    expect(() =>
+      assertReferenceVisualLandmarkGeometry({
+        geometry: gate.referenceGeometry,
+        referenceGaps,
+        landmarks: landmarks.map((landmark) =>
+          landmark.id === "setup-heading"
+            ? { ...landmark, top: 131, bottom: 195 }
+            : landmark.id === "calibration-visual"
+              ? { ...landmark, top: 234 }
+              : landmark,
+        ),
+      }),
+    ).toThrow("setup-heading→calibration-visual");
+  });
+
+  it("rejects capture headline height, bottom, and preview-gap drift", () => {
+    const gate = getReferenceVisualGate({
+      route: "/verified",
+      state: "recording-capture",
+      viewport: { width: 390, height: 844 },
+    });
+    const landmarks = [
+      { id: "capture-heading", left: 27, top: 138, right: 296, bottom: 311 },
+      { id: "capture-preview", left: 27, top: 326, right: 363, bottom: 574 },
+      { id: "capture-actions", left: 27, top: 634, right: 363, bottom: 736 },
+    ];
+    const referenceGaps = [
+      {
+        before: "capture-heading",
+        after: "capture-preview",
+        min: 10,
+        max: 22,
+      },
+    ];
+
+    expect(gate).toMatchObject({
+      referenceGaps,
+      referenceGeometry: expect.arrayContaining([
+        expect.objectContaining({
+          id: "capture-heading",
+          height: { min: 166, max: 180 },
+          bottom: { min: 303, max: 317 },
+        }),
+      ]),
+    });
+    expect(() =>
+      assertReferenceVisualLandmarkGeometry({
+        geometry: gate.referenceGeometry,
+        referenceGaps,
+        landmarks,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertReferenceVisualLandmarkGeometry({
+        geometry: gate.referenceGeometry,
+        referenceGaps,
+        landmarks: landmarks.map((landmark) =>
+          landmark.id === "capture-heading"
+            ? { ...landmark, top: 142, bottom: 307 }
+            : landmark,
+        ),
+      }),
+    ).toThrow("capture-heading.height");
+    expect(() =>
+      assertReferenceVisualLandmarkGeometry({
+        geometry: gate.referenceGeometry,
+        referenceGaps,
+        landmarks: landmarks.map((landmark) =>
+          landmark.id === "capture-heading"
+            ? { ...landmark, top: 140, bottom: 318 }
+            : landmark,
+        ),
+      }),
+    ).toThrow("capture-heading.bottom");
+    expect(() =>
+      assertReferenceVisualLandmarkGeometry({
+        geometry: gate.referenceGeometry,
+        referenceGaps,
+        landmarks: landmarks.map((landmark) =>
+          landmark.id === "capture-heading"
+            ? { ...landmark, top: 140, bottom: 306 }
+            : landmark.id === "capture-preview"
+              ? { ...landmark, top: 330 }
+              : landmark,
+        ),
+      }),
+    ).toThrow("capture-heading→capture-preview");
+  });
+
   it("keeps an independent Linux ink floor so a missing normal control fails", () => {
     const canonicalDesktop = {
       viewport: { width: 1440, height: 1024 },

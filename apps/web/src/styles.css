@@ -1709,6 +1709,7 @@ a:focus-visible {
     position: absolute;
     top: 18rem;
     left: 0;
+    max-width: min(10rem, calc(60% - 3.6rem));
     font-size: 0.75rem;
   }
 
@@ -1780,7 +1781,7 @@ a:focus-visible {
   .calibration-setup h1 {
     max-width: none;
     font-size: 3.4rem;
-    transform: scaleX(0.76);
+    transform: translateY(0.45rem) scaleX(0.76) scaleY(1.43);
     transform-origin: top left;
   }
 
@@ -1790,7 +1791,7 @@ a:focus-visible {
   }
 
   .calibration-guidance {
-    margin-top: 1rem;
+    margin-top: 0.75rem;
   }
 
   .calibration-visual {
@@ -1870,8 +1871,8 @@ a:focus-visible {
   .verified-capture h1 {
     max-width: 12ch;
     font-size: 4.4rem;
-    line-height: 0.88;
-    transform: scaleX(0.8);
+    line-height: 0.8;
+    transform: scaleX(0.8) scaleY(1.54);
     transform-origin: top left;
   }
 
@@ -1880,7 +1881,7 @@ a:focus-visible {
   }
 
   .verified-capture .production-capture {
-    margin-top: 2rem;
+    margin-top: 3.25rem;
   }
 
   .capture-actions {

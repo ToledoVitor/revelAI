@@ -35,6 +35,7 @@ export type ReferenceVisualGate = Readonly<{
   maxMismatchRatio: number;
   requiredLandmarks: readonly string[];
   referenceGeometry: readonly ReferenceLandmarkGeometry[];
+  referenceGaps: readonly ReferenceLandmarkGap[];
 }>;
 
 type ReferenceAxisRange = Readonly<{ min: number; max: number }>;
@@ -45,6 +46,14 @@ export type ReferenceLandmarkGeometry = Readonly<{
   top: ReferenceAxisRange;
   right: ReferenceAxisRange;
   bottom: ReferenceAxisRange;
+  height?: ReferenceAxisRange;
+}>;
+
+export type ReferenceLandmarkGap = Readonly<{
+  before: string;
+  after: string;
+  min: number;
+  max: number;
 }>;
 
 type VisualFixture = Readonly<{
@@ -137,6 +146,7 @@ const referenceVisualGates = {
         bottom: { min: 785, max: 815 },
       },
     ],
+    referenceGaps: [],
   },
   "calibration-guidance": {
     maxMismatchRatio: 0.4,
@@ -154,16 +164,17 @@ const referenceVisualGates = {
       {
         id: "setup-heading",
         left: { min: 20, max: 36 },
-        top: { min: 120, max: 150 },
+        top: { min: 128, max: 138 },
         right: { min: 225, max: 290 },
-        bottom: { min: 170, max: 210 },
+        bottom: { min: 195, max: 207 },
+        height: { min: 64, max: 74 },
       },
       {
         id: "calibration-visual",
         left: { min: 0, max: 5 },
-        top: { min: 220, max: 250 },
+        top: { min: 230, max: 238 },
         right: { min: 385, max: 390 },
-        bottom: { min: 430, max: 470 },
+        bottom: { min: 444, max: 456 },
       },
       {
         id: "setup-actions",
@@ -171,6 +182,14 @@ const referenceVisualGates = {
         top: { min: 735, max: 775 },
         right: { min: 350, max: 370 },
         bottom: { min: 805, max: 844 },
+      },
+    ],
+    referenceGaps: [
+      {
+        before: "setup-heading",
+        after: "calibration-visual",
+        min: 28,
+        max: 38,
       },
     ],
   },
@@ -188,14 +207,15 @@ const referenceVisualGates = {
       {
         id: "capture-heading",
         left: { min: 20, max: 36 },
-        top: { min: 120, max: 155 },
+        top: { min: 132, max: 148 },
         right: { min: 220, max: 330 },
-        bottom: { min: 260, max: 315 },
+        bottom: { min: 303, max: 317 },
+        height: { min: 166, max: 180 },
       },
       {
         id: "capture-preview",
         left: { min: 20, max: 36 },
-        top: { min: 310, max: 345 },
+        top: { min: 320, max: 334 },
         right: { min: 350, max: 370 },
         bottom: { min: 560, max: 600 },
       },
@@ -205,6 +225,14 @@ const referenceVisualGates = {
         top: { min: 610, max: 650 },
         right: { min: 350, max: 370 },
         bottom: { min: 720, max: 755 },
+      },
+    ],
+    referenceGaps: [
+      {
+        before: "capture-heading",
+        after: "capture-preview",
+        min: 10,
+        max: 22,
       },
     ],
   },
@@ -218,6 +246,7 @@ const referenceVisualGates = {
       "pending-reset",
     ],
     referenceGeometry: [],
+    referenceGaps: [],
   },
   "ranked-report": {
     maxMismatchRatio: 0.2,
@@ -229,6 +258,7 @@ const referenceVisualGates = {
       "report-metrics",
     ],
     referenceGeometry: [],
+    referenceGaps: [],
   },
 } as const satisfies Record<string, ReferenceVisualGate>;
 
@@ -330,9 +360,11 @@ export function assertReferenceVisualLandmarks({
 
 export function assertReferenceVisualLandmarkGeometry({
   geometry,
+  referenceGaps = [],
   landmarks,
 }: Readonly<{
   geometry: readonly ReferenceLandmarkGeometry[];
+  referenceGaps?: readonly ReferenceLandmarkGap[];
   landmarks: readonly VisualLandmark[];
 }>): void {
   const byId = new Map(landmarks.map((landmark) => [landmark.id, landmark]));
@@ -348,6 +380,26 @@ export function assertReferenceVisualLandmarkGeometry({
           `Visual landmark reference geometry drift: ${reference.id}.${axis} ${actual} outside ${expected.min}–${expected.max}.`,
         );
     }
+    if (reference.height) {
+      const actual = landmark.bottom - landmark.top;
+      if (actual < reference.height.min || actual > reference.height.max)
+        throw new Error(
+          `Visual landmark reference geometry drift: ${reference.id}.height ${actual} outside ${reference.height.min}–${reference.height.max}.`,
+        );
+    }
+  }
+  for (const referenceGap of referenceGaps) {
+    const before = byId.get(referenceGap.before);
+    const after = byId.get(referenceGap.after);
+    if (!before || !after)
+      throw new Error(
+        `Missing reference gap landmark: ${referenceGap.before}→${referenceGap.after}.`,
+      );
+    const actual = after.top - before.bottom;
+    if (actual < referenceGap.min || actual > referenceGap.max)
+      throw new Error(
+        `Visual landmark reference gap drift: ${referenceGap.before}→${referenceGap.after} ${actual} outside ${referenceGap.min}–${referenceGap.max}.`,
+      );
   }
 }
 

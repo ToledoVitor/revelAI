@@ -123,6 +123,7 @@ async function assertApprovedViewport(
   });
   assertReferenceVisualLandmarkGeometry({
     geometry: gate.referenceGeometry,
+    referenceGaps: gate.referenceGaps,
     landmarks,
   });
   expect(
