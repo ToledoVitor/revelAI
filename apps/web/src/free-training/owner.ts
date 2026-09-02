@@ -80,16 +80,17 @@ function newUuid(): string {
 /** Verifies storage without reading, replacing, or clearing either ownership key. */
 function hasVerifiedSessionStorage(): boolean {
   const probe = newUuid();
+  let acceptedWrite = false;
   try {
     window.sessionStorage.setItem(storageProbeKey, probe);
     const stored = readRaw(storageProbeKey);
-    if (stored.kind !== "available" || stored.value !== probe) return false;
-    window.sessionStorage.removeItem(storageProbeKey);
-    const removed = readRaw(storageProbeKey);
-    return removed.kind === "available" && removed.value === null;
+    acceptedWrite = stored.kind === "available" && stored.value === probe;
   } catch {
-    return false;
+    acceptedWrite = false;
   }
+  // Always recover a failed probe when possible; this key is never ownership.
+  const clearedProbe = clear(storageProbeKey);
+  return acceptedWrite && clearedProbe;
 }
 
 function parseOwner(value: unknown): FreeTrainingOwner | undefined {
@@ -169,15 +170,18 @@ export function clearFreeTrainingCreateIntent(): boolean {
 
 /** Attempts both removals even when the first one fails. */
 export function clearFreeTrainingOwnership(): FreeTrainingOwnershipCleanup {
-  if (!hasVerifiedSessionStorage()) return "unavailable";
+  const storageHealthy = hasVerifiedSessionStorage();
   const ownerCleared = clearFreeTrainingOwner();
   const intentCleared = clearFreeTrainingCreateIntent();
-  return ownerCleared && intentCleared ? "cleared" : "unavailable";
+  return storageHealthy && ownerCleared && intentCleared
+    ? "cleared"
+    : "unavailable";
 }
 
 export function clearFreeTrainingOwnershipForAttempt(
   attemptId: string,
 ): FreeTrainingOwnershipCleanup {
+  if (!hasVerifiedSessionStorage()) return "unavailable";
   const owner = readOwner();
   if (owner.kind === "unavailable") return "unavailable";
   if (owner.value?.attemptId !== attemptId) return "not-owned";

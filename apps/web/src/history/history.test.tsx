@@ -415,6 +415,111 @@ describe("training history", () => {
       window.sessionStorage.getItem("revelai.free-training.owner.v1"),
     ).toBe(JSON.stringify({ attemptId: "attempt-fresh-after-delete" }));
   });
+
+  it.each([
+    [
+      "throws",
+      (): string | null => {
+        throw new DOMException("blocked", "SecurityError");
+      },
+    ],
+    ["silently reads null", (): string | null => null],
+  ] as const)(
+    "holds a deleted owned Free attempt for coordinated cleanup when storage get %s",
+    async (_label, unavailableRead) => {
+      const user = userEvent.setup();
+      const attempt = pendingAttempt(
+        "attempt-history-owned-outage",
+        "2026-08-30T13:00:00.000Z",
+      );
+      const oldKey = "e1111111-1111-4111-8111-111111111111";
+      const originalGet = Storage.prototype.getItem;
+      const rawRead = originalGet.bind(window.sessionStorage);
+      let storageUnavailable = false;
+      let creates = 0;
+      window.sessionStorage.setItem(
+        "revelai.free-training.owner.v1",
+        JSON.stringify({ attemptId: attempt.id }),
+      );
+      window.sessionStorage.setItem(
+        "revelai.free-training.create-intent.v1",
+        JSON.stringify({ idempotencyKey: oldKey }),
+      );
+      server.use(
+        http.get("*/v1/attempts", () =>
+          HttpResponse.json({ items: [attempt], nextCursor: null }),
+        ),
+        http.delete(
+          "*/v1/attempts/attempt-history-owned-outage",
+          () => new HttpResponse(null, { status: 204 }),
+        ),
+        http.post("*/v1/attempts", async ({ request }) => {
+          creates += 1;
+          expect(request.headers.get("idempotency-key")).not.toBe(oldKey);
+          return HttpResponse.json(
+            {
+              ...attempt,
+              id: "attempt-history-fresh-after-cleanup",
+              outcome: {
+                ...attempt.outcome,
+                attemptId: "attempt-history-fresh-after-cleanup",
+              },
+            },
+            { status: 201 },
+          );
+        }),
+      );
+      vi.spyOn(Storage.prototype, "getItem").mockImplementation(
+        function getItem(this: Storage, key: string): string | null {
+          return this !== window.sessionStorage || !storageUnavailable
+            ? originalGet.call(this, key)
+            : unavailableRead();
+        },
+      );
+
+      render(<App />);
+      await user.click(screen.getByRole("link", { name: "Meus treinos" }));
+      await screen.findByText(/13:00/);
+      const rawOwner = rawRead("revelai.free-training.owner.v1");
+      const rawIntent = rawRead("revelai.free-training.create-intent.v1");
+
+      storageUnavailable = true;
+      await user.click(screen.getByRole("button", { name: "Excluir treino" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "O treino foi excluído, mas a limpeza neste dispositivo precisa ser concluída.",
+      );
+      expect(
+        screen.getByRole("button", { name: "Concluir limpeza" }),
+      ).toBeEnabled();
+      expect(rawRead("revelai.free-training.owner.v1")).toBe(rawOwner);
+      expect(rawRead("revelai.free-training.create-intent.v1")).toBe(rawIntent);
+      expect(creates).toBe(0);
+
+      storageUnavailable = false;
+      await user.click(
+        screen.getByRole("button", { name: "Concluir limpeza" }),
+      );
+      expect(await screen.findByText("Treino excluído.")).toHaveAttribute(
+        "role",
+        "status",
+      );
+      expect(
+        screen.getByRole("heading", {
+          name: "Meus treinos neste dispositivo",
+          level: 1,
+        }),
+      ).toHaveFocus();
+      expect(rawRead("revelai.free-training.owner.v1")).toBeNull();
+      expect(rawRead("revelai.free-training.create-intent.v1")).toBeNull();
+
+      await user.click(screen.getByRole("link", { name: "Início" }));
+      await user.click(screen.getByRole("button", { name: "Treino livre" }));
+      expect(
+        await screen.findByRole("button", { name: "Selecionar vídeo" }),
+      ).toBeEnabled();
+      expect(creates).toBe(1);
+    },
+  );
 });
 
 function pendingAttempt(id: string, createdAt: string) {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   beginFreeTrainingCreateIntent,
   clearFreeTrainingCreateIntent,
+  clearFreeTrainingOwnership,
   clearFreeTrainingOwnershipForAttempt,
   freeTrainingCreateIntentStorageKey,
   freeTrainingOwnerStorageKey,
@@ -47,6 +48,37 @@ describe("Free training causal ownership", () => {
   });
 
   it.each([
+    [
+      "throws",
+      (): string | null => {
+        throw new DOMException("blocked", "SecurityError");
+      },
+    ],
+    ["silently reads null", (): string | null => null],
+  ] as const)(
+    "never treats a matching owner as absent when storage get %s during deletion cleanup",
+    (_label, unavailableRead) => {
+      const originalGet = Storage.prototype.getItem;
+      persistFreeTrainingOwner("attempt-owned");
+      const intent = beginFreeTrainingCreateIntent();
+      const rawRead = originalGet.bind(window.sessionStorage);
+      vi.spyOn(Storage.prototype, "getItem").mockImplementation(
+        unavailableRead,
+      );
+
+      expect(clearFreeTrainingOwnershipForAttempt("attempt-owned")).toBe(
+        "unavailable",
+      );
+      expect(rawRead(freeTrainingOwnerStorageKey)).toBe(
+        JSON.stringify({ attemptId: "attempt-owned" }),
+      );
+      expect(rawRead(freeTrainingCreateIntentStorageKey)).toBe(
+        JSON.stringify(intent),
+      );
+    },
+  );
+
+  it.each([
     ["get throws", "getItem"],
     ["get is a noop", "get-noop"],
     ["set throws", "setItem"],
@@ -72,6 +104,33 @@ describe("Free training causal ownership", () => {
       expect(() => beginFreeTrainingCreateIntent()).toThrow(
         "Free training session storage is unavailable",
       );
+    },
+  );
+
+  it.each(["throws", "silently refuses"] as const)(
+    "attempts both ownership removals even when the storage probe %s",
+    (behavior) => {
+      const originalRemove = Storage.prototype.removeItem;
+      persistFreeTrainingOwner("attempt-owned");
+      beginFreeTrainingCreateIntent();
+      const removals: string[] = [];
+      vi.spyOn(Storage.prototype, "removeItem").mockImplementation(
+        function removeItem(this: Storage, key: string): void {
+          removals.push(key);
+          if (behavior === "throws")
+            throw new DOMException("blocked", "SecurityError");
+          return;
+        },
+      );
+
+      expect(clearFreeTrainingOwnership()).toBe("unavailable");
+      expect(removals).toContain(freeTrainingOwnerStorageKey);
+      expect(removals).toContain(freeTrainingCreateIntentStorageKey);
+
+      vi.restoreAllMocks();
+      expect(clearFreeTrainingOwnership()).toBe("cleared");
+      expect(window.sessionStorage).toHaveLength(0);
+      expect(originalRemove).toBe(Storage.prototype.removeItem);
     },
   );
 

@@ -1589,6 +1589,91 @@ describe("production Free Training tracer", () => {
     expect(confirm).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    [
+      "throws",
+      (): string | null => {
+        throw new DOMException("blocked", "SecurityError");
+      },
+    ],
+    ["silently reads null", (): string | null => null],
+  ] as const)(
+    "keeps direct Free deletion blocked when owner storage get %s after DELETE 204",
+    async (_label, unavailableRead) => {
+      const user = userEvent.setup();
+      vi.spyOn(window, "confirm").mockReturnValue(true);
+      const originalGet = Storage.prototype.getItem;
+      const rawRead = originalGet.bind(window.sessionStorage);
+      let storageUnavailable = false;
+      let creates = 0;
+      vi.spyOn(Storage.prototype, "getItem").mockImplementation(
+        function getItem(this: Storage, key: string): string | null {
+          return this !== window.sessionStorage || !storageUnavailable
+            ? originalGet.call(this, key)
+            : unavailableRead();
+        },
+      );
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const pathname = new URL(input.toString()).pathname;
+          if (pathname === "/v1/attempts" && init?.method === "POST") {
+            creates += 1;
+            return response(
+              creates === 1
+                ? createdFreeAttempt
+                : {
+                    ...createdFreeAttempt,
+                    id: "attempt-free-after-cleanup",
+                    outcome: {
+                      ...createdFreeAttempt.outcome,
+                      attemptId: "attempt-free-after-cleanup",
+                    },
+                  },
+              201,
+            );
+          }
+          if (pathname === "/v1/attempts/attempt-free-w5-1/media")
+            return response(acceptedFreeUpload, 202);
+          if (pathname === "/v1/attempts/attempt-free-w5-1/result")
+            return response(freeInsight);
+          if (
+            pathname === "/v1/attempts/attempt-free-w5-1" &&
+            init?.method === "DELETE"
+          )
+            return new Response(null, { status: 204 });
+          throw new Error(`Unexpected request: ${pathname}`);
+        }),
+      );
+
+      render(<App />);
+      await enterFreePending(user);
+      await user.click(screen.getByRole("button", { name: "Atualizar agora" }));
+      await screen.findByText("Mantenha a bola visível durante a sequência.");
+      const rawOwner = rawRead("revelai.free-training.owner.v1");
+      const rawIntent = rawRead("revelai.free-training.create-intent.v1");
+
+      storageUnavailable = true;
+      await user.click(screen.getByRole("button", { name: "Excluir treino" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Não foi possível guardar este treino livre neste dispositivo.",
+      );
+      expect(window.location.pathname).toBe("/free-training");
+      expect(creates).toBe(1);
+      expect(rawRead("revelai.free-training.owner.v1")).toBe(rawOwner);
+      expect(rawRead("revelai.free-training.create-intent.v1")).toBe(rawIntent);
+
+      storageUnavailable = false;
+      await user.click(
+        screen.getByRole("button", { name: "Tentar novamente" }),
+      );
+      expect(
+        await screen.findByRole("button", { name: "Selecionar vídeo" }),
+      ).toBeEnabled();
+      expect(creates).toBe(2);
+    },
+  );
+
   it("serializes same-tick Free deletion and aborts its stale request on unmount", async () => {
     const user = userEvent.setup();
     vi.spyOn(window, "confirm").mockReturnValue(true);

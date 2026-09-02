@@ -43,6 +43,9 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
       ? "Treino excluído."
       : null,
   );
+  const [ownershipCleanupAttemptId, setOwnershipCleanupAttemptId] = useState<
+    string | undefined
+  >(undefined);
   const history = useInfiniteQuery({
     queryKey: trainingHistoryQueryKey,
     initialPageParam: undefined as HistoryPageParam,
@@ -52,25 +55,34 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
       }),
     getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
   });
+  const completeDeletedAttempt = (id: string) => {
+    setOwnershipCleanupAttemptId(undefined);
+    queryClient.setQueryData<
+      InfiniteData<AttemptListResponse, HistoryPageParam>
+    >(trainingHistoryQueryKey, (current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        pages: current.pages.map((page) => ({
+          ...page,
+          items: page.items.filter((attempt) => attempt.id !== id),
+        })),
+      };
+    });
+    setDeleteMessage("Treino excluído.");
+    headingRef.current?.focus();
+  };
+
   const deleteAttempt = useMutation({
     mutationFn: (id: string) => client.deleteAttempt(id),
     onMutate: () => setDeleteMessage(null),
     onSuccess: (_result, id) => {
-      clearFreeTrainingOwnershipForAttempt(id);
-      queryClient.setQueryData<
-        InfiniteData<AttemptListResponse, HistoryPageParam>
-      >(trainingHistoryQueryKey, (current) => {
-        if (!current) return current;
-        return {
-          ...current,
-          pages: current.pages.map((page) => ({
-            ...page,
-            items: page.items.filter((attempt) => attempt.id !== id),
-          })),
-        };
-      });
-      setDeleteMessage("Treino excluído.");
-      headingRef.current?.focus();
+      if (clearFreeTrainingOwnershipForAttempt(id) === "unavailable") {
+        setOwnershipCleanupAttemptId(id);
+        headingRef.current?.focus();
+        return;
+      }
+      completeDeletedAttempt(id);
     },
     onSettled: (_result, _error, id) => {
       if (deleteLockRef.current === id) deleteLockRef.current = undefined;
@@ -86,7 +98,7 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
   const initialLoadFailed =
     history.isError && !history.isFetchNextPageError && attempts.length === 0;
   const requestDelete = (id: string) => {
-    if (deleteLockRef.current) return;
+    if (deleteLockRef.current || ownershipCleanupAttemptId) return;
     deleteLockRef.current = id;
     if (
       !window.confirm(
@@ -98,6 +110,17 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
     }
     deleteAttempt.mutate(id);
   };
+  const retryOwnershipCleanup = () => {
+    if (!ownershipCleanupAttemptId) return;
+    if (
+      clearFreeTrainingOwnershipForAttempt(ownershipCleanupAttemptId) ===
+      "unavailable"
+    ) {
+      headingRef.current?.focus();
+      return;
+    }
+    completeDeletedAttempt(ownershipCleanupAttemptId);
+  };
 
   return (
     <main
@@ -107,7 +130,19 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
       <h1 id="training-history-heading" ref={headingRef} tabIndex={-1}>
         Meus treinos neste dispositivo
       </h1>
-      {deleteMessage ? <p role="status">{deleteMessage}</p> : null}
+      {ownershipCleanupAttemptId ? (
+        <section aria-label="Limpeza pendente do treino excluído">
+          <p role="alert">
+            O treino foi excluído, mas a limpeza neste dispositivo precisa ser
+            concluída.
+          </p>
+          <button type="button" onClick={retryOwnershipCleanup}>
+            Concluir limpeza
+          </button>
+        </section>
+      ) : deleteMessage ? (
+        <p role="status">{deleteMessage}</p>
+      ) : null}
       {history.isPending ? <p role="status">Carregando treinos.</p> : null}
       {initialLoadFailed ? (
         <section aria-label="Erro ao carregar treinos">
@@ -138,7 +173,9 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
                     ? "Excluindo treino"
                     : "Excluir treino"
                 }
-                disabled={deleteAttempt.isPending}
+                disabled={
+                  deleteAttempt.isPending || Boolean(ownershipCleanupAttemptId)
+                }
                 onClick={() => requestDelete(attempt.id)}
               >
                 {deleteAttempt.isPending && deletingId === attempt.id
