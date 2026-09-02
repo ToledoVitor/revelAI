@@ -184,3 +184,69 @@ Não há preocupação bloqueadora conhecida. O envio via `fetch` não fornece
 progresso percentual nativo; por isso o owner expõe progresso indeterminado
 acessível enquanto a requisição está ativa, sem prometer percentual que o
 transporte não mede. Nenhum push foi feito.
+
+## Re-review round — Sol (commit `e28be0eb45bdb5ce728aebe74bc1283ae9650073`)
+
+O segundo re-review retornou `CHANGES_REQUIRED`. Este round concentra a
+reconciliação autoritativa de upload, substitui a simulação restante da rota
+pública por câmera real e mede bytes de upload sem alterar o contrato C2.
+
+### Correções funcionais
+
+- `upload-reconciliation.ts` é a única transição pura de outcome de upload:
+  `awaiting-upload` retorna à captura e preserva arquivo/Attempt;
+  `uploaded`/`processing` descartam mídia e seguem pending; terminais seguem
+  para resultado; attempt ou modo divergente falham fechado e preservam mídia.
+  Upload normal, cancelamento, resposta duplicada e reconciliação ambígua usam
+  essa mesma transição. O GET de reconciliação também é protegido por geração
+  de fluxo **e** geração de upload, portanto um GET antigo não substitui um
+  retry aceito.
+- A rota `/verified` agora monta `ProductionSetupCamera`: solicita a câmera
+  real, mostra preview, classifica denied/unsupported/unavailable, mantém
+  fallback de vídeo existente e interrompe tracks tanto no cleanup normal
+  quanto quando a permissão resolve após unmount. Cópia e controles de
+  simulação ficaram exclusivamente no harness de review; os gates, Back,
+  foco e ordem W2 foram preservados.
+- O cliente usa XHR quando há observador de progresso em produção, mantendo
+  `FormData`, identity header, credenciais same-origin, schema C2, decoding de
+  erros, abort e geração do owner. O progresso expõe `loaded`/`total` reais e
+  o tracer o anuncia com `progress` acessível. O fallback `fetch` permanece
+  para chamadas sem observador e para o ambiente de teste.
+- A captura de produção expõe exatamente `Enviar vídeo existente` e
+  `Tentar novamente`, preservando as garantias W3 já compartilhadas para
+  formatos, gravação, retry, preview e metadados wire/source.
+
+### RED → GREEN deste round
+
+1. O cancelamento pré-commit recebia GET `awaiting-upload`, limpava o arquivo
+   e abria `Processando tentativa`. O novo teste público falhou assim antes da
+   extração da transição; agora volta a captura com o mesmo arquivo/Attempt e
+   um novo envio não cria Attempt.
+2. A rota pública ainda expunha `Simular câmera pronta`. A asserção RED de
+   owner não encontrou uma ativação real; `ProductionSetupCamera` deixa GREEN
+   a ativação, retry após denied, fallback e cleanup do stream tardio.
+3. O teste C2 com fake XHR inicialmente caía no transporte fetch/MSW e não
+   emitia bytes. O adapter agora deixa GREEN `7/11` bytes, `FormData`, header
+   de identidade e resposta aceita `202` parseada.
+4. Os novos cenários públicos cobrem cancelamento pós-commit, resposta
+   `duplicate_media_upload`, falha do primeiro upload após retry aceito e GET
+   de cancelamento antigo após o novo envio. Nenhum deles consegue sobrescrever
+   a geração atual; pós-commit e duplicado consultam o Attempt autoritativo.
+5. A tabela da função pura cobre awaiting-upload, uploaded, processing,
+   terminal e mismatch, provando explicitamente preservação/limpeza de mídia
+   sem inferir ownership de status.
+
+### Provas e gates do round
+
+| Comando | Resultado |
+| --- | --- |
+| `rtk pnpm --dir apps/web exec vitest run src/lib/api/client.test.ts src/verified/upload-reconciliation.test.ts src/verified/production-setup-camera.test.tsx src/verified/production-capture.test.tsx src/verified/tracer.test.tsx src/verified/setup.test.tsx src/verified/capture.test.tsx src/app.test.tsx src/production-router-harness.test.ts --config vitest.config.ts` | 9 arquivos, 151 testes verdes |
+| `rtk pnpm --dir apps/web run test:production-router` | 5 cenários browser de produção verdes, inclusive sem cópia/controles de simulação |
+| `rtk pnpm --dir apps/web run lint` e `rtk pnpm --dir apps/web run typecheck` | verdes |
+| `rtk pnpm check` | exit 0: format, lint, typecheck, testes e build de todos os pacotes; web Vitest 20 arquivos/187 testes verdes; visual estrutural 24 passados e 8 skips previstos |
+| `rtk git diff --check` e `rtk git diff --cached --check` | verdes antes do commit funcional |
+
+Não há preocupação bloqueadora conhecida. O progresso percentual é usado
+somente onde XHR pode observar bytes reais; o owner mantém um estado
+indeterminado acessível nos ambientes sem esse observador. Nenhum push foi
+feito.
