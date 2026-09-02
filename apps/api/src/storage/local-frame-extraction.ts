@@ -468,6 +468,7 @@ function extractionArguments(
     // this protocol, so the opaque decoded index and actual filename agree.
     "-start_number",
     "0",
+    "-y",
     // C5 accepts only deterministic baseline-JFIF evidence. FFmpeg otherwise
     // adds build/range COM metadata that is not image evidence.
     "-c:v",
@@ -475,7 +476,6 @@ function extractionArguments(
     "-pix_fmt",
     "yuvj420p",
     "-bitexact",
-    "-y",
     outputPattern,
     "-map",
     "[scene]",

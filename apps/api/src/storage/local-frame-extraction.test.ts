@@ -169,15 +169,37 @@ describe("LocalFrameExtraction", () => {
     const outputPattern = join(command!.outputDirectory, "decoded-%06d.jpg");
     const outputPatternIndex = command!.arguments.indexOf(outputPattern);
     expect(outputPatternIndex).toBeGreaterThan(0);
-    expect(command!.arguments.slice(0, outputPatternIndex)).toEqual(
-      expect.arrayContaining([
-        "-c:v",
-        "mjpeg",
-        "-pix_fmt",
-        "yuvj420p",
-        "-bitexact",
-      ]),
+    expect(
+      command!.arguments.slice(outputPatternIndex - 5, outputPatternIndex),
+    ).toEqual(["-c:v", "mjpeg", "-pix_fmt", "yuvj420p", "-bitexact"]);
+  });
+
+  it("does not treat an inventory-only executable as a portable extraction capability", async () => {
+    const root = await setupRoot(roots);
+    const executable = join(root, "inventory-only-ffmpeg");
+    await writeFile(
+      executable,
+      [
+        `#!${process.execPath}`,
+        "const arguments_ = process.argv.slice(2);",
+        'if (arguments_.includes("-version")) process.exit(0);',
+        'if (arguments_.includes("-filters")) {',
+        '  process.stdout.write("... fps\\n... metadata\\n... select\\n... showinfo\\n... split\\n");',
+        "  process.exit(0);",
+        "}",
+        'if (arguments_.includes("-encoders")) {',
+        '  process.stdout.write("V..... mjpeg\\nV..... mpeg4\\n");',
+        "  process.exit(0);",
+        "}",
+        "process.exitCode = 1;",
+      ].join("\n"),
+      { mode: 0o700 },
     );
+    await chmod(executable, 0o700);
+
+    await expect(
+      ffmpegHasPortableExtractionCapability(executable),
+    ).resolves.toBe(false);
   });
 
   it("rejects a claimed source digest before it can issue a durable receipt", async () => {
@@ -865,43 +887,64 @@ function insertBeforeEoi(bytes: Uint8Array, insert: Uint8Array): Uint8Array {
   ]);
 }
 
-/** Skip only when the locally installed binary lacks the complete owned pipeline. */
-async function ffmpegHasPortableExtractionCapability(): Promise<boolean> {
+/** Skip only when a real invocation cannot execute the complete owned pipeline. */
+async function ffmpegHasPortableExtractionCapability(
+  executable = "ffmpeg",
+): Promise<boolean> {
+  const root = await mkdtemp(join(tmpdir(), "revelai-ffmpeg-capability-"));
+  const source = join(root, "source.mp4");
+  const outputPattern = join(root, "frame-%06d.jpg");
   try {
-    const [version, filters, encoders] = await Promise.all([
-      runProcess("ffmpeg", ["-version"]),
-      runProcess("ffmpeg", ["-hide_banner", "-filters"]),
-      runProcess("ffmpeg", ["-hide_banner", "-encoders"]),
+    const generated = await runProcess(executable, [
+      "-nostdin",
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=black:s=16x16:r=10:d=1",
+      "-c:v",
+      "mpeg4",
+      "-pix_fmt",
+      "yuv420p",
+      "-f",
+      "mp4",
+      source,
     ]);
-    return (
-      version.exitCode === 0 &&
-      filters.exitCode === 0 &&
-      encoders.exitCode === 0 &&
-      includesFfmpegCapabilities(
-        filters,
-        ["fps", "metadata", "select", "showinfo", "split"],
-        3,
-      ) &&
-      includesFfmpegCapabilities(encoders, ["mjpeg", "mpeg4"], 6)
-    );
+    if (generated.exitCode !== 0) return false;
+    const extracted = await runProcess(executable, [
+      "-nostdin",
+      "-v",
+      "info",
+      "-i",
+      source,
+      "-filter_complex",
+      "[0:v]fps=10,split=2[decoded][active];[decoded]showinfo[frames];[active]select='gte(t,0)*lt(t,1)*gte(scene,0)',metadata=print:file=-[scene]",
+      "-map",
+      "[frames]",
+      "-vsync",
+      "0",
+      "-start_number",
+      "0",
+      "-y",
+      "-c:v",
+      "mjpeg",
+      "-pix_fmt",
+      "yuvj420p",
+      "-bitexact",
+      outputPattern,
+      "-map",
+      "[scene]",
+      "-f",
+      "null",
+      "-",
+    ]);
+    if (extracted.exitCode !== 0) return false;
+    return (await readFile(join(root, "frame-000000.jpg"))).length > 0;
   } catch {
     return false;
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
-}
-
-function includesFfmpegCapabilities(
-  result: Readonly<{ stdout: string; stderr: string }>,
-  names: readonly string[],
-  flagWidth: number,
-): boolean {
-  const found = new Set<string>();
-  const line = new RegExp(
-    `^\\s*[A-Z.|]{${flagWidth}}\\s+([a-z0-9_]+)\\b`,
-    "gimu",
-  );
-  for (const match of `${result.stdout}\n${result.stderr}`.matchAll(line))
-    found.add(match[1]!);
-  return names.every((name) => found.has(name));
 }
 
 async function runProcess(
