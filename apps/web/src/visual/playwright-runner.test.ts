@@ -49,11 +49,13 @@ function runPlaywrightRunner(
 describe("Playwright runner", () => {
   it("removes NO_COLOR before Playwright forces color in descendant processes", async () => {
     const result = await runPlaywrightRunner([
+      "--config",
+      "playwright.runner.config.ts",
       "src/visual/playwright-runner-smoke.visual.spec.ts",
       "--grep",
       "launches Chromium for runner environment checks",
       "--project",
-      "desktop-home",
+      "runner-smoke",
     ]);
 
     expect(result.exitCode).toBe(0);
@@ -83,7 +85,7 @@ describe("Playwright runner", () => {
         "--grep",
         "launches Chromium for runner environment checks",
         "--project",
-        "desktop-home",
+        "runner-smoke",
       ],
       "darwin",
       (environment) => {
