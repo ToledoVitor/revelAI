@@ -111,3 +111,76 @@ testes.
 - Não há preocupação bloqueadora conhecida. A captura usa APIs físicas de
   câmera/recorder e por isso a matriz unitária controla essas fronteiras com
   mocks; o browser estrutural já passou em desktop e mobile.
+
+## Review fix round — Sol (commit `5f7e665296b6021e7288d44b253017f9187d172b`)
+
+O review independente retornou `CHANGES_REQUIRED`. Este round resolve os
+findings sem criar um segundo owner de `/verified`, sem importar componentes
+de review pela rota de produção e sem alterar a autoridade dos contratos W1.
+
+### Correções funcionais
+
+- `production-capture.tsx` recebeu uma geração de captura e lifetime montado:
+  uma permissão que resolve depois de unmount para imediatamente todos os
+  tracks. A ausência de `MediaRecorder` é tratada antes da contagem; o
+  fallback por arquivo permanece utilizável e não há page error.
+- `capture-media.ts` concentra a ordem exata de candidatos, formatos aceitos,
+  normalização wire e os requisitos W3. Review e produção consomem a mesma
+  primitiva neutra: MP4/MOV/WebM, dimensões/orientação, janela 5+4+60,
+  continuidade e fiduciais. O adaptador de produção preserva fallback de
+  câmera traseira, preview, replace/discard, URL cleanup, metadados source
+  versus wire e normaliza apenas um WebM de tipo ausente para o wire.
+- `setup-model.ts` concentra gates, textos corretivos/status e guidance W2.
+  O tracer reintroduz gate bloqueado, recovery, back/cancel, foco a cada gate,
+  estado de criação e fallback de vídeo existente antes de qualquer mutação.
+  Um erro de `createAttempt` agora mantém a captura indisponível e oferece
+  retry da mesma calibration preparada.
+- O owner de upload/polling agora usa controller e geração ativos. Ele invalida
+  antes de abortar, ignora resposta antiga mesmo quando o transporte ignora o
+  sinal e reconcilia cancelamento pós-commit e `duplicate_media_upload` pelo
+  Attempt autoritativo. Após `202` limpa a mídia local imediatamente, mostra
+  progresso indeterminado acessível e mantém o mesmo Attempt em retry seguro.
+  Polling usa request `{ attemptId, generation, controller }`, correlação
+  completa de attempt/mode em todos os outcomes, backoff 1/2/4/5, e não deixa
+  request abortado de uma geração bloquear a seguinte.
+- O report terminal exibe toda a proveniência demo/Roboflow e todos os campos
+  do snapshot ranked congelado; percentil e top-percent mantêm explicações
+  distintas. Demo/experimental continuam estruturalmente sem ranking. O
+  leaderboard live passou a cancelar/coalescer loads por geração, desabilitar
+  controles durante loading, ignorar páginas stale e expor `entryId` no nome
+  acessível sem mexer na ordenação/empates do servidor.
+
+### RED → GREEN deste round
+
+1. Permissão pendente seguida de unmount produzia `track.stop` zero vezes;
+   com o lifetime/generation o teste observa stop imediato. Outro RED sem
+   `MediaRecorder` antes dos 5 segundos agora chega ao fallback, sem countdown
+   preso.
+2. O tracer não tinha fallback W2 de vídeo existente: o novo teste público não
+   encontrava o botão. O state `existing-video`, texto compartilhado e gate
+   habilitado o deixaram GREEN sem `fetch`.
+3. Erro de criação, upload antigo 503 depois de retry, abort pós-commit,
+   duplicate upload, resultado de outro Attempt e poll abortado de geração
+   velha tiveram testes de corrida públicos antes dos guards. Todos agora
+   preservam owner/mídia corretos e falham fechados quando apropriado.
+4. Clicks concorrentes no ranking e resposta de página após unmount iniciavam
+   mais de um load/atualizavam estado stale; controles disabled, controller e
+   generation deixaram essa matriz GREEN. Um `entryId` só em `key` também não
+   tinha nome acessível; o item agora o anuncia.
+5. As novas asserções RED de snapshot/proveniência, indicador de upload e
+   limpeza após `202` passaram depois da renderização explícita dos dados
+   parseados, sem inventar campos competitivos.
+
+### Provas e gates do round
+
+| Comando | Resultado |
+| --- | --- |
+| `rtk pnpm --dir apps/web exec vitest run src/verified/tracer.test.tsx src/verified/production-capture.test.tsx src/verified/capture.test.tsx src/verified/setup.test.tsx src/app.test.tsx src/production-router-harness.test.ts --config vitest.config.ts` | 6 arquivos, 76 testes verdes |
+| `rtk pnpm --dir apps/web exec vitest run src/verified/tracer.test.tsx --config vitest.config.ts` | 33 testes verdes |
+| `rtk pnpm check` | exit 0: format, lint, typecheck, Node checks, 18 arquivos/175 testes web, browser estrutural, pacotes e build verdes; somente os 8 skips visuais previstos |
+| `rtk git diff --check` e `rtk git diff --cached --check` | verdes antes do commit funcional |
+
+Não há preocupação bloqueadora conhecida. O envio via `fetch` não fornece
+progresso percentual nativo; por isso o owner expõe progresso indeterminado
+acessível enquanto a requisição está ativa, sem prometer percentual que o
+transporte não mede. Nenhum push foi feito.
