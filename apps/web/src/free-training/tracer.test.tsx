@@ -561,6 +561,134 @@ describe("production Free Training tracer", () => {
     );
   });
 
+  it.each([
+    [
+      "throws",
+      (): string | null => {
+        throw new DOMException("blocked", "SecurityError");
+      },
+    ],
+    ["silently reads null", (): string | null => null],
+  ] as const)(
+    "keeps a response-lost key and replays it only after storage get %s recovers",
+    async (_name, unavailableRead) => {
+      window.history.replaceState({}, "", "/free-training");
+      const oldKey = "a3333333-3333-4333-8333-333333333333";
+      const originalGet = Storage.prototype.getItem;
+      const rawRead = originalGet.bind(window.sessionStorage);
+      window.sessionStorage.setItem(
+        "revelai.free-training.create-intent.v1",
+        JSON.stringify({ idempotencyKey: oldKey }),
+      );
+      let storageAvailable = false;
+      vi.spyOn(Storage.prototype, "getItem").mockImplementation(
+        function getItem(this: Storage, key: string): string | null {
+          return this !== window.sessionStorage || storageAvailable
+            ? originalGet.call(this, key)
+            : unavailableRead();
+        },
+      );
+      const keys: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          keys.push(new Headers(init?.headers).get("idempotency-key") ?? "");
+          return response(createdFreeAttempt, 201);
+        }),
+      );
+      const user = userEvent.setup();
+
+      render(<App />);
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Não foi possível guardar este treino livre neste dispositivo.",
+      );
+      expect(keys).toEqual([]);
+      expect(rawRead("revelai.free-training.create-intent.v1")).toBe(
+        JSON.stringify({ idempotencyKey: oldKey }),
+      );
+
+      storageAvailable = true;
+      await user.click(
+        screen.getByRole("button", { name: "Tentar novamente" }),
+      );
+      expect(
+        await screen.findByRole("button", { name: "Selecionar vídeo" }),
+      ).toBeEnabled();
+      expect(keys).toEqual([oldKey]);
+    },
+  );
+
+  it("cleans both stored ownership facts before starting fresh after an owner-removal outage", async () => {
+    window.history.replaceState({}, "", "/free-training");
+    const user = userEvent.setup();
+    const staleAttemptId = "attempt-free-stale-owner";
+    const staleKey = "b3333333-3333-4333-8333-333333333333";
+    const staleOutcome: AttemptOutcome = {
+      ...freeInsight,
+      result: { ...freeInsight.result, attemptId: staleAttemptId },
+    };
+    window.sessionStorage.setItem(
+      "revelai.free-training.owner.v1",
+      JSON.stringify({ attemptId: staleAttemptId }),
+    );
+    window.sessionStorage.setItem(
+      "revelai.free-training.create-intent.v1",
+      JSON.stringify({ idempotencyKey: staleKey }),
+    );
+    const originalRemove = Storage.prototype.removeItem;
+    let removalAvailable = false;
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(
+      function removeItem(this: Storage, key: string): void {
+        if (!removalAvailable && key === "revelai.free-training.owner.v1")
+          throw new DOMException("blocked", "SecurityError");
+        return originalRemove.call(this, key);
+      },
+    );
+    const paths: string[] = [];
+    const keys: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const pathname = new URL(input.toString()).pathname;
+        paths.push(pathname);
+        if (pathname === `/v1/attempts/${staleAttemptId}`)
+          return response({
+            ...createdFreeAttempt,
+            id: staleAttemptId,
+            status: "valid",
+            outcome: staleOutcome,
+          });
+        if (pathname === "/v1/attempts") {
+          keys.push(new Headers(init?.headers).get("idempotency-key") ?? "");
+          return response(createdFreeAttempt, 201);
+        }
+        throw new Error(`Unexpected request: ${pathname}`);
+      }),
+    );
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Começar outro treino livre" });
+    await user.click(
+      screen.getByRole("button", { name: "Começar outro treino livre" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Não foi possível guardar este treino livre neste dispositivo.",
+    );
+    expect(paths).toEqual([`/v1/attempts/${staleAttemptId}`]);
+    expect(keys).toEqual([]);
+
+    removalAvailable = true;
+    await user.click(screen.getByRole("button", { name: "Tentar novamente" }));
+    expect(
+      await screen.findByRole("button", { name: "Selecionar vídeo" }),
+    ).toBeEnabled();
+    expect(paths).toEqual([`/v1/attempts/${staleAttemptId}`, "/v1/attempts"]);
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).not.toBe(staleKey);
+  });
+
   it("turns a tombstoned causal replay into a user-started fresh key without an automatic loop", async () => {
     window.history.replaceState({}, "", "/free-training");
     const oldKey = "f3333333-3333-4333-8333-333333333333";

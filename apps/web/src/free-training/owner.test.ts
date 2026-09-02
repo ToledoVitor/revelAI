@@ -75,6 +75,86 @@ describe("Free training causal ownership", () => {
     },
   );
 
+  it.each([
+    [
+      "throws",
+      (): string | null => {
+        throw new DOMException("blocked", "SecurityError");
+      },
+    ],
+    ["silently reads null", (): string | null => null],
+  ] as const)(
+    "preserves a response-lost causal key while storage get %s",
+    (_label, unavailableRead) => {
+      const oldKey = "a3333333-3333-4333-8333-333333333333";
+      const originalGet = Storage.prototype.getItem;
+      window.sessionStorage.setItem(
+        freeTrainingCreateIntentStorageKey,
+        JSON.stringify({ idempotencyKey: oldKey }),
+      );
+      const rawRead = originalGet.bind(window.sessionStorage);
+      vi.spyOn(Storage.prototype, "getItem").mockImplementation(
+        unavailableRead,
+      );
+
+      expect(() => beginFreeTrainingCreateIntent()).toThrow(
+        "Free training session storage is unavailable",
+      );
+      expect(rawRead(freeTrainingCreateIntentStorageKey)).toBe(
+        JSON.stringify({ idempotencyKey: oldKey }),
+      );
+
+      vi.restoreAllMocks();
+      expect(beginFreeTrainingCreateIntent()).toEqual({
+        idempotencyKey: oldKey,
+      });
+    },
+  );
+
+  it.each([
+    ["owner", [freeTrainingOwnerStorageKey], "throws"],
+    ["intent", [freeTrainingCreateIntentStorageKey], "throws"],
+    [
+      "both facts",
+      [freeTrainingOwnerStorageKey, freeTrainingCreateIntentStorageKey],
+      "throws",
+    ],
+    ["owner", [freeTrainingOwnerStorageKey], "silently refuses"],
+    ["intent", [freeTrainingCreateIntentStorageKey], "silently refuses"],
+    [
+      "both facts",
+      [freeTrainingOwnerStorageKey, freeTrainingCreateIntentStorageKey],
+      "silently refuses",
+    ],
+  ] as const)(
+    "attempts both cleanup removals when %s %s",
+    (_name, unavailableKeys, behavior) => {
+      const originalRemove = Storage.prototype.removeItem;
+      persistFreeTrainingOwner("attempt-owned");
+      beginFreeTrainingCreateIntent();
+      const removals: string[] = [];
+      vi.spyOn(Storage.prototype, "removeItem").mockImplementation(
+        function removeItem(this: Storage, key: string): void {
+          removals.push(key);
+          if ((unavailableKeys as readonly string[]).includes(key)) {
+            if (behavior === "throws")
+              throw new DOMException("blocked", "SecurityError");
+            return;
+          }
+          return originalRemove.call(this, key);
+        },
+      );
+
+      expect(clearFreeTrainingOwnershipForAttempt("attempt-owned")).toBe(
+        "unavailable",
+      );
+      expect(removals.slice(-2)).toEqual([
+        freeTrainingOwnerStorageKey,
+        freeTrainingCreateIntentStorageKey,
+      ]);
+    },
+  );
+
   it("reports an unavailable remove so a stale causal key cannot be reused", () => {
     beginFreeTrainingCreateIntent();
     vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {

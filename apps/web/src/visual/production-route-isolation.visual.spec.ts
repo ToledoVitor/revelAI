@@ -562,3 +562,273 @@ test("served production makes no Free POST until session storage confirms its ca
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
   );
 });
+
+for (const unavailableRead of ["throws", "silently reads null"] as const) {
+  test(`served production preserves a response-lost key while session storage get ${unavailableRead}`, async ({
+    page,
+  }) => {
+    const oldKey = "a3333333-3333-4333-8333-333333333333";
+    const keys: string[] = [];
+    await page.addInitScript(
+      ({ key, unavailable }) => {
+        const originalGet = Storage.prototype.getItem;
+        const rawGet = originalGet.bind(window.sessionStorage);
+        window.sessionStorage.setItem(
+          "revelai.free-training.create-intent.v1",
+          JSON.stringify({ idempotencyKey: key }),
+        );
+        let blocked = true;
+        Storage.prototype.getItem = function getItem(storageKey) {
+          if (this === window.sessionStorage && blocked) {
+            if (unavailable === "throws")
+              throw new DOMException("blocked", "SecurityError");
+            return null;
+          }
+          return originalGet.call(this, storageKey);
+        };
+        (
+          window as typeof window & {
+            __readRawFreeTrainingIntent?: () => string | null;
+            __restoreFreeTrainingStorageRead?: () => void;
+          }
+        ).__readRawFreeTrainingIntent = () =>
+          rawGet("revelai.free-training.create-intent.v1");
+        (
+          window as typeof window & {
+            __restoreFreeTrainingStorageRead?: () => void;
+          }
+        ).__restoreFreeTrainingStorageRead = () => {
+          blocked = false;
+        };
+      },
+      { key: oldKey, unavailable: unavailableRead },
+    );
+    await page.route("**/v1/**", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (request.method() === "POST" && url.pathname === "/v1/attempts") {
+        keys.push(request.headers()["idempotency-key"] ?? "");
+        await route.fulfill({
+          status: 201,
+          contentType: "application/json",
+          body: JSON.stringify({
+            id: "attempt-free-replayed-after-storage-recovery",
+            mode: "free",
+            status: "awaiting-upload",
+            createdAt: "2026-08-30T12:01:00.000Z",
+            outcome: {
+              state: "pending",
+              attemptId: "attempt-free-replayed-after-storage-recovery",
+              mode: "free",
+              status: "awaiting-upload",
+            },
+          }),
+        });
+        return;
+      }
+      await route.fulfill({ status: 404, body: "not expected" });
+    });
+
+    await page.goto("/free-training");
+    await expect(page.getByRole("alert")).toContainText(
+      "Não foi possível guardar este treino livre neste dispositivo.",
+    );
+    expect(keys).toEqual([]);
+    expect(
+      await page.evaluate(() =>
+        (
+          window as typeof window & {
+            __readRawFreeTrainingIntent?: () => string | null;
+          }
+        ).__readRawFreeTrainingIntent?.(),
+      ),
+    ).toBe(JSON.stringify({ idempotencyKey: oldKey }));
+
+    await page.evaluate(() => {
+      (
+        window as typeof window & {
+          __restoreFreeTrainingStorageRead?: () => void;
+        }
+      ).__restoreFreeTrainingStorageRead?.();
+    });
+    await page.getByRole("button", { name: "Tentar novamente" }).click();
+    await expect(
+      page.getByRole("button", { name: "Selecionar vídeo" }),
+    ).toBeEnabled();
+    expect(keys).toEqual([oldKey]);
+  });
+}
+
+test("served production retries both ownership removals before a fresh Free create", async ({
+  page,
+}) => {
+  const staleAttemptId = "attempt-free-stale-owner";
+  const staleKey = "b3333333-3333-4333-8333-333333333333";
+  const paths: string[] = [];
+  const keys: string[] = [];
+  await page.addInitScript(
+    ({ attemptId, key }) => {
+      const originalGet = Storage.prototype.getItem;
+      const originalRemove = Storage.prototype.removeItem;
+      const rawGet = originalGet.bind(window.sessionStorage);
+      window.sessionStorage.setItem(
+        "revelai.free-training.owner.v1",
+        JSON.stringify({ attemptId }),
+      );
+      window.sessionStorage.setItem(
+        "revelai.free-training.create-intent.v1",
+        JSON.stringify({ idempotencyKey: key }),
+      );
+      let blocked = true;
+      Storage.prototype.removeItem = function removeItem(storageKey) {
+        if (
+          this === window.sessionStorage &&
+          blocked &&
+          storageKey === "revelai.free-training.owner.v1"
+        )
+          throw new DOMException("blocked", "SecurityError");
+        return originalRemove.call(this, storageKey);
+      };
+      (
+        window as typeof window & {
+          __readRawFreeTrainingOwnership?: () => {
+            owner: string | null;
+            intent: string | null;
+          };
+          __restoreFreeTrainingOwnershipRemoval?: () => void;
+        }
+      ).__readRawFreeTrainingOwnership = () => ({
+        owner: rawGet("revelai.free-training.owner.v1"),
+        intent: rawGet("revelai.free-training.create-intent.v1"),
+      });
+      (
+        window as typeof window & {
+          __restoreFreeTrainingOwnershipRemoval?: () => void;
+        }
+      ).__restoreFreeTrainingOwnershipRemoval = () => {
+        blocked = false;
+      };
+    },
+    { attemptId: staleAttemptId, key: staleKey },
+  );
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    paths.push(`${request.method()} ${url.pathname}`);
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/v1/attempts/${staleAttemptId}`
+    ) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: staleAttemptId,
+          mode: "free",
+          status: "valid",
+          createdAt: "2026-08-30T12:01:00.000Z",
+          outcome: {
+            state: "valid",
+            result: {
+              kind: "free-insight",
+              attemptId: staleAttemptId,
+              provenance: {
+                kind: "demo",
+                fixtureId: "free-limited-ball-v1",
+                providerVersion: "demo-observations-v1",
+              },
+              approximate: true,
+              observations: [
+                {
+                  kind: "athlete-visibility",
+                  unit: "percent",
+                  value: 64,
+                  range: "partial",
+                },
+                {
+                  kind: "ball-visibility",
+                  unit: "percent",
+                  value: 42,
+                  range: "limited",
+                },
+                {
+                  kind: "movement-activity",
+                  unit: "percent",
+                  value: 65,
+                  range: "high",
+                },
+              ],
+              tips: ["Mantenha a bola visível durante a sequência."],
+              generatedAt: "2026-08-30T12:02:00.000Z",
+            },
+          },
+        }),
+      });
+      return;
+    }
+    if (request.method() === "POST" && url.pathname === "/v1/attempts") {
+      keys.push(request.headers()["idempotency-key"] ?? "");
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "attempt-free-fresh-after-cleanup",
+          mode: "free",
+          status: "awaiting-upload",
+          createdAt: "2026-08-30T12:01:00.000Z",
+          outcome: {
+            state: "pending",
+            attemptId: "attempt-free-fresh-after-cleanup",
+            mode: "free",
+            status: "awaiting-upload",
+          },
+        }),
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, body: "not expected" });
+  });
+
+  await page.goto("/free-training");
+  await page
+    .getByRole("button", { name: "Começar outro treino livre" })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Não foi possível guardar este treino livre neste dispositivo.",
+  );
+  expect(paths).toEqual([`GET /v1/attempts/${staleAttemptId}`]);
+  expect(keys).toEqual([]);
+  expect(
+    await page.evaluate(() =>
+      (
+        window as typeof window & {
+          __readRawFreeTrainingOwnership?: () => {
+            owner: string | null;
+            intent: string | null;
+          };
+        }
+      ).__readRawFreeTrainingOwnership?.(),
+    ),
+  ).toEqual({
+    owner: JSON.stringify({ attemptId: staleAttemptId }),
+    intent: null,
+  });
+
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __restoreFreeTrainingOwnershipRemoval?: () => void;
+      }
+    ).__restoreFreeTrainingOwnershipRemoval?.();
+  });
+  await page.getByRole("button", { name: "Tentar novamente" }).click();
+  await expect(
+    page.getByRole("button", { name: "Selecionar vídeo" }),
+  ).toBeEnabled();
+  expect(paths).toEqual([
+    `GET /v1/attempts/${staleAttemptId}`,
+    "POST /v1/attempts",
+  ]);
+  expect(keys).toHaveLength(1);
+  expect(keys[0]).not.toBe(staleKey);
+});

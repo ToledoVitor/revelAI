@@ -4,25 +4,38 @@ export const freeTrainingCreateIntentStorageKey =
 
 type FreeTrainingOwner = Readonly<{ attemptId: string }>;
 export type FreeTrainingCreateIntent = Readonly<{ idempotencyKey: string }>;
+export type FreeTrainingOwnershipCleanup =
+  | "cleared"
+  | "not-owned"
+  | "unavailable";
 
+type StorageRead =
+  | Readonly<{ kind: "available"; value: string | null }>
+  | Readonly<{ kind: "unavailable" }>;
+type StorageValue<T> =
+  | Readonly<{ kind: "available"; value: T | undefined }>
+  | Readonly<{ kind: "unavailable" }>;
+
+const storageProbeKey = "revelai.free-training.storage-probe.v1";
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function readRaw(key: string): string | null | undefined {
+function readRaw(key: string): StorageRead {
   try {
-    return window.sessionStorage.getItem(key);
+    return { kind: "available", value: window.sessionStorage.getItem(key) };
   } catch {
-    return undefined;
+    return { kind: "unavailable" };
   }
 }
 
-function readJson(key: string): unknown {
-  const value = readRaw(key);
-  if (!value) return undefined;
+function readJson(key: string): StorageValue<unknown> {
+  const raw = readRaw(key);
+  if (raw.kind === "unavailable") return raw;
+  if (!raw.value) return { kind: "available", value: undefined };
   try {
-    return JSON.parse(value);
+    return { kind: "available", value: JSON.parse(raw.value) };
   } catch {
-    return undefined;
+    return { kind: "available", value: undefined };
   }
 }
 
@@ -30,7 +43,8 @@ function writeJson(key: string, value: unknown): boolean {
   try {
     const serialized = JSON.stringify(value);
     window.sessionStorage.setItem(key, serialized);
-    return readRaw(key) === serialized;
+    const stored = readRaw(key);
+    return stored.kind === "available" && stored.value === serialized;
   } catch {
     return false;
   }
@@ -39,7 +53,8 @@ function writeJson(key: string, value: unknown): boolean {
 function clear(key: string): boolean {
   try {
     window.sessionStorage.removeItem(key);
-    return readRaw(key) === null;
+    const stored = readRaw(key);
+    return stored.kind === "available" && stored.value === null;
   } catch {
     return false;
   }
@@ -62,8 +77,22 @@ function newUuid(): string {
     .replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
 }
 
-export function readFreeTrainingOwner(): FreeTrainingOwner | undefined {
-  const value = readJson(freeTrainingOwnerStorageKey);
+/** Verifies storage without reading, replacing, or clearing either ownership key. */
+function hasVerifiedSessionStorage(): boolean {
+  const probe = newUuid();
+  try {
+    window.sessionStorage.setItem(storageProbeKey, probe);
+    const stored = readRaw(storageProbeKey);
+    if (stored.kind !== "available" || stored.value !== probe) return false;
+    window.sessionStorage.removeItem(storageProbeKey);
+    const removed = readRaw(storageProbeKey);
+    return removed.kind === "available" && removed.value === null;
+  } catch {
+    return false;
+  }
+}
+
+function parseOwner(value: unknown): FreeTrainingOwner | undefined {
   if (
     typeof value !== "object" ||
     value === null ||
@@ -75,6 +104,17 @@ export function readFreeTrainingOwner(): FreeTrainingOwner | undefined {
   return { attemptId: value.attemptId };
 }
 
+function readOwner(): StorageValue<FreeTrainingOwner> {
+  const stored = readJson(freeTrainingOwnerStorageKey);
+  if (stored.kind === "unavailable") return stored;
+  return { kind: "available", value: parseOwner(stored.value) };
+}
+
+export function readFreeTrainingOwner(): FreeTrainingOwner | undefined {
+  const owner = readOwner();
+  return owner.kind === "available" ? owner.value : undefined;
+}
+
 export function persistFreeTrainingOwner(attemptId: string): boolean {
   return writeJson(freeTrainingOwnerStorageKey, { attemptId });
 }
@@ -83,10 +123,9 @@ export function clearFreeTrainingOwner(): boolean {
   return clear(freeTrainingOwnerStorageKey);
 }
 
-export function readFreeTrainingCreateIntent():
-  | FreeTrainingCreateIntent
-  | undefined {
-  const value = readJson(freeTrainingCreateIntentStorageKey);
+function parseCreateIntent(
+  value: unknown,
+): FreeTrainingCreateIntent | undefined {
   if (
     typeof value !== "object" ||
     value === null ||
@@ -98,10 +137,26 @@ export function readFreeTrainingCreateIntent():
   return { idempotencyKey: value.idempotencyKey };
 }
 
+function readCreateIntent(): StorageValue<FreeTrainingCreateIntent> {
+  const stored = readJson(freeTrainingCreateIntentStorageKey);
+  if (stored.kind === "unavailable") return stored;
+  return { kind: "available", value: parseCreateIntent(stored.value) };
+}
+
+export function readFreeTrainingCreateIntent():
+  | FreeTrainingCreateIntent
+  | undefined {
+  const intent = readCreateIntent();
+  return intent.kind === "available" ? intent.value : undefined;
+}
+
 /** Creates once per logical Free owner; retries and reloads keep this UUID. */
 export function beginFreeTrainingCreateIntent(): FreeTrainingCreateIntent {
-  const existing = readFreeTrainingCreateIntent();
-  if (existing) return existing;
+  if (!hasVerifiedSessionStorage()) throw new FreeTrainingSessionStorageError();
+  const existing = readCreateIntent();
+  if (existing.kind === "unavailable")
+    throw new FreeTrainingSessionStorageError();
+  if (existing.value) return existing.value;
   const intent = { idempotencyKey: newUuid() };
   if (!writeJson(freeTrainingCreateIntentStorageKey, intent))
     throw new FreeTrainingSessionStorageError();
@@ -112,9 +167,19 @@ export function clearFreeTrainingCreateIntent(): boolean {
   return clear(freeTrainingCreateIntentStorageKey);
 }
 
+/** Attempts both removals even when the first one fails. */
+export function clearFreeTrainingOwnership(): FreeTrainingOwnershipCleanup {
+  if (!hasVerifiedSessionStorage()) return "unavailable";
+  const ownerCleared = clearFreeTrainingOwner();
+  const intentCleared = clearFreeTrainingCreateIntent();
+  return ownerCleared && intentCleared ? "cleared" : "unavailable";
+}
+
 export function clearFreeTrainingOwnershipForAttempt(
   attemptId: string,
-): boolean {
-  if (readFreeTrainingOwner()?.attemptId !== attemptId) return false;
-  return clearFreeTrainingOwner() && clearFreeTrainingCreateIntent();
+): FreeTrainingOwnershipCleanup {
+  const owner = readOwner();
+  if (owner.kind === "unavailable") return "unavailable";
+  if (owner.value?.attemptId !== attemptId) return "not-owned";
+  return clearFreeTrainingOwnership();
 }

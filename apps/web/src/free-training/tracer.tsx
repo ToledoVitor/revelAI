@@ -21,8 +21,7 @@ import { useAttemptUploadLifecycle } from "../lib/attempt-flow/upload-lifecycle"
 import { FreeTrainingMedia } from "./media";
 import {
   beginFreeTrainingCreateIntent,
-  clearFreeTrainingCreateIntent,
-  clearFreeTrainingOwner,
+  clearFreeTrainingOwnership,
   clearFreeTrainingOwnershipForAttempt,
   FreeTrainingSessionStorageError,
   persistFreeTrainingOwner,
@@ -95,7 +94,7 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
   const createStartedRef = useRef(false);
   const ownerRecoveryStartedRef = useRef(false);
   const creationBlockedRef = useRef(false);
-  const staleIntentRef = useRef(false);
+  const cleanupRequiredRef = useRef(false);
   const uploadGenerationRef = useRef(0);
   const activeCreateRef = useRef<AbortController | undefined>(undefined);
   const activeDeleteRef = useRef<AbortController | undefined>(undefined);
@@ -119,10 +118,10 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
     flowGenerationRef.current += 1;
     createStartedRef.current = false;
     ownerRecoveryStartedRef.current = false;
-    const storageCleared =
-      clearFreeTrainingOwner() && clearFreeTrainingCreateIntent();
+    const cleanup = clearFreeTrainingOwnership();
+    const storageCleared = cleanup === "cleared";
     creationBlockedRef.current = !storageCleared;
-    staleIntentRef.current = !storageCleared;
+    cleanupRequiredRef.current = !storageCleared;
     uploadGenerationRef.current += 1;
     const creation = activeCreateRef.current;
     activeCreateRef.current = undefined;
@@ -240,8 +239,16 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
     const rejectOwner = (ownedAttemptId?: string) => {
       if (!isCurrent()) return;
       activeCreateRef.current = undefined;
-      if (ownedAttemptId) clearFreeTrainingOwnershipForAttempt(ownedAttemptId);
-      setMessage("Esta tentativa não está disponível neste fluxo.");
+      const cleanup = ownedAttemptId
+        ? clearFreeTrainingOwnershipForAttempt(ownedAttemptId)
+        : "not-owned";
+      if (cleanup === "unavailable") {
+        creationBlockedRef.current = true;
+        cleanupRequiredRef.current = true;
+        setMessage(safeStorageError);
+      } else {
+        setMessage("Esta tentativa não está disponível neste fluxo.");
+      }
       setStage("terminal");
     };
     const adopt = (attempt: {
@@ -292,13 +299,13 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
         createStartedRef.current = false;
         ownerRecoveryStartedRef.current = false;
         if (hasRouteErrorCode(error, "attempt_not_found")) {
-          if (!clearFreeTrainingCreateIntent()) {
+          if (clearFreeTrainingOwnership() !== "cleared") {
             creationBlockedRef.current = true;
-            staleIntentRef.current = true;
+            cleanupRequiredRef.current = true;
             setMessage(safeStorageError);
             return;
           }
-          staleIntentRef.current = false;
+          cleanupRequiredRef.current = false;
           creationBlockedRef.current = true;
           setMessage(
             "Esta tentativa já foi excluída. Comece outro treino livre.",
@@ -323,15 +330,19 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
         } catch (error) {
           if (!isCurrent() || isAbort(error)) return;
           if (hasRouteErrorCode(error, "attempt_not_found")) {
-            if (!clearFreeTrainingOwnershipForAttempt(owner.attemptId)) {
+            if (
+              clearFreeTrainingOwnershipForAttempt(owner.attemptId) !==
+              "cleared"
+            ) {
               activeCreateRef.current = undefined;
               createStartedRef.current = false;
               ownerRecoveryStartedRef.current = false;
               creationBlockedRef.current = true;
-              staleIntentRef.current = true;
+              cleanupRequiredRef.current = true;
               setMessage(safeStorageError);
               return;
             }
+            cleanupRequiredRef.current = false;
             if (isCurrent()) void create();
             return;
           }
@@ -415,7 +426,20 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
         )
           return;
         activeDeleteRef.current = undefined;
-        clearFreeTrainingOwnershipForAttempt(attemptId);
+        const cleanup = clearFreeTrainingOwnershipForAttempt(attemptId);
+        if (cleanup === "unavailable") {
+          creationBlockedRef.current = true;
+          cleanupRequiredRef.current = true;
+          createStartedRef.current = false;
+          ownerRecoveryStartedRef.current = false;
+          setAttemptId(undefined);
+          setMedia(undefined);
+          setOutcome(undefined);
+          setTerminal(undefined);
+          setMessage(safeStorageError);
+          setStage("creating");
+          return;
+        }
         setMedia(undefined);
         queryClient.setQueryData<
           InfiniteData<AttemptListResponse, string | undefined>
@@ -466,12 +490,12 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
           <button
             type="button"
             onClick={() => {
-              if (staleIntentRef.current) {
-                if (!clearFreeTrainingCreateIntent()) {
+              if (cleanupRequiredRef.current) {
+                if (clearFreeTrainingOwnership() !== "cleared") {
                   setMessage(safeStorageError);
                   return;
                 }
-                staleIntentRef.current = false;
+                cleanupRequiredRef.current = false;
               }
               creationBlockedRef.current = false;
               createStartedRef.current = false;
