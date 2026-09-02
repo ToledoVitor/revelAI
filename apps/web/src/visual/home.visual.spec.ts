@@ -287,7 +287,6 @@ test("opens each unavailable destination without an API or follow-up network req
   });
 
   for (const control of [
-    "Meus treinos",
     "Ranking",
     "Treino livre",
     "Desafio verificado",
@@ -302,10 +301,7 @@ test("opens each unavailable destination without an API or follow-up network req
     await page.evaluate(() => document.fonts.ready);
     const requestCountBeforeInteraction = requests.length;
 
-    if (
-      testInfo.project.name === "mobile-home" &&
-      (control === "Meus treinos" || control === "Ranking")
-    ) {
+    if (testInfo.project.name === "mobile-home" && control === "Ranking") {
       await page.getByRole("button", { name: "Abrir navegação" }).click();
     }
 
@@ -325,7 +321,6 @@ test("keeps keyboard focus visible and activates every unavailable control", asy
   page,
 }, testInfo) => {
   const controls = [
-    { name: "Meus treinos", isNavigationControl: true },
     { name: "Ranking", isNavigationControl: true },
     { name: "Treino livre", isNavigationControl: false },
     { name: "Desafio verificado", isNavigationControl: false },
@@ -360,4 +355,33 @@ test("keeps keyboard focus visible and activates every unavailable control", asy
     await expect(unavailableHeading).toBeVisible();
     await expect(unavailableHeading).toBeFocused();
   }
+});
+
+test("opens the device-local history link with visible keyboard focus", async ({
+  page,
+}, testInfo) => {
+  await page.route("**/v1/attempts*", (route) =>
+    route.fulfill({ json: { items: [], nextCursor: null } }),
+  );
+  await page.goto("/");
+
+  if (testInfo.project.name === "mobile-home") {
+    await page.getByRole("button", { name: "Abrir navegação" }).press("Enter");
+  }
+
+  const historyLink = page.getByRole("link", { name: "Meus treinos" });
+  await historyLink.focus();
+  await expect(historyLink).toBeFocused();
+  await expect(historyLink).toHaveCSS("outline-width", "3px");
+  await historyLink.press("Enter");
+
+  const heading = page.getByRole("heading", {
+    name: "Meus treinos neste dispositivo",
+    level: 1,
+  });
+  await expect(heading).toBeVisible();
+  await expect(heading).toBeFocused();
+  await expect(page.getByRole("status")).toHaveText(
+    "Nenhum treino neste dispositivo ainda.",
+  );
 });

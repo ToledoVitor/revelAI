@@ -75,7 +75,7 @@ describe("the web home", () => {
     expect(
       screen.getByRole("navigation", { name: "Navegação principal" }),
     ).toBeVisible();
-    expect(screen.getByRole("button", { name: "Meus treinos" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Meus treinos" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Ranking" })).toBeVisible();
     expect(screen.getByText("Escolha como você vai começar")).toBeVisible();
   });
@@ -96,13 +96,7 @@ describe("the web home", () => {
     expect(window.location.pathname).toBe("/");
   });
 
-  it.each([
-    "Meus treinos",
-    "Ranking",
-    "Treino livre",
-    "Desafio verificado",
-    "Analisar treino",
-  ])(
+  it.each(["Ranking", "Treino livre", "Desafio verificado", "Analisar treino"])(
     "opens a truthful unavailable shell for %s without making an API call",
     async (control) => {
       const user = userEvent.setup();

@@ -10,7 +10,10 @@ import {
   useLocation,
   useNavigate,
 } from "react-router-dom";
+import { TrainingHistory } from "./history/history";
 import { Home } from "./home/home";
+import { createRevelApiClient } from "./lib/api/client";
+import { getDeviceAthleteId } from "./lib/api/identity";
 
 const appTheme = {
   "--warm-white": designTokens.color.warmWhite,
@@ -22,14 +25,6 @@ const appTheme = {
   "--body-font": designTokens.typography.body,
 } as CSSProperties;
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: false,
-    },
-  },
-});
-
 function Brand() {
   return (
     <Link className="brand" to="/" aria-label="RevelAI">
@@ -38,7 +33,9 @@ function Brand() {
   );
 }
 
-function Shell() {
+type RevelApiClient = ReturnType<typeof createRevelApiClient>;
+
+function Shell({ client }: Readonly<{ client: RevelApiClient }>) {
   const [isNavigationOpen, setNavigationOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
@@ -65,9 +62,9 @@ function Shell() {
           >
             Início
           </Link>
-          <button type="button" onClick={() => openUnavailable("meus-treinos")}>
+          <Link to="/training/history" onClick={() => setNavigationOpen(false)}>
             Meus treinos
-          </button>
+          </Link>
           <button type="button" onClick={() => openUnavailable("ranking")}>
             Ranking
           </button>
@@ -85,6 +82,10 @@ function Shell() {
       </header>
       <Routes>
         <Route path="/" element={<Home onUnavailable={openUnavailable} />} />
+        <Route
+          path="/training/history"
+          element={<TrainingHistory client={client} />}
+        />
         <Route
           path="/indisponivel/:destination"
           element={<UnavailableShell />}
@@ -117,10 +118,25 @@ function UnavailableShell() {
 }
 
 export function App() {
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: { retry: false },
+        },
+      }),
+  );
+  const [client] = useState(() =>
+    createRevelApiClient({
+      baseUrl: window.location.origin,
+      athleteId: getDeviceAthleteId(),
+    }),
+  );
+
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <Shell />
+        <Shell client={client} />
       </BrowserRouter>
     </QueryClientProvider>
   );

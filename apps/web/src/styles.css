@@ -24,6 +24,11 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 button:focus-visible,
 a:focus-visible {
   outline: 3px solid var(--deep-emerald, #006b3c);
@@ -286,6 +291,72 @@ a:focus-visible {
   font-weight: 700;
 }
 
+.training-history {
+  width: min(100% - 3rem, 48rem);
+  margin: 0 auto;
+  padding: clamp(2.5rem, 7vw, 5rem) 0;
+}
+
+.training-history h1 {
+  margin: 0 0 2rem;
+  font-family: var(--display-font);
+  font-size: clamp(2.5rem, 6vw, 4.75rem);
+  font-weight: 400;
+  line-height: 0.95;
+  text-transform: uppercase;
+}
+
+.training-history h1:focus-visible {
+  outline: 3px solid var(--deep-emerald);
+  outline-offset: 4px;
+}
+
+.training-history section {
+  margin-top: 1.25rem;
+}
+
+.training-history article {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.45rem 1rem;
+  padding: 1.25rem 0;
+  border-top: 1px solid var(--border-gray);
+}
+
+.training-history article h2,
+.training-history article p,
+.training-history article time {
+  margin: 0;
+}
+
+.training-history article h2 {
+  font-size: 1.2rem;
+}
+
+.training-history article p,
+.training-history article time {
+  color: var(--muted-gray);
+}
+
+.training-history article time {
+  grid-column: 1;
+}
+
+.training-history article button,
+.training-history > section > button {
+  align-self: center;
+  padding: 0.55rem 0.75rem;
+  color: var(--deep-emerald);
+  border: 1px solid var(--deep-emerald);
+  background: transparent;
+  font-weight: 700;
+}
+
+.training-history article [role="alert"] {
+  grid-column: 1 / -1;
+  color: var(--near-black);
+}
+
 @media (hover: hover) {
   .primary-navigation a:hover,
   .primary-navigation button:hover,
@@ -441,6 +512,11 @@ a:focus-visible {
 
   .analyse-button svg {
     color: var(--warm-white);
+  }
+
+  .training-history {
+    width: min(100% - 14%, 48rem);
+    padding: 2.25rem 0;
   }
 }
 
