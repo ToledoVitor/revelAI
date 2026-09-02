@@ -230,3 +230,36 @@ Hosted run `33611887462` failed the Ubuntu `pnpm check` after the W2 review cand
 - `rtk pnpm check` → root format, lint, typecheck, test, and build passed.
 - Stress workers and temporary diagnosis artifacts were removed; `git diff --check` passed before the functional commit.
 - Sol review is pending. No push was made.
+
+## Hosted CI router-harness synchronization fix (commit `1678b76`)
+
+Hosted CI run `33613860849` showed that the previous scoped production-graph timeout worked: `apps/web/src/app.test.tsx` passed in 8,802 ms. A separate timing failure remained in `production-router-harness.test.ts`: the direct setup/capture production URLs passed, and in-app capture passed, but in-app setup observed the initial Home content rather than the expected unavailable boundary. The harness file finished in 9,180 ms; the failing assertion itself ran after 62 ms, so this was not another Vitest test-budget timeout.
+
+### Root cause and minimized RED evidence
+
+- The production harness called `createRoot().render()` and then trusted one `setTimeout(0)` before manually dispatching `popstate`, and trusted another one before checking the destination. React 19's `ReactDOMRoot.render` only calls `updateContainerImpl`; it does not synchronously promise a committed tree.
+- React Router 7.18.3 `BrowserRouter` installs `history.listen(setState)` in `useLayoutEffect`. Its browser-history `handlePop` only notifies a listener that is already installed, and its default state update uses `startTransition`. Therefore the single timer could race either initial layout-effect subscription or the destination transition commit under CI contention.
+- A direct-binary, selected-test concurrent loop used no `pnpm exec` bin-link race. Before the fix, the controller captured the exact hosted symptom with one failure in four concurrent setup cases and again with one failure in eight; every process selected only this one in-app setup case, ruling out suite order or a cleanup leak. Direct navigation for both paths and concurrent in-app capture remained green, ruling out production route configuration and path-specific unavailable content. All runs settled, ruling out a hidden hang.
+
+### Change
+
+- `apps/web/src/production-router-harness.test.ts` now uses the existing `@testing-library/react` `waitFor` with the mounted host as explicit container and a named, finite 1,000 ms condition budget. It waits for the exact initial Home heading `Treine. Grave. Evolua.` before dispatching history navigation, so the initial React commit and BrowserRouter layout effects have completed.
+- Direct and in-app checks wait until the existing `expectUnavailableBoundary` succeeds. This retains the exact unavailable copy, zero fake-port calls, no evaluation marker, and separate zero-fetch assertions while waiting for the actual DOM state rather than an arbitrary duration.
+- The harness tracks the mounted host and confirms it is empty after the final root unmount before releasing JSDOM globals. No application/router behavior, production route switch, API/session/attempt behavior, or W3 capture work changed.
+
+### RED → GREEN and verification
+
+- RED: hosted run `33613860849` plus the controller's direct selected-test contention loop above produced the exact stale-Home result.
+- GREEN: the direct Vitest binary ran the in-app setup case in four batches of eight concurrent processes: **32/32 passed**, with the process trap killing/waiting every spawned PID on interruption.
+- `rtk zsh -lc 'cd apps/web && CI=true ./node_modules/.bin/vitest run src/app.test.tsx src/verified/setup.test.tsx src/production-router-harness.test.ts --config vitest.config.ts --reporter=verbose'` → 3 files / 16 tests passed.
+- `rtk pnpm --dir apps/web run lint`, `typecheck`, and `build` → passed.
+- `rtk pnpm --dir apps/web test` → 11 Node checks, 14 Vitest files / 114 tests, and 20 structural browser checks passed with 8 established skips.
+- `rtk pnpm --dir apps/web run test:production-router` → served production artifact 4/4 passed for direct and in-app setup/capture isolation.
+- `rtk pnpm check` → root format, lint, typecheck, test, and build gates passed with exit code 0 after the final formatting pass.
+- `rtk git diff --check` passed before the functional commit. No stress worker, Vitest, or Vite process remained. No push was made.
+
+### Self-review and status
+
+- The wait conditions are scoped to the transformed production harness's public DOM seam. They neither inject another router switch nor inspect router internals.
+- The Home condition specifically precedes `popstate`; the unavailable-boundary condition is shared by direct and in-app cases, avoiding duplicated timing logic and preserving all existing isolation assertions.
+- Sol review is pending for this post-CI harness synchronization fix.
