@@ -392,6 +392,76 @@ function startSqliteLockBarrier(
   return Object.freeze({ locked, done });
 }
 
+function startPostMigrationCommitLockBarrier(input: Readonly<{
+  filename: string;
+  holdMilliseconds?: number;
+}>): Readonly<{ triggerAndWaitForLock(): void; done: Promise<void> }> {
+  const state = new Int32Array(
+    new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2),
+  );
+  let resolveDone!: () => void;
+  let rejectDone!: (error: Error) => void;
+  const done = new Promise<void>((resolve, reject) => {
+    resolveDone = resolve;
+    rejectDone = reject;
+  });
+  const worker = new Worker(
+    `
+      const Database = require("better-sqlite3");
+      const { parentPort, workerData } = require("node:worker_threads");
+      const state = new Int32Array(workerData.state);
+      Atomics.wait(state, 0, 0);
+      let database;
+      try {
+        database = new Database(workerData.filename);
+        database.exec("BEGIN IMMEDIATE");
+        Atomics.store(state, 1, 1);
+        Atomics.notify(state, 1);
+        setTimeout(() => {
+          try {
+            database.exec("COMMIT");
+            database.close();
+            parentPort.postMessage({ type: "done" });
+          } catch (error) {
+            try { database.exec("ROLLBACK"); } catch {}
+            database.close();
+            parentPort.postMessage({ type: "error", message: String(error) });
+          }
+        }, workerData.holdMilliseconds ?? 150);
+      } catch (error) {
+        try { database?.close(); } catch {}
+        parentPort.postMessage({ type: "error", message: String(error) });
+      }
+    `,
+    { eval: true, workerData: { ...input, state: state.buffer } },
+  );
+  worker.on("message", (message: unknown) => {
+    const value = message as { type?: string; message?: string };
+    if (value.type === "done") {
+      resolveDone();
+      void worker.terminate();
+    }
+    if (value.type === "error") {
+      rejectDone(new Error(value.message));
+      void worker.terminate();
+    }
+  });
+  worker.on("error", (error) => {
+    rejectDone(error);
+    void worker.terminate();
+  });
+  return Object.freeze({
+    triggerAndWaitForLock: () => {
+      Atomics.store(state, 0, 1);
+      Atomics.notify(state, 0);
+      Atomics.wait(state, 1, 0, 1_000);
+      if (Atomics.load(state, 1) !== 1)
+        throw new Error("Database lock barrier did not acquire its write lock.");
+    },
+    done,
+  });
+}
+
 function freeOutcome(
   attemptId: string,
   completedAt: string,
@@ -5009,6 +5079,52 @@ describe("SQLiteAttemptRepository", () => {
     },
     migrationStartupTestTimeoutMs,
   );
+
+  it("enables WAL before releasing the migration startup writer", async () => {
+    const filename = join(
+      fixture.directory,
+      "migration-wal-startup-window.sqlite",
+    );
+    const predecessor = openSqliteDatabaseAtVersionForTest(filename, 22);
+    predecessor.raw.pragma("journal_mode = DELETE");
+    predecessor.close();
+
+    const barrier = startPostMigrationCommitLockBarrier({ filename });
+    const originalExec = Database.prototype.exec;
+    const originalPragma = Database.prototype.pragma;
+    let interceptedMigrationCommit = false;
+    let reopened: SqliteDatabase | undefined;
+    try {
+      Database.prototype.pragma = function (
+        source: string,
+        options?: Database.PragmaOptions,
+      ): unknown {
+        return originalPragma.call(
+          this,
+          source === "busy_timeout = 5000" ? "busy_timeout = 0" : source,
+          options,
+        );
+      };
+      Database.prototype.exec = function (source: string): Database.Database {
+        const result = originalExec.call(this, source);
+        if (!interceptedMigrationCommit && source === "COMMIT") {
+          interceptedMigrationCommit = true;
+          barrier.triggerAndWaitForLock();
+        }
+        return result;
+      };
+
+      expect(() => {
+        reopened = openSqliteDatabase(filename);
+      }).not.toThrow();
+      expect(interceptedMigrationCommit).toBe(true);
+    } finally {
+      Database.prototype.exec = originalExec;
+      Database.prototype.pragma = originalPragma;
+      reopened?.close();
+    }
+    await barrier.done;
+  });
 
   it("backfills a live v17 delivery row with its exact durable frame batch once", () => {
     const filename = join(fixture.directory, "delivery-recovery-v17.sqlite");

@@ -885,8 +885,14 @@ function openSqliteDatabaseInternal(
     raw = new Database(filename);
     raw.pragma("foreign_keys = ON");
     raw.pragma("busy_timeout = 5000");
-    applyMigrations(raw, migrationVersion);
+    const targetMigrationVersion = resolveMigrationTargetVersion(migrationVersion);
+    // WAL is a persistent change, so validate first to preserve invalid
+    // predecessors byte-for-byte. It must then happen before the migration
+    // writer commits, otherwise another starter can acquire that writer and
+    // make this connection's post-commit WAL transition fail with SQLITE_BUSY.
+    readValidatedMigrationStartup(raw, targetMigrationVersion);
     raw.pragma("journal_mode = WAL");
+    applyMigrations(raw, targetMigrationVersion);
   } catch (error) {
     raw?.close();
     throw error;
