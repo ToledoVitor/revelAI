@@ -173,3 +173,35 @@ Reviewer verdict: the clean-output probe was `CHANGES_REQUIRED`. Its original st
 - The cleanup scope is limited to explicit contracts/design-system `dist` sources and a fresh, validated temporary staging directory; it does not delete a workspace, coverage root, or a pre-existing backup.
 - If recovery cannot safely complete, the process rejects and leaves a remaining backup rather than deleting it. If it can complete, it restores the original directory identity via rename before removing only the temporary staging directory it created.
 - Production graph/harness, served artifact proof, development lazy-import smoke, W1 production unavailability, and W2's no-session/no-attempt boundaries are unaffected. No push was made.
+
+## Review fix round 4 (commit `a75fa2d`)
+
+Reviewer verdict: `CHANGES_REQUIRED` on the round-3 signal proof. The production module used `processRef.once(...)`; when a first termination signal started child settlement/recovery, that listener removed itself. A second same or mixed terminal signal could therefore reach Node's default signal behavior and terminate the parent before it restored the staged dependency outputs. The earlier `EventEmitter` check could not observe that operating-system behavior. This round changes only the W2 clean production-router recovery lifecycle and its tests; capture, timers, session/attempt behavior, and production route isolation are unchanged.
+
+### Changes made
+
+- `runCleanProductionRouterCheck` now registers persistent `processRef.on(...)` handlers for `SIGINT`, `SIGTERM`, and `SIGHUP` before staging. The existing `parentSignal` guard still records and forwards only the first signal to the production-router child. Repeated and mixed signals remain consumed/no-op until the final recovery cleanup removes every handler in `finally`.
+- The existing fake-process check now also emits a mixed `SIGHUP` and `SIGINT` after repeated `SIGTERM`; the child still records precisely one forwarded `SIGTERM`, and all three listeners are removed after recovery.
+- A real subprocess integration probe starts from an explicit temporary root and creates two marker output directories. Its controlled nested child reports the forwarded signal, while a custom exact-path `rename` barrier intentionally pauses restoration of the first marker.
+- The parent Node check waits for the nested child readiness, sends the initial `SIGTERM`, waits for the probe's restoration barrier, then sends two more `SIGTERM`s during that barrier. Before release it asserts the probe has neither exited normally nor with a signal. After writing the explicit release token and closing only its pipe, it requires a normal `{ code: 0, signal: null }` exit, exactly one forwarded `SIGTERM`, and the sentinel written only after exact-marker recovery and zero listeners.
+- Both the outer check and probe have bounded waits and explicit cleanup. If the probe test fails, its `after` hook kills/waits for only that probe before removing only its exact temporary root; the probe itself removes only its validated `work` child directory. The nested child exits after its first forwarded signal, so failed probes do not leave child processes or staged outputs behind.
+
+### RED → GREEN evidence
+
+1. With the new real subprocess test and the old `processRef.once` implementation, the focused check was RED deterministically: output reached `child-ready`, `forwarded:SIGTERM`, and `restoration-held`, then the second `SIGTERM` ended the probe with `signalCode = SIGTERM` before the release token and restoration. This demonstrates the actual OS signal defect that the fake `EventEmitter` missed.
+2. Replacing only `.once` with persistent `.on` made the second signal stay intercepted. The first green execution then showed a test-harness lifecycle issue: the parent had released the barrier but retained the probe's stdin pipe, which kept the probe event loop open. Tracing the probe's input listener established that this was the harness, not recovery behavior. Ending that one pipe immediately after the release token produced the expected normal exit.
+3. The finished focused proof passed 6/6: staged rollback, collision safety, retry recovery, fake-process/mixed-signal lifecycle, the real repeated-`SIGTERM` subprocess lifecycle, and the real clean dependency rebuild/restoration.
+
+### Fix-round verification
+
+- `rtk pnpm --dir apps/web run test:production-router:clean` → 6/6 Node checks passed, including the OS-signal subprocess probe and a real rebuild/restoration run.
+- `rtk pnpm --dir apps/web run test:production-router` → 4/4 served production setup/capture unavailable-boundary checks passed.
+- `rtk pnpm --dir apps/web run lint`, `typecheck`, `build`, and `test` → all passed; web test includes 11 Node checks, 14 Vitest files / 114 tests, and 20 structural browser checks with 8 established skips.
+- `rtk pnpm check` → root format, lint, typecheck, test, and build passed.
+- `rtk git diff --check` → passed before committing the functional change and will be rerun for this documentation commit.
+
+### Final self-review
+
+- A repeated signal now cannot regain Node's default process termination while any staged output may still need restoration. The one first-signal guard preserves the previous controlled child-stop behavior and avoids multiple `kill` calls or multiple completion paths.
+- The subprocess proof uses genuine operating-system `SIGTERM`, rather than an emitter fake, and verifies the critical order: first forwarding, recovery held, repeated signals ignored, exact restoration/listener cleanup, then sentinel and normal exit.
+- Cleanup remains narrowly scoped to explicit temporary test paths and the pre-existing recovery module's two validated dependency-output paths. No W1 production request path, W2 review runtime state, W3 capture behavior, or production artifact boundary was expanded. No push was made.
