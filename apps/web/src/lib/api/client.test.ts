@@ -101,6 +101,26 @@ describe("Revel API client", () => {
     ).resolves.toEqual(calibrationSession);
   });
 
+  it("sends the optional causal key as a header while preserving the exact Free body", async () => {
+    const idempotencyKey = "f2222222-2222-4222-8222-222222222222";
+    server.use(
+      http.post("http://revelai.test/v1/attempts", async ({ request }) => {
+        expect(request.headers.get("idempotency-key")).toBe(idempotencyKey);
+        expect(await request.json()).toStrictEqual({ mode: "free" });
+        return HttpResponse.json(pendingAttempt("attempt-idempotent"), {
+          status: 201,
+        });
+      }),
+    );
+
+    await expect(
+      createRevelApiClient({
+        baseUrl: "http://revelai.test",
+        athleteId,
+      }).createAttempt({ mode: "free" }, { idempotencyKey }),
+    ).resolves.toEqual(pendingAttempt("attempt-idempotent"));
+  });
+
   it("marks a calibration session ready with its exact required gates", async () => {
     server.use(
       http.post(

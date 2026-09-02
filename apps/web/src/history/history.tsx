@@ -9,6 +9,7 @@ import { useLocation } from "react-router-dom";
 import type { AttemptListResponse } from "@revelai/contracts";
 import type { createRevelApiClient, RevelApiError } from "../lib/api/client";
 import { trainingHistoryQueryKey } from "./query";
+import { clearFreeTrainingOwnershipForAttempt } from "../free-training/owner";
 
 type HistoryClient = Pick<
   ReturnType<typeof createRevelApiClient>,
@@ -55,6 +56,7 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
     mutationFn: (id: string) => client.deleteAttempt(id),
     onMutate: () => setDeleteMessage(null),
     onSuccess: (_result, id) => {
+      clearFreeTrainingOwnershipForAttempt(id);
       queryClient.setQueryData<
         InfiniteData<AttemptListResponse, HistoryPageParam>
       >(trainingHistoryQueryKey, (current) => {

@@ -1,5 +1,6 @@
 import {
   AthleteIdentityHeaderSchema,
+  IdempotencyKeyHeaderSchema,
   AttemptIdPathParamsSchema,
   AttemptListQuerySchema,
   AttemptListResponseSchema,
@@ -46,6 +47,11 @@ export type ApiRouteContract = Readonly<{
   queryDefaults?: Readonly<Record<string, unknown>>;
   requestBody?: ZodType;
   multipart?: MultipartWireContract;
+  headers?: readonly Readonly<{
+    name: string;
+    required: boolean;
+    schema: ZodType;
+  }>[];
   responses: readonly ResponseDefinition[];
 }>;
 export type OpenApiDocument = Readonly<{
@@ -159,6 +165,13 @@ export const apiRouteRegistry: readonly ApiRouteContract[] = Object.freeze([
     operationId: "createAttempt",
     summary: "Create a Free or Verified attempt",
     authenticated: true,
+    headers: [
+      {
+        name: "Idempotency-Key",
+        required: false,
+        schema: IdempotencyKeyHeaderSchema,
+      },
+    ],
     requestBody: CreateAttemptInputSchema,
     responses: [
       response(201, CreateAttemptResponseSchema),
@@ -406,12 +419,14 @@ function operation(route: ApiRouteContract): Record<string, unknown> {
           security: [{ AthleteIdentity: [] }],
           parameters: [
             athleteIdentityParameter(),
+            ...headerParameters(route.headers),
             ...schemaParameters(route.pathParams, "path"),
             ...schemaParameters(route.query, "query", route.queryDefaults),
           ],
         }
       : {
           parameters: [
+            ...headerParameters(route.headers),
             ...schemaParameters(route.pathParams, "path"),
             ...schemaParameters(route.query, "query", route.queryDefaults),
           ],
@@ -438,6 +453,23 @@ function operation(route: ApiRouteContract): Record<string, unknown> {
       ]),
     ),
   };
+}
+
+function headerParameters(
+  headers: ApiRouteContract["headers"],
+): Record<string, unknown>[] {
+  return (headers ?? []).map((header) => {
+    const schema = inputJsonSchema(header.schema) as {
+      properties?: Record<string, unknown>;
+    };
+    const key = header.name.toLowerCase();
+    return {
+      name: header.name,
+      in: "header",
+      required: header.required,
+      schema: schema.properties?.[key],
+    };
+  });
 }
 
 function athleteIdentityParameter(): Record<string, unknown> {

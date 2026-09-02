@@ -92,6 +92,133 @@ describe("attempt HTTP foundation", () => {
     }
   });
 
+  it("replays a Free create causally for one athlete and creates one row", async () => {
+    const fixture = await makeApi();
+    const idempotencyKey = "a1111111-1111-4111-8111-111111111111";
+    try {
+      const first = await fixture.app.inject({
+        method: "POST",
+        url: "/v1/attempts",
+        headers: {
+          ...athleteHeader(ATHLETE_A),
+          "idempotency-key": idempotencyKey,
+        },
+        payload: { mode: "free" },
+      });
+      const replay = await fixture.app.inject({
+        method: "POST",
+        url: "/v1/attempts",
+        headers: {
+          ...athleteHeader(ATHLETE_A),
+          "idempotency-key": idempotencyKey,
+        },
+        payload: { mode: "free" },
+      });
+
+      expect(first.statusCode).toBe(201);
+      expect(replay.statusCode).toBe(201);
+      expect(CreateAttemptResponseSchema.parse(replay.json()).id).toBe(
+        CreateAttemptResponseSchema.parse(first.json()).id,
+      );
+      expect(
+        fixture.database.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM attempts WHERE athlete_id = ? AND idempotency_key = ?",
+          )
+          .get(ATHLETE_A, idempotencyKey),
+      ).toEqual({ count: 1 });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("keeps an idempotency key scoped to its athlete", async () => {
+    const fixture = await makeApi();
+    const idempotencyKey = "b1111111-1111-4111-8111-111111111111";
+    try {
+      const first = await fixture.app.inject({
+        method: "POST",
+        url: "/v1/attempts",
+        headers: {
+          ...athleteHeader(ATHLETE_A),
+          "idempotency-key": idempotencyKey,
+        },
+        payload: { mode: "free" },
+      });
+      const otherAthlete = await fixture.app.inject({
+        method: "POST",
+        url: "/v1/attempts",
+        headers: {
+          ...athleteHeader(ATHLETE_B),
+          "idempotency-key": idempotencyKey,
+        },
+        payload: { mode: "free" },
+      });
+
+      expect(
+        CreateAttemptResponseSchema.parse(otherAthlete.json()).id,
+      ).not.toBe(CreateAttemptResponseSchema.parse(first.json()).id);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("fails closed when a reused causal key carries a conflicting create payload", async () => {
+    const fixture = await makeApi();
+    const idempotencyKey = "c2222222-2222-4222-8222-222222222222";
+    try {
+      await fixture.app.inject({
+        method: "POST",
+        url: "/v1/attempts",
+        headers: {
+          ...athleteHeader(ATHLETE_A),
+          "idempotency-key": idempotencyKey,
+        },
+        payload: { mode: "free" },
+      });
+      const calibration = CalibrationSessionSchema.parse(
+        (
+          await fixture.app.inject({
+            method: "POST",
+            url: "/v1/calibration-sessions",
+            headers: athleteHeader(ATHLETE_A),
+            payload: { challengeId: "wall-pass", challengeVersion: 1 },
+          })
+        ).json(),
+      );
+      await fixture.app.inject({
+        method: "POST",
+        url: `/v1/calibration-sessions/${calibration.id}/ready`,
+        headers: athleteHeader(ATHLETE_A),
+        payload: {
+          requiredGates: ["device", "space", "athlete", "rehearsal", "record"],
+        },
+      });
+
+      const conflict = await fixture.app.inject({
+        method: "POST",
+        url: "/v1/attempts",
+        headers: {
+          ...athleteHeader(ATHLETE_A),
+          "idempotency-key": idempotencyKey,
+        },
+        payload: {
+          mode: "verified",
+          challengeId: "wall-pass",
+          challengeVersion: 1,
+          calibrationSessionId: calibration.id,
+        },
+      });
+
+      expect(conflict.statusCode).toBe(400);
+      expect(RouteErrorSchema.parse(conflict.json()).code).toBe(
+        "invalid_request",
+      );
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it("registers every shared C2 method at its shared path", async () => {
     const fixture = await makeMediaApi();
     try {

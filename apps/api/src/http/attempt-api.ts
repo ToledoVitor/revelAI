@@ -6,6 +6,7 @@ import Fastify, {
 } from "fastify";
 import {
   AthleteIdentityHeaderSchema,
+  IdempotencyKeyHeaderSchema,
   AttemptIdPathParamsSchema,
   AttemptListQuerySchema,
   CalibrationSessionCreateInputSchema,
@@ -305,10 +306,12 @@ function createAttemptApiInternal(
     registerApiRoute(app, createAttemptRoute, async (request, reply) => {
       const body = parseRequest(CreateAttemptInputSchema, request.body);
       const attemptId = requiredGeneratedUuid(ids.next());
+      const idempotencyKey = optionalIdempotencyKey(request);
       const attempt = await input.repository.createAttempt({
         id: attemptId,
         athleteId: requiredAthleteId(athleteIds, request),
         input: body,
+        ...(idempotencyKey ? { idempotencyKey } : {}),
       });
       return sendResponse(
         reply,
@@ -530,6 +533,23 @@ function parseAthleteIdentity(request: FastifyRequest): string | undefined {
   return parsed.success ? parsed.data["x-revelai-athlete-id"] : undefined;
 }
 
+function optionalIdempotencyKey(request: FastifyRequest): string | undefined {
+  const values: string[] = [];
+  for (let index = 0; index < request.raw.rawHeaders.length; index += 2) {
+    if (request.raw.rawHeaders[index]?.toLowerCase() === "idempotency-key") {
+      const value = request.raw.rawHeaders[index + 1];
+      if (value !== undefined) values.push(value);
+    }
+  }
+  if (values.length === 0) return undefined;
+  if (values.length !== 1) throw new AttemptRouteError("invalid_request");
+  const parsed = IdempotencyKeyHeaderSchema.safeParse({
+    "idempotency-key": values[0],
+  });
+  if (!parsed.success) throw new AttemptRouteError("invalid_request");
+  return parsed.data["idempotency-key"];
+}
+
 function requiredAthleteId(
   athleteIds: WeakMap<FastifyRequest, string>,
   request: FastifyRequest,
@@ -594,7 +614,11 @@ function routeErrorCode(error: unknown): RouteErrorCode {
   if (error instanceof QueueUnavailableError) return "queue_unavailable";
   if (error instanceof MultipartParserError) return "invalid_request";
   if (error instanceof RepositoryError) {
-    if (error.code === "invalid_input") return "invalid_request";
+    if (
+      error.code === "invalid_input" ||
+      error.code === "idempotency_key_conflict"
+    )
+      return "invalid_request";
     switch (error.code) {
       case "attempt_not_found":
       case "duplicate_media_upload":

@@ -376,38 +376,34 @@ test("served production recovers a commit-wins lost Free create after reload wit
   page,
 }) => {
   let creates = 0;
-  let listReads = 0;
+  const keys: string[] = [];
+  const created = {
+    id: "attempt-free-commit-wins",
+    mode: "free",
+    status: "awaiting-upload",
+    createdAt: "2026-08-30T12:01:00.000Z",
+    outcome: {
+      state: "pending",
+      attemptId: "attempt-free-commit-wins",
+      mode: "free",
+      status: "awaiting-upload",
+    },
+  };
   await page.route("**/v1/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     if (request.method() === "POST" && url.pathname === "/v1/attempts") {
       creates += 1;
-      await route.abort("connectionreset");
-      return;
-    }
-    if (request.method() === "GET" && url.pathname === "/v1/attempts") {
-      listReads += 1;
-      const createdAt = new Date(Date.now() + 1_000).toISOString();
+      keys.push(request.headers()["idempotency-key"] ?? "");
+      if (creates === 1) {
+        // The server commits this logical request but the response is lost.
+        await route.abort("connectionreset");
+        return;
+      }
       await route.fulfill({
-        status: 200,
+        status: 201,
         contentType: "application/json",
-        body: JSON.stringify({
-          items: [
-            {
-              id: "attempt-free-commit-wins",
-              mode: "free",
-              status: "awaiting-upload",
-              createdAt,
-              outcome: {
-                state: "pending",
-                attemptId: "attempt-free-commit-wins",
-                mode: "free",
-                status: "awaiting-upload",
-              },
-            },
-          ],
-          nextCursor: null,
-        }),
+        body: JSON.stringify(created),
       });
       return;
     }
@@ -421,6 +417,9 @@ test("served production recovers a commit-wins lost Free create after reload wit
   await expect(
     page.getByRole("button", { name: "Selecionar vídeo" }),
   ).toBeEnabled();
-  expect(creates).toBe(1);
-  expect(listReads).toBe(1);
+  expect(creates).toBe(2);
+  expect(keys[0]).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
+  expect(keys[1]).toBe(keys[0]);
 });

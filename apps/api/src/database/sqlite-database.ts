@@ -849,6 +849,19 @@ const migrations: readonly Migration[] = [
       END;
     `,
   },
+  {
+    // A Free create must be replayable across a lost response or browser
+    // reload. Scope the public key to the athlete and retain a payload
+    // fingerprint so a conflicting replay fails closed.
+    version: 23,
+    sql: `
+      ALTER TABLE attempts ADD COLUMN idempotency_key TEXT;
+      ALTER TABLE attempts ADD COLUMN idempotency_fingerprint TEXT;
+      CREATE UNIQUE INDEX attempts_athlete_idempotency_key
+        ON attempts(athlete_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+    `,
+  },
 ];
 
 export function openSqliteDatabase(filename: string): SqliteDatabase {

@@ -518,16 +518,34 @@ export class SQLiteAttemptRepository implements AttemptRepository {
       id: string;
       athleteId: string;
       input: CreateAttemptInput;
+      idempotencyKey?: string;
     }>,
   ): Promise<AttemptRecord> {
     return this.#transaction(() => {
       const now = this.#clock.now();
       this.ensureAthlete(input.athleteId, now);
+      const fingerprint = JSON.stringify(input.input);
+      if (input.idempotencyKey) {
+        const existing = this.#raw
+          .prepare(
+            "SELECT id, idempotency_fingerprint FROM attempts WHERE athlete_id = ? AND idempotency_key = ?",
+          )
+          .get(input.athleteId, input.idempotencyKey) as
+          | Readonly<{ id: string; idempotency_fingerprint: string | null }>
+          | undefined;
+        if (existing) {
+          if (existing.idempotency_fingerprint !== fingerprint)
+            throw new RepositoryError("idempotency_key_conflict");
+          return parseAttemptRow(
+            this.mustGetScopedAttempt(existing.id, input.athleteId),
+          );
+        }
+      }
       if (input.input.mode === "verified")
         this.consumeCalibrationSession(input.athleteId, input.input, now);
       this.#raw
         .prepare(
-          "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'awaiting-upload', 'active', ?, ?)",
+          "INSERT INTO attempts (id, athlete_id, mode, challenge_id, challenge_version, calibration_session_id, status, deletion_state, idempotency_key, idempotency_fingerprint, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'awaiting-upload', 'active', ?, ?, ?, ?)",
         )
         .run(
           input.id,
@@ -538,6 +556,8 @@ export class SQLiteAttemptRepository implements AttemptRepository {
           input.input.mode === "verified"
             ? input.input.calibrationSessionId
             : null,
+          input.idempotencyKey ?? null,
+          input.idempotencyKey ? fingerprint : null,
           now,
           now,
         );

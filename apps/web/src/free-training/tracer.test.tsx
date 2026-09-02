@@ -276,28 +276,22 @@ describe("production Free Training tracer", () => {
     expect(screen.queryByRole("main")).not.toBeInTheDocument();
   });
 
-  it("recovers a server-committed Free create after unmount before its response, without posting another owner", async () => {
+  it("replays one causal Free create after an unmount loses its committed response", async () => {
     window.history.replaceState({}, "", "/free-training");
     const serverCommittedCreate = deferred<Response>();
+    const createHeaders: string[] = [];
     let creates = 0;
-    let listReads = 0;
-    const fetchSpy = vi.fn((input: RequestInfo | URL) => {
+    const fetchSpy = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input.toString());
       if (url.pathname !== "/v1/attempts")
         throw new Error(`Unexpected request: ${url.pathname}`);
-      if (url.search) {
-        listReads += 1;
-        return Promise.resolve(
-          response({
-            items: [
-              { ...createdFreeAttempt, createdAt: new Date().toISOString() },
-            ],
-            nextCursor: null,
-          }),
-        );
-      }
       creates += 1;
-      return serverCommittedCreate.promise;
+      createHeaders.push(
+        new Headers(init?.headers).get("idempotency-key") ?? "",
+      );
+      return creates === 1
+        ? serverCommittedCreate.promise
+        : Promise.resolve(response(createdFreeAttempt, 201));
     });
     vi.stubGlobal("fetch", fetchSpy);
 
@@ -310,8 +304,16 @@ describe("production Free Training tracer", () => {
     expect(
       await screen.findByRole("button", { name: "Selecionar vídeo" }),
     ).toBeEnabled();
-    expect(creates).toBe(1);
-    expect(listReads).toBe(1);
+    expect(creates).toBe(2);
+    expect(createHeaders[0]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    expect(createHeaders[1]).toBe(createHeaders[0]);
+
+    await act(async () => {
+      serverCommittedCreate.resolve(response(createdFreeAttempt, 201));
+      await Promise.resolve();
+    });
   });
 
   it.each([
@@ -368,6 +370,57 @@ describe("production Free Training tracer", () => {
       expect(fetchSpy).toHaveBeenCalledOnce();
     },
   );
+
+  it("recovers a persisted owner that the server no longer has by clearing it before one fresh create", async () => {
+    window.history.replaceState({}, "", "/free-training");
+    window.sessionStorage.setItem(
+      "revelai.free-training.owner.v1",
+      JSON.stringify({ attemptId: "attempt-deleted-remotely" }),
+    );
+    window.sessionStorage.setItem(
+      "revelai.free-training.create-intent.v1",
+      JSON.stringify({
+        idempotencyKey: "e1111111-1111-4111-8111-111111111111",
+      }),
+    );
+    const paths: string[] = [];
+    const keys: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const pathname = new URL(input.toString()).pathname;
+        paths.push(pathname);
+        if (pathname === "/v1/attempts/attempt-deleted-remotely")
+          return response(
+            {
+              code: "attempt_not_found",
+              message: "Esta tentativa não está disponível.",
+              retryable: false,
+            },
+            404,
+          );
+        if (pathname === "/v1/attempts") {
+          keys.push(new Headers(init?.headers).get("idempotency-key") ?? "");
+          return response(createdFreeAttempt, 201);
+        }
+        throw new Error(`Unexpected request: ${pathname}`);
+      }),
+    );
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("button", { name: "Selecionar vídeo" }),
+    ).toBeEnabled();
+    expect(paths).toEqual([
+      "/v1/attempts/attempt-deleted-remotely",
+      "/v1/attempts",
+    ]);
+    expect(keys[0]).not.toBe("e1111111-1111-4111-8111-111111111111");
+    expect(
+      window.sessionStorage.getItem("revelai.free-training.owner.v1"),
+    ).toBe(JSON.stringify({ attemptId: "attempt-free-w5-1" }));
+  });
 
   it("fails closed instead of adopting a different Free record for a persisted owner", async () => {
     window.history.replaceState({}, "", "/free-training");

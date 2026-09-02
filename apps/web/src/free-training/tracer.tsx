@@ -15,17 +15,16 @@ import { trainingHistoryQueryKey } from "../history/query";
 import {
   isOutcomeForAttempt,
   resolveUploadReconciliation,
-  isAmbiguousUploadError,
 } from "../lib/attempt-flow/upload-reconciliation";
 import { usePendingAttemptPolling } from "../lib/attempt-flow/pending-polling";
+import { useAttemptUploadLifecycle } from "../lib/attempt-flow/upload-lifecycle";
 import { FreeTrainingMedia } from "./media";
 import {
   beginFreeTrainingCreateIntent,
   clearFreeTrainingCreateIntent,
   clearFreeTrainingOwner,
+  clearFreeTrainingOwnershipForAttempt,
   persistFreeTrainingOwner,
-  recoverFreeTrainingOwner,
-  readFreeTrainingCreateIntent,
   readFreeTrainingOwner,
 } from "./owner";
 
@@ -93,7 +92,6 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
   const ownerRecoveryStartedRef = useRef(false);
   const uploadGenerationRef = useRef(0);
   const activeCreateRef = useRef<AbortController | undefined>(undefined);
-  const activeUploadRef = useRef<AbortController | undefined>(undefined);
   const activeDeleteRef = useRef<AbortController | undefined>(undefined);
   const pollingStopRef = useRef<() => void>(() => undefined);
   const [stage, setStage] = useState<FreeStage>("creating");
@@ -121,9 +119,6 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
     const creation = activeCreateRef.current;
     activeCreateRef.current = undefined;
     creation?.abort();
-    const upload = activeUploadRef.current;
-    activeUploadRef.current = undefined;
-    upload?.abort();
     const deletion = activeDeleteRef.current;
     activeDeleteRef.current = undefined;
     deletion?.abort();
@@ -184,34 +179,33 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
     [completeOutcome],
   );
 
-  const reconcileUploadAttempt = useCallback(
-    async (
-      ownedAttemptId: string,
-      generation: number,
-      uploadGeneration: number,
-      fallbackMessage = safeGenericError,
-    ) => {
-      try {
-        const attempt = await client.getAttempt(ownedAttemptId);
-        if (
-          generation !== flowGenerationRef.current ||
-          uploadGeneration !== uploadGenerationRef.current
-        )
-          return;
-        applyUploadOutcome(attempt.outcome, ownedAttemptId);
-      } catch (error) {
-        if (
-          generation !== flowGenerationRef.current ||
-          uploadGeneration !== uploadGenerationRef.current ||
-          isAbort(error)
-        )
-          return;
-        setMessage(fallbackMessage);
-        setStage("capture");
-      }
+  const uploadLifecycle = useAttemptUploadLifecycle({
+    enabled: stage === "uploading",
+    attemptId,
+    media,
+    expectedMode: "free",
+    generation: flowGenerationRef.current,
+    uploadGeneration: uploadGenerationRef.current,
+    client,
+    isGenerationCurrent: (generation, uploadGeneration) =>
+      generation === flowGenerationRef.current &&
+      uploadGeneration === uploadGenerationRef.current,
+    isAbort,
+    isRouteError,
+    hasRouteErrorCode,
+    errorMessage: safeError,
+    onProgress: setUploadProgress,
+    onOutcome: applyUploadOutcome,
+    onMismatch: () => {
+      setMessage("Este envio não pertence a este treino livre.");
+      setTerminal(undefined);
+      setStage("terminal");
     },
-    [applyUploadOutcome, client],
-  );
+    onError: (nextMessage) => {
+      setMessage(nextMessage);
+      setStage("capture");
+    },
+  });
 
   useEffect(() => {
     focusHeading(headingRef);
@@ -234,10 +228,10 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
       !controller.signal.aborted &&
       generation === flowGenerationRef.current &&
       activeCreateRef.current === controller;
-    const rejectOwner = () => {
+    const rejectOwner = (ownedAttemptId?: string) => {
       if (!isCurrent()) return;
       activeCreateRef.current = undefined;
-      clearFreeTrainingOwner();
+      if (ownedAttemptId) clearFreeTrainingOwnershipForAttempt(ownedAttemptId);
       setMessage("Esta tentativa não está disponível neste fluxo.");
       setStage("terminal");
     };
@@ -248,24 +242,23 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
     }) => {
       if (!isCurrent()) return;
       if (!isOutcomeForAttempt(attempt.outcome, attempt.id, "free")) {
-        rejectOwner();
+        rejectOwner(attempt.id);
         return;
       }
       activeCreateRef.current = undefined;
       persistFreeTrainingOwner(attempt.id);
-      clearFreeTrainingCreateIntent();
       setAttemptId(attempt.id);
       applyUploadOutcome(attempt.outcome, attempt.id);
     };
     const create = async () => {
-      beginFreeTrainingCreateIntent();
+      const intent = beginFreeTrainingCreateIntent();
       try {
         const attempt = await client.createAttempt(
           { mode: "free" },
-          { signal: controller.signal },
+          { signal: controller.signal, idempotencyKey: intent.idempotencyKey },
         );
         if (attempt.mode !== "free") {
-          rejectOwner();
+          rejectOwner(attempt.id);
           return;
         }
         adopt(attempt);
@@ -274,7 +267,6 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
         activeCreateRef.current = undefined;
         createStartedRef.current = false;
         ownerRecoveryStartedRef.current = false;
-        if (isRouteError(error)) clearFreeTrainingCreateIntent();
         setMessage(safeError(error));
       }
     };
@@ -286,12 +278,17 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
             signal: controller.signal,
           });
           if (attempt.mode !== "free" || attempt.id !== owner.attemptId) {
-            rejectOwner();
+            rejectOwner(owner.attemptId);
             return;
           }
           adopt(attempt);
         } catch (error) {
           if (!isCurrent() || isAbort(error)) return;
+          if (hasRouteErrorCode(error, "attempt_not_found")) {
+            clearFreeTrainingOwnershipForAttempt(owner.attemptId);
+            if (isCurrent()) void create();
+            return;
+          }
           activeCreateRef.current = undefined;
           createStartedRef.current = false;
           ownerRecoveryStartedRef.current = false;
@@ -300,121 +297,11 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
         return;
       }
 
-      const intent = readFreeTrainingCreateIntent();
-      if (intent) {
-        try {
-          const attempts = await client.listAttempts(
-            { limit: 50 },
-            {
-              signal: controller.signal,
-            },
-          );
-          if (!isCurrent()) return;
-          const recovery = recoverFreeTrainingOwner(attempts, intent);
-          if (recovery.kind === "owner") {
-            adopt(recovery.attempt);
-            return;
-          }
-          if (recovery.kind === "ambiguous") {
-            activeCreateRef.current = undefined;
-            createStartedRef.current = false;
-            ownerRecoveryStartedRef.current = false;
-            setMessage(
-              "Não foi possível confirmar qual treino livre deve continuar.",
-            );
-            return;
-          }
-        } catch (error) {
-          if (!isCurrent() || isAbort(error)) return;
-          activeCreateRef.current = undefined;
-          createStartedRef.current = false;
-          ownerRecoveryStartedRef.current = false;
-          setMessage(safeError(error));
-          return;
-        }
-      }
       if (isCurrent()) void create();
     };
     void recoverOrCreate();
     return undefined;
   }, [applyUploadOutcome, client, createTick, stage]);
-
-  useEffect(() => {
-    if (stage !== "uploading" || !attemptId || !media) return;
-    const generation = flowGenerationRef.current;
-    const uploadGeneration = uploadGenerationRef.current;
-    const controller = new AbortController();
-    activeUploadRef.current = controller;
-    void client
-      .uploadAttemptMedia(attemptId, media, {
-        signal: controller.signal,
-        onProgress: (nextProgress) => {
-          if (
-            generation === flowGenerationRef.current &&
-            uploadGeneration === uploadGenerationRef.current &&
-            activeUploadRef.current === controller
-          )
-            setUploadProgress(nextProgress);
-        },
-      })
-      .then((accepted) => {
-        if (
-          generation !== flowGenerationRef.current ||
-          uploadGeneration !== uploadGenerationRef.current ||
-          activeUploadRef.current !== controller
-        )
-          return;
-        activeUploadRef.current = undefined;
-        setUploadProgress(undefined);
-        if (accepted.attemptId !== attemptId || accepted.mode !== "free") {
-          setMessage("Este envio não pertence a este treino livre.");
-          setTerminal(undefined);
-          setStage("terminal");
-          return;
-        }
-        applyUploadOutcome(accepted.outcome, attemptId);
-      })
-      .catch((error: unknown) => {
-        if (
-          generation !== flowGenerationRef.current ||
-          uploadGeneration !== uploadGenerationRef.current ||
-          activeUploadRef.current !== controller
-        )
-          return;
-        activeUploadRef.current = undefined;
-        setUploadProgress(undefined);
-        if (
-          isAmbiguousUploadError(error, {
-            isAbort,
-            isRouteError,
-            hasRouteErrorCode,
-          })
-        ) {
-          void reconcileUploadAttempt(
-            attemptId,
-            generation,
-            uploadGeneration,
-            safeError(error),
-          );
-          return;
-        }
-        setMessage(safeError(error));
-        setStage("capture");
-      });
-    return () => {
-      if (activeUploadRef.current === controller) {
-        activeUploadRef.current = undefined;
-        controller.abort();
-      }
-    };
-  }, [
-    applyUploadOutcome,
-    attemptId,
-    client,
-    media,
-    reconcileUploadAttempt,
-    stage,
-  ]);
 
   const pendingPolling = usePendingAttemptPolling({
     enabled: stage === "pending" && outcome?.state === "pending",
@@ -453,7 +340,6 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
         flowGenerationRef.current += 1;
         uploadGenerationRef.current += 1;
         activeCreateRef.current?.abort();
-        activeUploadRef.current?.abort();
         activeDeleteRef.current?.abort();
         stopPolling();
       });
@@ -483,8 +369,7 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
         )
           return;
         activeDeleteRef.current = undefined;
-        clearFreeTrainingOwner();
-        clearFreeTrainingCreateIntent();
+        clearFreeTrainingOwnershipForAttempt(attemptId);
         setMedia(undefined);
         queryClient.setQueryData<
           InfiniteData<AttemptListResponse, string | undefined>
@@ -591,21 +476,20 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
             type="button"
             onClick={() => {
               const uploadGeneration = ++uploadGenerationRef.current;
-              const upload = activeUploadRef.current;
-              activeUploadRef.current = undefined;
-              upload?.abort();
+              uploadLifecycle.abort();
               setUploadProgress(undefined);
               setStage("capture");
               setMessage(
                 "Envio cancelado. O vídeo continua pronto para tentar novamente.",
               );
               if (attemptId)
-                void reconcileUploadAttempt(
+                void uploadLifecycle.reconcile({
                   attemptId,
-                  flowGenerationRef.current,
+                  generation: flowGenerationRef.current,
                   uploadGeneration,
-                  "Envio cancelado. O vídeo continua pronto para tentar novamente.",
-                );
+                  fallbackMessage:
+                    "Envio cancelado. O vídeo continua pronto para tentar novamente.",
+                });
             }}
           >
             Cancelar envio

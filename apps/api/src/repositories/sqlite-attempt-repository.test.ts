@@ -128,6 +128,7 @@ type RepositoryActorInput = Readonly<{
     | "finalize-with-current-policy"
     | "deactivate-policy"
     | "tombstone"
+    | "create-free"
     | "create-verified";
   input: unknown;
 }>;
@@ -1231,6 +1232,110 @@ describe("SQLiteAttemptRepository", () => {
         athleteId: ATHLETE_A,
       }),
     ).toBeNull();
+  });
+
+  it("serializes two concurrent Free creates with one causal key into one Attempt", async () => {
+    const key = "f1111111-1111-4111-8111-111111111111";
+    const firstHold = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+    const first = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: fixture.clock.now(),
+      ids: [],
+      delayMilliseconds: 0,
+      holdAtBegin: firstHold,
+      action: "create-free",
+      input: {
+        id: ATTEMPT_A,
+        athleteId: ATHLETE_A,
+        input: { mode: "free" },
+        idempotencyKey: key,
+      },
+    });
+    const second = startRepositoryActor({
+      filename: join(fixture.directory, "api.sqlite"),
+      now: fixture.clock.now(),
+      ids: [],
+      delayMilliseconds: 0,
+      action: "create-free",
+      input: {
+        id: ATTEMPT_B,
+        athleteId: ATHLETE_A,
+        input: { mode: "free" },
+        idempotencyKey: key,
+      },
+    });
+    await Promise.all([first.ready, second.ready]);
+    first.start();
+    await first.acquired;
+    second.start();
+    await second.attempting;
+    Atomics.store(new Int32Array(firstHold), 0, 1);
+    Atomics.notify(new Int32Array(firstHold), 0);
+
+    const [firstResult, secondResult] = await Promise.all([
+      first.done,
+      second.done,
+    ]);
+    expect(firstResult.error).toBeUndefined();
+    expect(secondResult.error).toBeUndefined();
+    expect((firstResult.value as { id: string }).id).toBe(ATTEMPT_A);
+    expect((secondResult.value as { id: string }).id).toBe(ATTEMPT_A);
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT COUNT(*) AS count FROM attempts WHERE athlete_id = ? AND idempotency_key = ?",
+        )
+        .get(ATHLETE_A, key),
+    ).toEqual({ count: 1 });
+  });
+
+  it("replays a stored causal key after a repository reopen and rejects a conflicting payload", async () => {
+    const key = "a2222222-2222-4222-8222-222222222222";
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+      idempotencyKey: key,
+    });
+    const reopened = SQLiteAttemptRepository.forReadOnlyTest({
+      database: fixture.openSecondaryDatabase(),
+      clock: fixture.clock,
+      ids: fixture.ids,
+    });
+    await expect(
+      reopened.createAttempt({
+        id: ATTEMPT_B,
+        athleteId: ATHLETE_A,
+        input: { mode: "free" },
+        idempotencyKey: key,
+      }),
+    ).resolves.toMatchObject({ id: ATTEMPT_A });
+
+    await fixture.repository.issueCalibrationSession({
+      id: SESSION_A,
+      athleteId: ATHLETE_A,
+      nonce: "a".repeat(43),
+      challengeId: "wall-pass",
+      challengeVersion: 1,
+    });
+    await fixture.repository.readyCalibrationSession({
+      id: SESSION_A,
+      athleteId: ATHLETE_A,
+      requiredGates: ["device", "space", "athlete", "rehearsal", "record"],
+    });
+    await expect(
+      reopened.createAttempt({
+        id: ATTEMPT_C,
+        athleteId: ATHLETE_A,
+        input: {
+          mode: "verified",
+          challengeId: "wall-pass",
+          challengeVersion: 1,
+          calibrationSessionId: SESSION_A,
+        },
+        idempotencyKey: key,
+      }),
+    ).rejects.toMatchObject({ code: "idempotency_key_conflict" });
   });
 
   it("issues, readies, and consumes a calibration session once with owner and expiry guards", async () => {
@@ -4402,7 +4507,41 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toEqual({ count: 22 });
+    ).toEqual({ count: 23 });
+    reopened.close();
+  });
+
+  it("upgrades the exact v22 predecessor with causal idempotency storage", () => {
+    const filename = join(fixture.directory, "idempotency-v22.sqlite");
+    const predecessor = openSqliteDatabaseAtVersionForTest(filename, 22);
+    expect(
+      predecessor.raw
+        .prepare("PRAGMA table_info(attempts)")
+        .all()
+        .map((column) => (column as { name: string }).name),
+    ).not.toContain("idempotency_key");
+    predecessor.close();
+
+    const upgraded = openSqliteDatabase(filename);
+    expect(
+      upgraded.raw
+        .prepare("PRAGMA table_info(attempts)")
+        .all()
+        .map((column) => (column as { name: string }).name),
+    ).toEqual(
+      expect.arrayContaining(["idempotency_key", "idempotency_fingerprint"]),
+    );
+    expect(
+      upgraded.raw
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'attempts_athlete_idempotency_key'",
+        )
+        .get(),
+    ).toEqual({ name: "attempts_athlete_idempotency_key" });
+    upgraded.close();
+
+    const reopened = openSqliteDatabase(filename);
+    expect(reopened.raw.pragma("user_version", { simple: true })).toBe(23);
     reopened.close();
   });
 
@@ -4423,10 +4562,10 @@ describe("SQLiteAttemptRepository", () => {
         .prepare("SELECT status FROM attempts WHERE id = ?")
         .get(ATTEMPT_A),
     ).toEqual({ status: "valid" });
-    expect(normalized.raw.pragma("user_version", { simple: true })).toBe(22);
+    expect(normalized.raw.pragma("user_version", { simple: true })).toBe(23);
     normalized.close();
 
-    const staleCurrent = openSqliteDatabaseAtVersionForTest(validFilename, 22);
+    const staleCurrent = openSqliteDatabaseAtVersionForTest(validFilename, 23);
     staleCurrent.raw.pragma("user_version = 0");
     staleCurrent.close();
 
@@ -4435,8 +4574,8 @@ describe("SQLiteAttemptRepository", () => {
       idempotent.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toEqual({ count: 22 });
-    expect(idempotent.raw.pragma("user_version", { simple: true })).toBe(22);
+    ).toEqual({ count: 23 });
+    expect(idempotent.raw.pragma("user_version", { simple: true })).toBe(23);
     expect(
       idempotent.raw
         .prepare("SELECT status FROM attempts WHERE id = ?")
@@ -4520,7 +4659,7 @@ describe("SQLiteAttemptRepository", () => {
         .prepare("SELECT status FROM attempts WHERE id = ?")
         .get(ATTEMPT_A),
     ).toEqual({ status: "valid" });
-    expect(repaired.raw.pragma("user_version", { simple: true })).toBe(22);
+    expect(repaired.raw.pragma("user_version", { simple: true })).toBe(23);
     repaired.close();
   });
 
@@ -4644,7 +4783,7 @@ describe("SQLiteAttemptRepository", () => {
       "migration-mirror-ahead.sqlite",
     );
     const current = openSqliteDatabase(aheadFilename);
-    current.raw.pragma("user_version = 23");
+    current.raw.pragma("user_version = 24");
     const before = migrationHistoryStateForTest(current);
     expect(() => openSqliteDatabase(aheadFilename)).toThrow(
       "sqlite migration history is invalid",
@@ -4661,7 +4800,7 @@ describe("SQLiteAttemptRepository", () => {
       20,
     );
     missingLedger.raw.exec("DROP TABLE schema_migrations");
-    missingLedger.raw.pragma("user_version = 23");
+    missingLedger.raw.pragma("user_version = 24");
     const missingLedgerBefore = missingLedgerStateForTest(missingLedger);
     expect(() => openSqliteDatabase(missingLedgerFilename)).toThrow(
       "sqlite migration history is invalid",
@@ -4726,7 +4865,7 @@ describe("SQLiteAttemptRepository", () => {
     );
     const predecessor = openSqliteDatabase(filename);
     predecessor.raw.pragma("journal_mode = DELETE");
-    predecessor.raw.pragma("user_version = 23");
+    predecessor.raw.pragma("user_version = 24");
     predecessor.close();
 
     const before = await durableStartupStateForTest(filename);
@@ -4816,19 +4955,19 @@ describe("SQLiteAttemptRepository", () => {
             ),
           ).resolves.toEqual(
             Array.from({ length: 4 }, () => ({
-              userVersion: 22,
-              migrationCount: 22,
+              userVersion: 23,
+              migrationCount: 23,
             })),
           );
           const reopened = openSqliteDatabase(filename);
           expect(reopened.raw.pragma("user_version", { simple: true })).toBe(
-            22,
+            23,
           );
           expect(
             reopened.raw
               .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
               .get(),
-          ).toEqual({ count: 22 });
+          ).toEqual({ count: 23 });
           reopened.close();
         }
       }
@@ -5372,7 +5511,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 22 });
+    ).toMatchObject({ count: 23 });
     reopened.close();
     upgraded.close();
 
@@ -5821,7 +5960,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 22 });
+    ).toMatchObject({ count: 23 });
     reopened.close();
     upgraded.close();
   });
@@ -5902,7 +6041,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 22 });
+    ).toMatchObject({ count: 23 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -6054,7 +6193,7 @@ describe("SQLiteAttemptRepository", () => {
       reopened.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 22 });
+    ).toMatchObject({ count: 23 });
     reopened.close();
   });
 
@@ -6327,7 +6466,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toMatchObject({ count: 22 });
+    ).toMatchObject({ count: 23 });
     upgraded.close();
 
     const reopened = openSqliteDatabase(filename);
@@ -6430,7 +6569,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toEqual({ count: 22 });
+    ).toEqual({ count: 23 });
     await expect(
       upgradedPolicy.storeBenchmarkReceipt(quarantinedReceipt),
     ).resolves.toEqual(quarantinedReceipt);
@@ -6513,7 +6652,7 @@ describe("SQLiteAttemptRepository", () => {
       upgraded.raw
         .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
         .get(),
-    ).toEqual({ count: 22 });
+    ).toEqual({ count: 23 });
     upgraded.close();
   });
 

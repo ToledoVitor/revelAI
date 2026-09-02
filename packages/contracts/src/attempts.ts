@@ -25,6 +25,12 @@ export const AthleteIdentityHeaderSchema = z
   })
   .passthrough();
 
+export const IdempotencyKeyHeaderSchema = z
+  .object({
+    "idempotency-key": z.string().uuid(),
+  })
+  .passthrough();
+
 export const CreateAttemptInputSchema = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("free") }).strict(),
   z
@@ -181,6 +187,7 @@ export const MediaUploadAcceptedSchema = z
   });
 
 export type AthleteIdentityHeader = z.infer<typeof AthleteIdentityHeaderSchema>;
+export type IdempotencyKeyHeader = z.infer<typeof IdempotencyKeyHeaderSchema>;
 export type CreateAttemptInput = z.infer<typeof CreateAttemptInputSchema>;
 export type AttemptMode = z.infer<typeof AttemptModeSchema>;
 export type AttemptStatus = z.infer<typeof AttemptStatusSchema>;

@@ -1,5 +1,6 @@
 import {
   AthleteIdentityHeaderSchema,
+  IdempotencyKeyHeaderSchema,
   AttemptIdPathParamsSchema,
   AttemptListQuerySchema,
   AttemptListResponseSchema,
@@ -51,7 +52,10 @@ export type RevelApiError = Readonly<{
 }>;
 
 export type RevelApiAbort = Readonly<{ kind: "aborted" }>;
-export type RevelApiRequestOptions = Readonly<{ signal?: AbortSignal }>;
+export type RevelApiRequestOptions = Readonly<{
+  signal?: AbortSignal;
+  idempotencyKey?: string;
+}>;
 export type RevelApiUploadOptions = RevelApiRequestOptions &
   Readonly<{ onProgress?(progress: RevelApiUploadProgress): void }>;
 
@@ -192,7 +196,16 @@ export function createRevelApiClient(options: RevelApiClientOptions) {
     }
   };
   const requestOptions = (input?: RevelApiRequestOptions): RequestInit => ({
-    headers,
+    headers: {
+      ...headers,
+      ...(input?.idempotencyKey
+        ? {
+            "idempotency-key": IdempotencyKeyHeaderSchema.parse({
+              "idempotency-key": input.idempotencyKey,
+            })["idempotency-key"],
+          }
+        : {}),
+    },
     ...(input?.signal ? { signal: input.signal } : {}),
   });
   const postJson = <T>(
@@ -207,7 +220,10 @@ export function createRevelApiClient(options: RevelApiClientOptions) {
       {
         ...requestOptions(input),
         method: "POST",
-        headers: { ...headers, "content-type": "application/json" },
+        headers: {
+          ...(requestOptions(input).headers as Record<string, string>),
+          "content-type": "application/json",
+        },
         body: JSON.stringify(body),
       },
       successStatuses,

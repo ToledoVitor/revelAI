@@ -1,15 +1,12 @@
-import type { AttemptListResponse, AttemptSummary } from "@revelai/contracts";
-import { isOutcomeForAttempt } from "../lib/attempt-flow/upload-reconciliation";
-
 export const freeTrainingOwnerStorageKey = "revelai.free-training.owner.v1";
 export const freeTrainingCreateIntentStorageKey =
   "revelai.free-training.create-intent.v1";
 
-export type FreeTrainingCreateIntent = Readonly<{
-  startedAt: string;
-}>;
-
 type FreeTrainingOwner = Readonly<{ attemptId: string }>;
+export type FreeTrainingCreateIntent = Readonly<{ idempotencyKey: string }>;
+
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function readJson(key: string): unknown {
   try {
@@ -24,8 +21,7 @@ function writeJson(key: string, value: unknown) {
   try {
     window.sessionStorage.setItem(key, JSON.stringify(value));
   } catch {
-    // Storage can be unavailable in a privacy-restricted browser. The route
-    // remains safe for the current lifetime, but cannot claim reload recovery.
+    // Session durability is unavailable in restricted browser storage.
   }
 }
 
@@ -33,8 +29,19 @@ function clear(key: string) {
   try {
     window.sessionStorage.removeItem(key);
   } catch {
-    // See writeJson: storage is an enhancement, not a dependency for safety.
+    // Session durability is unavailable in restricted browser storage.
   }
+}
+
+function newUuid(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  return [...bytes]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")
+    .replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
 }
 
 export function readFreeTrainingOwner(): FreeTrainingOwner | undefined {
@@ -65,16 +72,19 @@ export function readFreeTrainingCreateIntent():
   if (
     typeof value !== "object" ||
     value === null ||
-    !("startedAt" in value) ||
-    typeof value.startedAt !== "string" ||
-    !Number.isFinite(Date.parse(value.startedAt))
+    !("idempotencyKey" in value) ||
+    typeof value.idempotencyKey !== "string" ||
+    !uuidPattern.test(value.idempotencyKey)
   )
     return undefined;
-  return { startedAt: value.startedAt };
+  return { idempotencyKey: value.idempotencyKey };
 }
 
+/** Creates once per logical Free owner; retries and reloads keep this UUID. */
 export function beginFreeTrainingCreateIntent(): FreeTrainingCreateIntent {
-  const intent = { startedAt: new Date().toISOString() };
+  const existing = readFreeTrainingCreateIntent();
+  if (existing) return existing;
+  const intent = { idempotencyKey: newUuid() };
   writeJson(freeTrainingCreateIntentStorageKey, intent);
   return intent;
 }
@@ -83,26 +93,8 @@ export function clearFreeTrainingCreateIntent() {
   clear(freeTrainingCreateIntentStorageKey);
 }
 
-/**
- * A response-lost create has no server-side idempotency key. Adopt only one
- * parsed Free attempt created after this browser's persisted intent; multiple
- * candidates are deliberately treated as ambiguous rather than guessing.
- */
-export function recoverFreeTrainingOwner(
-  attempts: AttemptListResponse,
-  intent: FreeTrainingCreateIntent,
-):
-  | Readonly<{ kind: "owner"; attempt: AttemptSummary }>
-  | Readonly<{ kind: "none" }>
-  | Readonly<{ kind: "ambiguous" }> {
-  const intentTime = Date.parse(intent.startedAt);
-  const candidates = attempts.items.filter(
-    (attempt) =>
-      attempt.mode === "free" &&
-      Date.parse(attempt.createdAt) >= intentTime &&
-      isOutcomeForAttempt(attempt.outcome, attempt.id, "free"),
-  );
-  if (candidates.length === 0) return { kind: "none" };
-  if (candidates.length > 1) return { kind: "ambiguous" };
-  return { kind: "owner", attempt: candidates[0] };
+export function clearFreeTrainingOwnershipForAttempt(attemptId: string) {
+  if (readFreeTrainingOwner()?.attemptId !== attemptId) return;
+  clearFreeTrainingOwner();
+  clearFreeTrainingCreateIntent();
 }

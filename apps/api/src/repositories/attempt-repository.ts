@@ -21,6 +21,7 @@ export type RepositoryErrorCode =
   | "invalid_terminal_outcome"
   | "terminal_result_conflict"
   | "invalid_input"
+  | "idempotency_key_conflict"
   | "persisted_data_corrupt";
 
 /** Safe repository-port error; HTTP maps only its allowlisted public codes. */
@@ -340,6 +341,7 @@ export interface AttemptRepository {
       id: string;
       athleteId: string;
       input: CreateAttemptInput;
+      idempotencyKey?: string;
     }>,
   ): Promise<AttemptRecord>;
   getAttempt(

@@ -1,53 +1,42 @@
-import { AttemptListResponseSchema } from "@revelai/contracts";
 import { describe, expect, it } from "vitest";
-import { recoverFreeTrainingOwner } from "./owner";
+import {
+  beginFreeTrainingCreateIntent,
+  clearFreeTrainingOwnershipForAttempt,
+  freeTrainingCreateIntentStorageKey,
+  freeTrainingOwnerStorageKey,
+  persistFreeTrainingOwner,
+  readFreeTrainingCreateIntent,
+  readFreeTrainingOwner,
+} from "./owner";
 
-const intent = { startedAt: "2026-08-30T12:00:00.000Z" };
+describe("Free training causal ownership", () => {
+  it("creates a fresh valid idempotency key when persisted storage is malformed", () => {
+    window.sessionStorage.setItem(
+      freeTrainingCreateIntentStorageKey,
+      JSON.stringify({ idempotencyKey: "not-a-uuid" }),
+    );
 
-function freeAttempt(id: string, createdAt: string) {
-  return {
-    id,
-    mode: "free",
-    status: "awaiting-upload",
-    createdAt,
-    outcome: {
-      state: "pending",
-      attemptId: id,
-      mode: "free",
-      status: "awaiting-upload",
-    },
-  };
-}
+    const intent = beginFreeTrainingCreateIntent();
 
-describe("Free training create-intent recovery", () => {
-  it("adopts exactly one parsed Free attempt after the persisted intent", () => {
-    const attempts = AttemptListResponseSchema.parse({
-      items: [freeAttempt("attempt-recovered", "2026-08-30T12:00:01.000Z")],
-      nextCursor: null,
-    });
-
-    expect(recoverFreeTrainingOwner(attempts, intent)).toMatchObject({
-      kind: "owner",
-      attempt: { id: "attempt-recovered", mode: "free" },
-    });
+    expect(intent.idempotencyKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    expect(readFreeTrainingCreateIntent()).toEqual(intent);
   });
 
-  it("does not adopt stale or ambiguous Free records", () => {
-    const stale = AttemptListResponseSchema.parse({
-      items: [freeAttempt("attempt-stale", "2026-08-30T11:59:59.000Z")],
-      nextCursor: null,
-    });
-    const ambiguous = AttemptListResponseSchema.parse({
-      items: [
-        freeAttempt("attempt-newer", "2026-08-30T12:00:02.000Z"),
-        freeAttempt("attempt-other", "2026-08-30T12:00:01.000Z"),
-      ],
-      nextCursor: null,
-    });
+  it("clears the owner and causal key only for the matching deleted Attempt", () => {
+    persistFreeTrainingOwner("attempt-owned");
+    const intent = beginFreeTrainingCreateIntent();
 
-    expect(recoverFreeTrainingOwner(stale, intent)).toEqual({ kind: "none" });
-    expect(recoverFreeTrainingOwner(ambiguous, intent)).toEqual({
-      kind: "ambiguous",
-    });
+    clearFreeTrainingOwnershipForAttempt("attempt-other");
+    expect(readFreeTrainingOwner()).toEqual({ attemptId: "attempt-owned" });
+    expect(readFreeTrainingCreateIntent()).toEqual(intent);
+
+    clearFreeTrainingOwnershipForAttempt("attempt-owned");
+    expect(readFreeTrainingOwner()).toBeUndefined();
+    expect(readFreeTrainingCreateIntent()).toBeUndefined();
+    expect(
+      window.sessionStorage.getItem(freeTrainingOwnerStorageKey),
+    ).toBeNull();
   });
 });

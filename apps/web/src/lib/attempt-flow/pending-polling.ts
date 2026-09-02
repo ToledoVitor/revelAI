@@ -48,6 +48,7 @@ export function usePendingAttemptPolling<T>(input: PendingPollingInput<T>) {
     const active = activeRequestRef.current;
     activeRequestRef.current = undefined;
     active?.controller.abort();
+    setRefreshing(false);
   }, []);
 
   const refresh = useCallback(async () => {
@@ -137,6 +138,7 @@ export function usePendingAttemptPolling<T>(input: PendingPollingInput<T>) {
       const active = activeRequestRef.current;
       activeRequestRef.current = undefined;
       active?.controller.abort();
+      setRefreshing(false);
     };
   }, [
     backoffSeconds,

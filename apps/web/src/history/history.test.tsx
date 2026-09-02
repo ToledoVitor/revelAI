@@ -28,6 +28,7 @@ beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 beforeEach(() => {
   window.history.replaceState({}, "", "/");
   window.localStorage.setItem("revelai.device-athlete-id", athleteId);
+  window.sessionStorage.clear();
   vi.spyOn(window, "confirm").mockReturnValue(true);
 });
 afterEach(() => {
@@ -312,6 +313,107 @@ describe("training history", () => {
     await waitFor(() => expect(deleteHandler).toHaveBeenCalledTimes(1));
     deletion.resolve(new HttpResponse(null, { status: 204 }));
     expect(await screen.findByText("Treino excluído.")).toBeVisible();
+  });
+
+  it("does not clear another Free owner's causal storage after a history delete", async () => {
+    const user = userEvent.setup();
+    const attempt = pendingAttempt(
+      "attempt-history-delete",
+      "2026-08-30T13:00:00.000Z",
+    );
+    window.sessionStorage.setItem(
+      "revelai.free-training.owner.v1",
+      JSON.stringify({ attemptId: "attempt-other-owner" }),
+    );
+    window.sessionStorage.setItem(
+      "revelai.free-training.create-intent.v1",
+      JSON.stringify({
+        idempotencyKey: "c1111111-1111-4111-8111-111111111111",
+      }),
+    );
+    server.use(
+      http.get("*/v1/attempts", () =>
+        HttpResponse.json({ items: [attempt], nextCursor: null }),
+      ),
+      http.delete(
+        "*/v1/attempts/attempt-history-delete",
+        () => new HttpResponse(null, { status: 204 }),
+      ),
+    );
+
+    render(<App />);
+    await user.click(screen.getByRole("link", { name: "Meus treinos" }));
+    await user.click(screen.getByRole("button", { name: "Excluir treino" }));
+
+    expect(await screen.findByText("Treino excluído.")).toBeVisible();
+    expect(
+      window.sessionStorage.getItem("revelai.free-training.owner.v1"),
+    ).toBe(JSON.stringify({ attemptId: "attempt-other-owner" }));
+    expect(
+      window.sessionStorage.getItem("revelai.free-training.create-intent.v1"),
+    ).toBe(
+      JSON.stringify({
+        idempotencyKey: "c1111111-1111-4111-8111-111111111111",
+      }),
+    );
+  });
+
+  it("clears a deleted Free owner so returning to Free creates one fresh causal Attempt", async () => {
+    const user = userEvent.setup();
+    const attempt = pendingAttempt(
+      "attempt-owned-delete",
+      "2026-08-30T13:00:00.000Z",
+    );
+    window.sessionStorage.setItem(
+      "revelai.free-training.owner.v1",
+      JSON.stringify({ attemptId: attempt.id }),
+    );
+    window.sessionStorage.setItem(
+      "revelai.free-training.create-intent.v1",
+      JSON.stringify({
+        idempotencyKey: "d1111111-1111-4111-8111-111111111111",
+      }),
+    );
+    const createKeys: string[] = [];
+    server.use(
+      http.get("*/v1/attempts", () =>
+        HttpResponse.json({ items: [attempt], nextCursor: null }),
+      ),
+      http.delete(
+        "*/v1/attempts/attempt-owned-delete",
+        () => new HttpResponse(null, { status: 204 }),
+      ),
+      http.post("*/v1/attempts", async ({ request }) => {
+        createKeys.push(request.headers.get("idempotency-key") ?? "");
+        return HttpResponse.json(
+          {
+            ...attempt,
+            id: "attempt-fresh-after-delete",
+            outcome: {
+              ...attempt.outcome,
+              attemptId: "attempt-fresh-after-delete",
+            },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    render(<App />);
+    await user.click(screen.getByRole("link", { name: "Meus treinos" }));
+    await user.click(screen.getByRole("button", { name: "Excluir treino" }));
+    await screen.findByText("Treino excluído.");
+    await user.click(screen.getByRole("link", { name: "Início" }));
+    await user.click(screen.getByRole("button", { name: "Treino livre" }));
+
+    expect(
+      await screen.findByRole("button", { name: "Selecionar vídeo" }),
+    ).toBeEnabled();
+    expect(createKeys).toHaveLength(1);
+    expect(createKeys[0]).not.toBe("d1111111-1111-4111-8111-111111111111");
+    expect(
+      window.sessionStorage.getItem("revelai.free-training.owner.v1"),
+    ).toBe(JSON.stringify({ attemptId: "attempt-fresh-after-delete" }));
   });
 });
 
