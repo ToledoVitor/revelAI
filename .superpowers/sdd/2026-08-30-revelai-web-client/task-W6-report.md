@@ -4,7 +4,7 @@
 
 `DONE_WITH_CONCERNS`
 
-The required browser/HTTP, contract-fixture, capture, structural, and CI wiring are implemented and verified. Final visual acceptance is deliberately pending independent Sol review: five approved non-home reference states are real P0 visual divergences and were neither hidden by a mask nor represented as passed.
+The required browser/HTTP, contract-fixture, capture, structural, and CI wiring are implemented and verified. This was the initial record before pre-review remediation; the five historical P0 visual findings below are superseded by the closed remediation record appended on 2026-09-02. Final visual acceptance remains deliberately pending independent Sol review.
 
 ## Baseline and commits
 
@@ -99,3 +99,65 @@ Each stem above has `.png`, `.reference-normalized.png`, `.overlay.png`, `.diff.
 I manually reviewed the full W6 diff against the brief and repository conventions after the required `code-review` workflow was found to require subagents; the W6 brief explicitly prohibits subagents. The review found and fixed the only regression: demo-only specs were being collected by the normal visual suite. No destructive Git operation, broad staging, push, unapproved visual asset, API mock in a real-demo trace, altered W0 budget, or production review route was introduced.
 
 Remaining concerns are the five real P0 visual gaps, required independent Sol acceptance, hosted Linux/x64 canonical pixels, and the host's absent FFmpeg executable for a true codec-backed C10 media run.
+
+## Remediation after pre-review — 2026-09-02
+
+### Status
+
+`DONE_WITH_CONCERNS` — all pre-review actionable W6 P0/P1/P2 findings are remediated in the production Web owner. Independent Sol acceptance and hosted Linux/x64 canonical pixels remain intentionally pending. Remaining P3 evidence is limited to the approved runtime hero/crop and the required truthful removal of the source's closed-app notification promise.
+
+### Additional commit
+
+- Remediation functional commit: `b20bf023c56038194eeb980c9434cad1b243cc01` (`feat(web): complete verified state acceptance`).
+
+### Changed files and why
+
+| Path | Why |
+| --- | --- |
+| `apps/web/src/verified/tracer.tsx` | Adds the public challenge-choice state before setup ownership; provides the styled real calibration, capture, pending, and ranked-report states while preserving existing HTTP, setup, upload, polling, and result boundaries. |
+| `apps/web/src/verified/production-capture.tsx` | Adds the approved hero fallback only while a real camera stream is absent, preserves the real `<video>`, and makes requirements semantic disclosure. |
+| `apps/web/src/styles.css` | Uses existing tokens and bundled Bebas/Arimo faces for editorial layout, normal borders, real-control states, progress, timeline, metrics, and responsive presentation. No screenshot, new raster, CSS illustration, or custom SVG is introduced. |
+| `apps/web/src/verified/{tracer,production-capture}.test.tsx` | Covers choice-before-owner ordering, camera fallback controls, ranked-only fields, and the real passed-device calibration rail. |
+| `apps/web/src/{home/home.test.tsx,production-router-harness.test.ts}` | Updates direct public-route assertions to the new real choice boundary. |
+| `apps/web/src/visual/{approved-reference,demo-api.e2e,production-route-isolation}.visual.spec.ts` | Drives choice explicitly before calibration in production/demo paths and verifies `/verified` has no calibration mutation before the player prepares wall pass. |
+| `apps/web/design-qa.md` | Records the before/fix/after remediation comparison and pending independent acceptance. |
+
+### RED/GREEN evidence added in this remediation
+
+- **RED:** `rtk pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx --reporter=verbose` — **1 failed, 41 passed (42)** before `ChallengeChoice` existed; the expected public choice heading was absent.
+- **RED:** `rtk pnpm --filter @revelai/web exec vitest run src/verified/production-capture.test.tsx --reporter=verbose` — **1 failed, 9 passed (10)** before the approved fallback image existed.
+- **RED:** `rtk pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx -t 'preserves the gated setup correction' --reporter=dot` — **1 failed, 41 skipped (42)** before `displayedPassedGates` reflected the actually-complete device step; observed `data-passed="false"`.
+- **GREEN:** `rtk pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx src/verified/production-capture.test.tsx --reporter=dot` — **52 passed**.
+- **GREEN:** `rtk pnpm --filter @revelai/web exec vitest run src/home/home.test.tsx src/production-router-harness.test.ts src/verified/tracer.test.tsx src/verified/production-capture.test.tsx --reporter=dot` — **63 passed**.
+
+### Fresh design-QA remediation matrix
+
+Every item below was captured after `b20bf02`, at `390×844` CSS pixels, DPR 2, CSS scale, normalized density 1. Reference, capture, 50% overlay, and complete unmasked diff were opened and inspected. Artifact directory: `apps/web/coverage/playwright/visual-artifacts/`.
+
+| Finding | Exact code fix | Fresh artifact stem | Full unmasked ratio / outcome |
+| --- | --- | --- | --- |
+| W6-V02 challenge choice | `ChallengeChoice` + `TracerStage` `challenge`; move setup only from `Preparar desafio`. | `verified-challenge-default--390x844--dpr-2--verified--challenge-choice` | **23.596%**. Card/disabled rows/CTA/headline are present; approved hero subject/crop is P3 only. |
+| W6-V03 calibration | `SetupProgress`, `CalibrationGuidance`, `displayedPassedGates` use actual gate/camera state. | `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` | **38.174%**. Rail, passed device, active correction, truthful blocked guidance and hero region are present; unavailable source court art is P3 only. |
+| W6-V04 capture | real camera conditional plus `capture-fallback-image`, semantic requirements disclosure and control layout. | `verified-record-default--390x844--dpr-2--verified--recording-capture` | **34.494%**. Actual camera remains primary when present; approved fallback/crop difference is P3 only. |
+| W6-V05 pending | semantic `processing-timeline`, foreground/manual refresh copy, no closed-app promise/control. | `verified-processing-demo--390x844--dpr-2--verified--processing-pending` | **25.132%**. Timeline hierarchy is present; removed notification/image-strip source content is required truth/asset P3 only. |
+| W6-V06 ranked report | `VerifiedReport` scorecard/metrics/insight; ranked branch is isolated and demo/experimental structurally lack rank fields. | `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report` | **16.812%**. Persistent exact competitive truth and report hierarchy are present. |
+
+Fidelity surfaces reviewed in every row: Bebas/Arimo typography and wrapping; spacing/rhythm at 390px; warm-white/deep-emerald/border tokens and contrast; approved image quality/crop; Portuguese copy, truth, controls, and Phosphor icon affordance. Focused state comparisons were performed for challenge controls, passed calibration status, live/fallback camera boundary, manual refresh, and rank-field isolation. No P0/P1/P2 remains actionable.
+
+### Verification after remediation
+
+- `rtk pnpm --filter @revelai/web run lint` — exit 0.
+- `rtk pnpm --filter @revelai/web run typecheck` — exit 0.
+- `rtk pnpm run test:production-router` — **23 passed**.
+- `rtk pnpm run test:demo:e2e` — **2 passed**, production build with real local demo HTTP boundary.
+- `rtk pnpm run test:visual:structural` — **25 passed, 13 skipped** (the dedicated demo production tests and inapplicable pixel-only paths are skipped by design).
+- `rtk pnpm run test:visual:darwin` — **29 passed, 9 skipped**; fresh artifact matrix emitted and inspected.
+- `rtk pnpm run test:visual:canonical` — expected exit **1** on Darwin/arm64: `Canonical visual pixels require linux/x64.`
+- `rtk pnpm check` — exit **0**: format, 7 lint tasks, 12 typecheck tasks, 12 test tasks, 7 build tasks successful; Web suite **27 files / 283 tests** passed, structural browser run **25 passed / 13 skipped**.
+- `rtk git diff --check` — exit 0 before functional commit.
+
+### Self-review and concerns
+
+Manual review confirms that the new choice screen has no request-producing effect; the calibration session starts only after all true gates and the existing next owner boundary. Capture displays a real stream when available, falls back only to the approved asset, and retains accessible source/video controls. Pending makes no notification promise. Ranked presentation comes only from the existing isolated policy-approved fixture; demo and experimental DOM never contain ranking snapshot or top-percent fields.
+
+Do not mark `apps/web/design-qa.md` as passed: its final line remains `final result: pending independent Sol acceptance.` Concerns: final Sol review, hosted Linux/x64 canonical pixel gate, and the pre-existing lack of a host FFmpeg codec run remain external acceptance work; no functional P0/P1/P2 remains.
