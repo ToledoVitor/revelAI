@@ -161,3 +161,102 @@ Fidelity surfaces reviewed in every row: Bebas/Arimo typography and wrapping; sp
 Manual review confirms that the new choice screen has no request-producing effect; the calibration session starts only after all true gates and the existing next owner boundary. Capture displays a real stream when available, falls back only to the approved asset, and retains accessible source/video controls. Pending makes no notification promise. Ranked presentation comes only from the existing isolated policy-approved fixture; demo and experimental DOM never contain ranking snapshot or top-percent fields.
 
 Do not mark `apps/web/design-qa.md` as passed: its final line remains `final result: pending independent Sol acceptance.` Concerns: final Sol review, hosted Linux/x64 canonical pixel gate, and the pre-existing lack of a host FFmpeg codec run remain external acceptance work; no functional P0/P1/P2 remains.
+
+## Round-1 reviewer remediation — 2026-09-02
+
+### Status
+
+`DONE_WITH_CONCERNS`. The code/test fixes for every round-1 Critical/Important finding are committed. The implementation is intentionally not self-accepted: hosted codec-backed browser acceptance, the unchanged Linux/x64 canonical visual gate, and independent Sol review remain pending.
+
+This section supersedes earlier statements that the local `test:demo:e2e` check-fact runtime was a real-media acceptance. It is now strictly a separate smoke path.
+
+### Commit ledger
+
+| Commit | Role |
+| --- | --- |
+| `8cb14d5ab04edd880cc03adb4aa011783328315d` | Required W6 base. |
+| `eabf3ff84e6ed4a4b7f976a91f9fc4a0c8ccd048` | Initial W6 functional/browser coverage. |
+| `5e46a75` | Initial W6 evidence/report commit (recorded here to repair the previously omitted ledger entry). |
+| `b20bf023c56038194eeb980c9434cad1b243cc01` | Prior verified-state remediation. |
+| `b71abc2` | Round-1 review base. |
+| `94a13e68d65482f1d9d66ad0ab939c07124223a1` | Round-1 functional/test/CI remediation: enforce W6 visual acceptance. |
+
+### Files changed in this round
+
+| Path | Reason |
+| --- | --- |
+| `.github/workflows/ci.yml` | Provisions FFmpeg before the normal demo-browser command so the hosted acceptance path generates and probes actual C10 media. |
+| `apps/web/{package.json,vitest.config.ts,playwright.demo.smoke.config.ts}` | Includes the Node codec-fixture test in the standard Web test command, prevents Vitest from miscollecting it, and isolates check-fact smoke from normal demo acceptance. |
+| `apps/web/scripts/{demo-media-fixtures.mjs,demo-media-fixtures.test.mjs,start-demo-e2e-server.mjs}` | Generates FFmpeg MP4s, validates them with FFprobe, starts normal API runtime by default, and retains `--serve-check` only for smoke. |
+| `apps/web/src/{app.tsx,styles.css}` | Adds durable visual landmark hooks and compact mobile layout without changing W0 budgets. |
+| `apps/web/src/verified/{tracer,production-capture}.{tsx,test.tsx}` | Restores `3 metros`, uses native disabled upcoming buttons, prevents focus scroll, makes file selection keyboard-operable, and adds regression coverage. |
+| `apps/web/src/visual/{visual-harness,visual-harness.node,approved-reference.visual.spec}.{ts,node.ts}` | Adds fixed W6 per-state visual thresholds, landmark/crop/mismatch rejection, capture metadata, reset-scroll assertion, and 390px browser semantics/keyboard/focus/state/error evidence. |
+| `apps/web/design-qa.md` and this report | Separate evidence record, after-artifact inspection, exact tests, and pending acceptance disposition. |
+
+### Critical 1 — non-home visual acceptance is now enforceable
+
+`captureReferenceVisualArtifacts` does not set all non-home limits to `1` any more. `referenceVisualGates` is an independent static reference policy: challenge `0.25`, calibration `0.40`, capture `0.36`, pending `0.30`, report `0.20`. Its source/rationale is the selected W6 references, unmasked whole-screen comparison, and only the documented approved-media or truth deltas. The values are code-owned, stable before a capture is evaluated, and not serialized from the candidate. Existing W0 home metrics, photo mask, renderer baselines, and budgets are untouched.
+
+For every `/verified` screenshot the runner first collects `[data-visual-landmark]` boxes, rejects missing/zero-size/outside-viewport landmarks, writes reference/capture/overlay/diff/metadata, then rejects a mismatch over the corresponding policy. `visual-harness.test.ts` proves that three mutations fail: a ratio over the calibration cap, absent `setup-confirm`, and a cropped `setup-cancel`. This is a negative proof that compared pixels alone cannot make a missing control acceptable.
+
+### Critical 2 — V03/V04 viewport and scroll evidence
+
+The calibration view now fits required UI at `390×844`: header, rail, heading, truth, confirm/continue, back/cancel all record within the viewport at `scrollY=0`; the last bottom is `651.42`. V04 similarly records its submit bottom at `686.59`; required capture controls are higher: preview bottom `469.63`, record bottom `546.42`, file-selection bottom `592.81`. `focusHeading` uses `preventScroll`, and the capture helper resets/polls page scroll before each artifact. This fixes the previous V04 `scrollY=113` crop without removing focused heading behavior.
+
+### Important 1 — actual codec media, normal runtime, hosted acceptance
+
+Normal `apps/web/scripts/start-demo-e2e-server.mjs` now starts `apps/api/scripts/start-local-demo.mjs` without `--serve-check`. Before startup it creates two valid MP4s through FFmpeg and validates FFprobe JSON:
+
+- Free: portrait `720×1280`, `3` seconds, `24` fps.
+- Verified: landscape `1280×720`, `64` seconds, `24` fps.
+
+The normal `test:demo:e2e` therefore drives C10 media sniff/probe/extraction through the production demo runtime when codecs are present. `--serve-check` has a separate smoke config and command; it no longer constitutes required media acceptance. Local normal-run evidence is an honest expected red (`Error: spawn ffmpeg ENOENT`); no fake probe/extractor facts were substituted. CI now installs FFmpeg and executes the normal command. Hosted output is pending.
+
+### Important 2 — observed browser access evidence
+
+The final mobile W6 browser suite covers all five states at `390×844`, DPR 2: semantic names, Tab/Enter/Space, visible outline focus, disabled/enabled controls, capture submit state, pending `aria-busy` loading state, leaderboard loading/failure/empty states, reduced motion, no horizontal overflow, no happy-path console/page errors, and no unexpected errors during the intentional 503 failure. It does not claim complete WCAG AA conformance beyond these observed seams.
+
+### Important 3 and 4 — truthful native controls and 3m requirement
+
+`Em breve` is now a native disabled button with `aria-describedby` explanation, not an `article aria-disabled`. Existing-video selection is a named native button that invokes the retained file input, receives the global focus ring, and works with Space. The selected wall-pass card now shows exactly `3 metros` with the Phosphor `ArrowsLeftRight` icon. Focused browser coverage proves those interaction semantics and compact V02/V04 visual composition.
+
+### Fresh after artifacts and inspection
+
+The final `pnpm check` structural run wrote all matrix artifacts. I opened every fresh normalized reference, capture, 50% overlay, and diff for home plus V02–V06. They were nonblank, at the expected route/state, and contained the required landmarks. Artifact directory: `apps/web/coverage/playwright/visual-artifacts/`.
+
+| State / artifact stem | Ratio / fixed cap | Inspection conclusion |
+| --- | ---: | --- |
+| home `home-default--390x844--dpr-2--root--ready` | W0 governed separately | Existing home photo/crop variance remains W0 P3 only. |
+| V02 `verified-challenge-default--390x844--dpr-2--verified--challenge-choice` | 21.188% / 25.0% | Card, `3 metros`, disabled rows, CTA and bounds are present. |
+| V03 `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` | 31.839% / 40.0% | Rail, real blocking correction, truth panel, controls and bounds are present. |
+| V04 `verified-record-default--390x844--dpr-2--verified--recording-capture` | 33.405% / 36.0% | Actual/fallback preview boundary, record/file controls and disclosure are present. |
+| V05 `verified-processing-demo--390x844--dpr-2--verified--processing-pending` | 25.132% / 30.0% | Manual-refresh timeline is present; false notification promise is absent. |
+| V06 `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report` | 16.812% / 20.0% | Isolated ranked truth, scorecard and metrics are present; demo is never used. |
+
+Required fidelity surfaces inspected across those comparisons: Bebas/Arimo typography/wrapping, 390px spacing/rhythm, warm-white/deep-emerald/border tokens and contrast, approved hero boundary, Portuguese truth copy, semantic control states, and Phosphor icons. Focused comparisons covered V02 card/CTA, V03 passed/current gate, V04 live/fallback and file focus, V05 refresh loading, and V06 ranked-only DOM. Only source hero/court subject variance or required notification-truth replacement remains P3; no P0/P1/P2 is left actionable.
+
+### RED/GREEN evidence
+
+| Phase | Command / exact outcome |
+| --- | --- |
+| RED | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts --reporter=dot` — **1 failed, 4 passed (5)**; missing gate export/enforcement. |
+| RED | `rtk pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx -t 'states the three-metre' --reporter=dot` — **1 failed, 42 skipped (43)**. |
+| RED | `rtk pnpm --filter @revelai/web exec vitest run src/verified/production-capture.test.tsx -t 'uses a focusable button' --reporter=dot` — **1 failed, 10 skipped (11)**. |
+| RED | `rtk node --test apps/web/scripts/demo-media-fixtures.test.mjs` — **1 failed** before fixture module creation. |
+| RED | First `rtk pnpm check` after adding the Node test — **1 failed suite, 286 passed tests**; Vitest incorrectly collected the Node suite. |
+| GREEN | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts src/verified/tracer.test.tsx src/verified/production-capture.test.tsx --reporter=dot` — **59 passed**. |
+| GREEN | `rtk node --test apps/web/scripts/demo-media-fixtures.test.mjs` — **1 passed**. |
+| GREEN | `rtk pnpm --filter @revelai/web exec playwright test src/visual/approved-reference.visual.spec.ts --project mobile-home --config playwright.config.ts --reporter=line` — **2 passed**. |
+| GREEN | `rtk pnpm --filter @revelai/web run test:production-router` — **23 passed**. |
+| GREEN | `rtk pnpm --filter @revelai/web run test:demo:e2e:smoke` — **2 passed**. |
+| GREEN | `rtk env CI=1 pnpm --filter @revelai/web run test:visual:structural -- --reporter=line` — **26 passed, 14 skipped**. |
+| GREEN | `rtk env CI=1 pnpm --filter @revelai/web run test:visual:darwin -- --reporter=line` — **30 passed, 10 skipped**. |
+| Expected platform limit | `rtk env CI=1 pnpm --filter @revelai/web run test:visual:canonical -- --reporter=line` — exit **1**, `Canonical visual pixels require linux/x64.` |
+| GREEN | Final `rtk pnpm check` — exit **0**: format; **7/7 lint**, **12/12 typecheck**, **12/12 test tasks**, **7/7 build**. Web recorded **12 Node checks**, **27 Vitest files / 286 tests**, and structural **26 passed / 14 skipped**. |
+| GREEN | `rtk git diff --check` — exit **0** before functional commit. |
+
+### Self-review and concerns
+
+I reviewed the staged functional diff, preserved every W0 home budget, and used no screenshot/runtime artwork, invented visual assets, or non-Phosphor icons. Owner ordering remains unchanged: selecting a challenge has no calibration/attempt side effect until `Preparar desafio` mounts the next owner. Free/demo/ranked truth boundaries are retained.
+
+Concerns are limited and explicit: this macOS host lacks FFmpeg, so it cannot produce a local normal-runtime green result; CI provisioning is present but its hosted run is pending. Canonical comparison remains Linux/x64-only and is intentionally unchanged. Final independent Sol acceptance is pending. Deferred reviewer P3 cleanup (duplicate/superseded CSS/tracer seams and historical report-table style cleanup) was not changed in this round.
