@@ -129,6 +129,57 @@ describe("LocalFrameExtraction", () => {
     });
   });
 
+  it("owns a comment-free baseline JPEG FFmpeg output contract", async () => {
+    const root = await setupRoot(roots);
+    let command:
+      | Readonly<{
+          arguments: readonly string[];
+          outputDirectory: string;
+        }>
+      | undefined;
+    const extractor = createLocalFrameExtraction({
+      root,
+      ids: { next: () => batchId },
+      runner: {
+        run: async (received) => {
+          command = received;
+          const timeline = Array.from({ length: 37 }, (_, index) => index / 12);
+          await writeDecoded(received.outputDirectory, timeline);
+          return completedEvidence(timeline, []);
+        },
+      },
+      retention: { schedule: async () => ({ kind: "created" as const }) },
+    });
+
+    await expect(
+      extractor.extract({
+        mode: "free",
+        attemptId,
+        generation: 1,
+        mediaId,
+        mediaSha256: stagedSourceSha256,
+        probe: { ...verifiedProbe, durationSeconds: 3 },
+        uploadedAt: "2030-01-15T12:00:00.000Z",
+        source: "staged",
+        authority: frameAuthority,
+      }),
+    ).resolves.toMatchObject({ frames: { count: 12 } });
+
+    expect(command).toBeDefined();
+    const outputPattern = join(command!.outputDirectory, "decoded-%06d.jpg");
+    const outputPatternIndex = command!.arguments.indexOf(outputPattern);
+    expect(outputPatternIndex).toBeGreaterThan(0);
+    expect(command!.arguments.slice(0, outputPatternIndex)).toEqual(
+      expect.arrayContaining([
+        "-c:v",
+        "mjpeg",
+        "-pix_fmt",
+        "yuvj420p",
+        "-bitexact",
+      ]),
+    );
+  });
+
   it("rejects a claimed source digest before it can issue a durable receipt", async () => {
     const root = await setupRoot(roots);
     const extractor = createLocalFrameExtraction({
@@ -508,8 +559,8 @@ describe("LocalFrameExtraction", () => {
     ).rejects.toThrow("media_probe_failed");
   });
 
-  it("smokes the owned argv against an explicit portable MP4 FFmpeg capability", async (context) => {
-    if (!(await ffmpegHasPortableMpeg4())) return context.skip();
+  it("smokes the owned argv against an explicit portable FFmpeg extraction capability", async (context) => {
+    if (!(await ffmpegHasPortableExtractionCapability())) return context.skip();
     const root = await setupRoot(roots);
     const staged = join(root, "temporary", `${mediaId}.uploading`);
     const generated = await runProcess("ffmpeg", [
@@ -814,17 +865,43 @@ function insertBeforeEoi(bytes: Uint8Array, insert: Uint8Array): Uint8Array {
   ]);
 }
 
-/** Skip only when the local binary or its built-in portable MPEG-4 encoder is absent. */
-async function ffmpegHasPortableMpeg4(): Promise<boolean> {
+/** Skip only when the locally installed binary lacks the complete owned pipeline. */
+async function ffmpegHasPortableExtractionCapability(): Promise<boolean> {
   try {
-    const [version, encoders] = await Promise.all([
+    const [version, filters, encoders] = await Promise.all([
       runProcess("ffmpeg", ["-version"]),
+      runProcess("ffmpeg", ["-hide_banner", "-filters"]),
       runProcess("ffmpeg", ["-hide_banner", "-encoders"]),
     ]);
-    return version.exitCode === 0 && /\bmpeg4\b/.test(encoders.stdout);
+    return (
+      version.exitCode === 0 &&
+      filters.exitCode === 0 &&
+      encoders.exitCode === 0 &&
+      includesFfmpegCapabilities(
+        filters,
+        ["fps", "metadata", "select", "showinfo", "split"],
+        3,
+      ) &&
+      includesFfmpegCapabilities(encoders, ["mjpeg", "mpeg4"], 6)
+    );
   } catch {
     return false;
   }
+}
+
+function includesFfmpegCapabilities(
+  result: Readonly<{ stdout: string; stderr: string }>,
+  names: readonly string[],
+  flagWidth: number,
+): boolean {
+  const found = new Set<string>();
+  const line = new RegExp(
+    `^\\s*[A-Z.|]{${flagWidth}}\\s+([a-z0-9_]+)\\b`,
+    "gimu",
+  );
+  for (const match of `${result.stdout}\n${result.stderr}`.matchAll(line))
+    found.add(match[1]!);
+  return names.every((name) => found.has(name));
 }
 
 async function runProcess(
