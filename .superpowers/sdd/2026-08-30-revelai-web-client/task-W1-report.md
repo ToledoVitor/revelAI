@@ -81,3 +81,25 @@ Follow-up functional commit: `dcb68bf375acc42e9406ed88845174c59d01ef8a` (`fix(we
 - Self-review verified: RouteError schema and status branch are now both negatively covered without changing the client implementation; delete success preserves the API order/cache behavior while giving an accessible pending name, live completion, and deterministic heading focus; the desktop nav remains visually unchanged while mobile keyboard navigation follows its actual DOM order and Escape returns focus to the toggle. No request-descriptor changes were included.
 
 No new functional concerns identified.
+
+## Fix round 2 — hosted Linux Chromium timeout recovery
+
+Follow-up functional commit: `cf1b306005590bbdc51967deb7b16a40d335be8a` (`test(web): budget cold Chromium startup`). This round changes only `apps/web/src/visual/playwright-runner.test.ts`; no W2 code, runner behavior, Playwright command, browser proof, or visual assertion was changed.
+
+### Diagnosis and narrow fix
+
+Hosted run `33600218015` failed only the Linux quality `pnpm check` gate. Its first real-browser integration test at `playwright-runner.test.ts:50` reached Vitest's default 5,000 ms deadline at 5,011 ms while starting Chromium on a cold Linux worker. The remaining 97 web tests passed; the macOS controller run passed the same proof in about 1.2 s. This is cold-start scheduling/launch variance at a boundary with an unambiguous five-second default, not a runner or browser assertion failure.
+
+The real Chromium test now has the test-local `realBrowserIntegrationTimeoutMs = 15_000` third `it` argument. Fifteen seconds is approximately three times the observed hosted cold start, retains a finite diagnostic deadline, and avoids relaxing Vitest's global timeout or changing runner behavior. The test still spawns the real runner, launches Chromium, requires `1 passed`, and proves `NO_COLOR` sanitation.
+
+### TDD and verification evidence
+
+- RED is the hosted Linux log itself: run `33600218015` reported the integration at 5,011 ms against Vitest's default 5,000 ms. It is a real CI reproduction of exactly the test and package-script path being fixed, so no synthetic slowdown was introduced.
+- A direct `rtk pnpm --filter @revelai/web exec vitest run src/visual/playwright-runner.test.ts` was intentionally rejected as a focused harness because it does not pass `npm_execpath`; this test correctly rejects direct Node invocation before Chromium starts. The relevant production-like focused evidence is the package script below.
+- GREEN: `rtk pnpm --filter @revelai/web run test` → 11 files / 98 Vitest tests passed; the real browser integration passed in 1.417 s locally; structural Playwright 18 passed / 8 intentional skips.
+- `rtk pnpm --filter @revelai/web run lint`, `typecheck`, and `build` → passed.
+- `rtk pnpm check && rtk git diff --check` → exit 0 before the functional commit; all root format, lint, typecheck, test, build, and whitespace gates completed.
+
+### Self-review and concerns
+
+The timeout is scoped only to the cold real-browser integration, remains finite, and is grounded in the hosted 5.011 s observation. It does not hide assertion failures, remove the Chromium launch, alter runner command/child environment behavior, or change unrelated test budgets. No new functional concerns identified; hosted CI remains the final proof of its slower cold-worker envelope.
