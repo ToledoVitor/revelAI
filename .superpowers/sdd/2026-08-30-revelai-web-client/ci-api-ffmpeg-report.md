@@ -108,6 +108,32 @@ be removed. Focused verification passed 15 tests with one honest local
 no-FFmpeg skip. API lint, typecheck, and formatting passed; the full API suite
 passed 41 files, 495 tests, with one expected local capability skip.
 
+### Teardown review correction
+
+Sol's follow-up found two remaining races in `19bda2b`. A child `error` event
+could previously clear its forced-kill timer and release cleanup before the
+actual `close` event. Separately, teardown took one `Set` snapshot: after
+child A closed, the smoke continuation could register child B after that
+snapshot while root removal proceeded. Both failures would recreate the
+`ENOTEMPTY` race despite the scoped timeout.
+
+Commit `3d549b8` replaces that shared set with a fresh tracker for every test
+generation. Closing the tracker happens before it drains; children registered
+afterward are immediately terminated and the drain loops until the tracker is
+empty. An error is now only retained for the eventual result—only `close` may
+clear escalation, release tracking, settle the result, and resolve the close
+waiter. Result settlement intentionally precedes that waiter so A's
+continuation can register B before draining resumes.
+
+RED/GREEN coverage now includes a child whose termination reports an error
+before close, proving root cleanup still waits for close, and an A-success →
+B-registration teardown sequence, proving B is terminated and root cleanup
+does not finish until B closes. Focused verification passed 17 tests with one
+honest local no-FFmpeg skip; API lint, typecheck, and formatting passed. A
+first full API run exposed an unrelated intermittent SQLite migration
+contention (`database is locked`); its exact focused test passed twice, and a
+fresh full API run passed 41 files, 497 tests, with one expected skip.
+
 The macOS developer host has no `ffmpeg`, so the real-codec smoke remains an
 honest capability skip locally. The Ubuntu replay covers the hosted codec
 path; a fresh hosted CI run remains the final confirmation after the root task
