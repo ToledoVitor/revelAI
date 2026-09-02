@@ -8,28 +8,46 @@ export type FreeTrainingCreateIntent = Readonly<{ idempotencyKey: string }>;
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function readJson(key: string): unknown {
+function readRaw(key: string): string | null | undefined {
   try {
-    const value = window.sessionStorage.getItem(key);
-    return value ? JSON.parse(value) : undefined;
+    return window.sessionStorage.getItem(key);
   } catch {
     return undefined;
   }
 }
 
-function writeJson(key: string, value: unknown) {
+function readJson(key: string): unknown {
+  const value = readRaw(key);
+  if (!value) return undefined;
   try {
-    window.sessionStorage.setItem(key, JSON.stringify(value));
+    return JSON.parse(value);
   } catch {
-    // Session durability is unavailable in restricted browser storage.
+    return undefined;
   }
 }
 
-function clear(key: string) {
+function writeJson(key: string, value: unknown): boolean {
+  try {
+    const serialized = JSON.stringify(value);
+    window.sessionStorage.setItem(key, serialized);
+    return readRaw(key) === serialized;
+  } catch {
+    return false;
+  }
+}
+
+function clear(key: string): boolean {
   try {
     window.sessionStorage.removeItem(key);
+    return readRaw(key) === null;
   } catch {
-    // Session durability is unavailable in restricted browser storage.
+    return false;
+  }
+}
+
+export class FreeTrainingSessionStorageError extends Error {
+  public constructor() {
+    super("Free training session storage is unavailable");
   }
 }
 
@@ -57,12 +75,12 @@ export function readFreeTrainingOwner(): FreeTrainingOwner | undefined {
   return { attemptId: value.attemptId };
 }
 
-export function persistFreeTrainingOwner(attemptId: string) {
-  writeJson(freeTrainingOwnerStorageKey, { attemptId });
+export function persistFreeTrainingOwner(attemptId: string): boolean {
+  return writeJson(freeTrainingOwnerStorageKey, { attemptId });
 }
 
-export function clearFreeTrainingOwner() {
-  clear(freeTrainingOwnerStorageKey);
+export function clearFreeTrainingOwner(): boolean {
+  return clear(freeTrainingOwnerStorageKey);
 }
 
 export function readFreeTrainingCreateIntent():
@@ -85,16 +103,18 @@ export function beginFreeTrainingCreateIntent(): FreeTrainingCreateIntent {
   const existing = readFreeTrainingCreateIntent();
   if (existing) return existing;
   const intent = { idempotencyKey: newUuid() };
-  writeJson(freeTrainingCreateIntentStorageKey, intent);
+  if (!writeJson(freeTrainingCreateIntentStorageKey, intent))
+    throw new FreeTrainingSessionStorageError();
   return intent;
 }
 
-export function clearFreeTrainingCreateIntent() {
-  clear(freeTrainingCreateIntentStorageKey);
+export function clearFreeTrainingCreateIntent(): boolean {
+  return clear(freeTrainingCreateIntentStorageKey);
 }
 
-export function clearFreeTrainingOwnershipForAttempt(attemptId: string) {
-  if (readFreeTrainingOwner()?.attemptId !== attemptId) return;
-  clearFreeTrainingOwner();
-  clearFreeTrainingCreateIntent();
+export function clearFreeTrainingOwnershipForAttempt(
+  attemptId: string,
+): boolean {
+  if (readFreeTrainingOwner()?.attemptId !== attemptId) return false;
+  return clearFreeTrainingOwner() && clearFreeTrainingCreateIntent();
 }

@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   beginFreeTrainingCreateIntent,
+  clearFreeTrainingCreateIntent,
   clearFreeTrainingOwnershipForAttempt,
   freeTrainingCreateIntentStorageKey,
   freeTrainingOwnerStorageKey,
@@ -10,6 +11,11 @@ import {
 } from "./owner";
 
 describe("Free training causal ownership", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.sessionStorage.clear();
+  });
+
   it("creates a fresh valid idempotency key when persisted storage is malformed", () => {
     window.sessionStorage.setItem(
       freeTrainingCreateIntentStorageKey,
@@ -38,5 +44,54 @@ describe("Free training causal ownership", () => {
     expect(
       window.sessionStorage.getItem(freeTrainingOwnerStorageKey),
     ).toBeNull();
+  });
+
+  it.each([
+    ["get throws", "getItem"],
+    ["get is a noop", "get-noop"],
+    ["set throws", "setItem"],
+    ["set is a noop", "set-noop"],
+  ] as const)(
+    "fails closed instead of returning an unconfirmed key when session storage %s",
+    (_label, failure) => {
+      if (failure === "getItem")
+        vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+          throw new DOMException("blocked", "SecurityError");
+        });
+      if (failure === "get-noop")
+        vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => null);
+      if (failure === "setItem")
+        vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+          throw new DOMException("full", "QuotaExceededError");
+        });
+      if (failure === "set-noop")
+        vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+          // Simulates a browser that silently refuses persistence.
+        });
+
+      expect(() => beginFreeTrainingCreateIntent()).toThrow(
+        "Free training session storage is unavailable",
+      );
+    },
+  );
+
+  it("reports an unavailable remove so a stale causal key cannot be reused", () => {
+    beginFreeTrainingCreateIntent();
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+
+    expect(clearFreeTrainingCreateIntent()).toBe(false);
+    expect(readFreeTrainingCreateIntent()).toBeDefined();
+  });
+
+  it("reports a noop remove so a stale causal key cannot be reused", () => {
+    beginFreeTrainingCreateIntent();
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      // Simulates a browser that silently refuses removal.
+    });
+
+    expect(clearFreeTrainingCreateIntent()).toBe(false);
+    expect(readFreeTrainingCreateIntent()).toBeDefined();
   });
 });

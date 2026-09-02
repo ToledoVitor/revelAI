@@ -1338,6 +1338,41 @@ describe("SQLiteAttemptRepository", () => {
     ).rejects.toMatchObject({ code: "idempotency_key_conflict" });
   });
 
+  it("does not resurrect a tombstoned Attempt when its causal key is replayed", async () => {
+    const key = "b3333333-3333-4333-8333-333333333333";
+    await fixture.repository.createAttempt({
+      id: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+      input: { mode: "free" },
+      idempotencyKey: key,
+    });
+    await fixture.repository.tombstoneAttempt({
+      attemptId: ATTEMPT_A,
+      athleteId: ATHLETE_A,
+    });
+
+    await expect(
+      fixture.repository.createAttempt({
+        id: ATTEMPT_B,
+        athleteId: ATHLETE_A,
+        input: { mode: "free" },
+        idempotencyKey: key,
+      }),
+    ).rejects.toMatchObject({ code: "attempt_not_found" });
+    expect(
+      fixture.database.raw
+        .prepare(
+          "SELECT id, deletion_state FROM attempts WHERE athlete_id = ? AND idempotency_key = ?",
+        )
+        .get(ATHLETE_A, key),
+    ).toEqual({ id: ATTEMPT_A, deletion_state: "tombstoned" });
+    expect(
+      fixture.database.raw
+        .prepare("SELECT COUNT(*) AS count FROM attempts WHERE athlete_id = ?")
+        .get(ATHLETE_A),
+    ).toEqual({ count: 1 });
+  });
+
   it("issues, readies, and consumes a calibration session once with owner and expiry guards", async () => {
     const session = await fixture.repository.issueCalibrationSession({
       id: SESSION_A,

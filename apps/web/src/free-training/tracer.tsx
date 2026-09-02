@@ -24,8 +24,10 @@ import {
   clearFreeTrainingCreateIntent,
   clearFreeTrainingOwner,
   clearFreeTrainingOwnershipForAttempt,
+  FreeTrainingSessionStorageError,
   persistFreeTrainingOwner,
   readFreeTrainingOwner,
+  type FreeTrainingCreateIntent,
 } from "./owner";
 
 type FreeTrainingTracerProps = Readonly<{
@@ -41,6 +43,8 @@ type FreeStage =
   | "deleting";
 
 const safeGenericError = "Não foi possível continuar agora. Tente novamente.";
+const safeStorageError =
+  "Não foi possível guardar este treino livre neste dispositivo. Tente novamente.";
 
 function isAbort(error: unknown): error is RevelApiAbort {
   return (
@@ -90,6 +94,8 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
   const mountedRef = useRef(false);
   const createStartedRef = useRef(false);
   const ownerRecoveryStartedRef = useRef(false);
+  const creationBlockedRef = useRef(false);
+  const staleIntentRef = useRef(false);
   const uploadGenerationRef = useRef(0);
   const activeCreateRef = useRef<AbortController | undefined>(undefined);
   const activeDeleteRef = useRef<AbortController | undefined>(undefined);
@@ -113,8 +119,10 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
     flowGenerationRef.current += 1;
     createStartedRef.current = false;
     ownerRecoveryStartedRef.current = false;
-    clearFreeTrainingOwner();
-    clearFreeTrainingCreateIntent();
+    const storageCleared =
+      clearFreeTrainingOwner() && clearFreeTrainingCreateIntent();
+    creationBlockedRef.current = !storageCleared;
+    staleIntentRef.current = !storageCleared;
     uploadGenerationRef.current += 1;
     const creation = activeCreateRef.current;
     activeCreateRef.current = undefined;
@@ -127,7 +135,7 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
     setMedia(undefined);
     setOutcome(undefined);
     setTerminal(undefined);
-    setMessage("");
+    setMessage(storageCleared ? "" : safeStorageError);
     setUploadProgress(undefined);
     setStage("creating");
     setCreateTick((current) => current + 1);
@@ -215,7 +223,8 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
     if (
       stage !== "creating" ||
       createStartedRef.current ||
-      ownerRecoveryStartedRef.current
+      ownerRecoveryStartedRef.current ||
+      creationBlockedRef.current
     )
       return;
     createStartedRef.current = true;
@@ -251,7 +260,22 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
       applyUploadOutcome(attempt.outcome, attempt.id);
     };
     const create = async () => {
-      const intent = beginFreeTrainingCreateIntent();
+      let intent: FreeTrainingCreateIntent;
+      try {
+        intent = beginFreeTrainingCreateIntent();
+      } catch (error) {
+        if (!isCurrent()) return;
+        activeCreateRef.current = undefined;
+        createStartedRef.current = false;
+        ownerRecoveryStartedRef.current = false;
+        creationBlockedRef.current = true;
+        if (error instanceof FreeTrainingSessionStorageError) {
+          setMessage(safeStorageError);
+          return;
+        }
+        setMessage(safeGenericError);
+        return;
+      }
       try {
         const attempt = await client.createAttempt(
           { mode: "free" },
@@ -267,6 +291,20 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
         activeCreateRef.current = undefined;
         createStartedRef.current = false;
         ownerRecoveryStartedRef.current = false;
+        if (hasRouteErrorCode(error, "attempt_not_found")) {
+          if (!clearFreeTrainingCreateIntent()) {
+            creationBlockedRef.current = true;
+            staleIntentRef.current = true;
+            setMessage(safeStorageError);
+            return;
+          }
+          staleIntentRef.current = false;
+          creationBlockedRef.current = true;
+          setMessage(
+            "Esta tentativa já foi excluída. Comece outro treino livre.",
+          );
+          return;
+        }
         setMessage(safeError(error));
       }
     };
@@ -285,7 +323,15 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
         } catch (error) {
           if (!isCurrent() || isAbort(error)) return;
           if (hasRouteErrorCode(error, "attempt_not_found")) {
-            clearFreeTrainingOwnershipForAttempt(owner.attemptId);
+            if (!clearFreeTrainingOwnershipForAttempt(owner.attemptId)) {
+              activeCreateRef.current = undefined;
+              createStartedRef.current = false;
+              ownerRecoveryStartedRef.current = false;
+              creationBlockedRef.current = true;
+              staleIntentRef.current = true;
+              setMessage(safeStorageError);
+              return;
+            }
             if (isCurrent()) void create();
             return;
           }
@@ -420,6 +466,14 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
           <button
             type="button"
             onClick={() => {
+              if (staleIntentRef.current) {
+                if (!clearFreeTrainingCreateIntent()) {
+                  setMessage(safeStorageError);
+                  return;
+                }
+                staleIntentRef.current = false;
+              }
+              creationBlockedRef.current = false;
               createStartedRef.current = false;
               setMessage("");
               setCreateTick((current) => current + 1);

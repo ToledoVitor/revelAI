@@ -219,6 +219,54 @@ describe("attempt HTTP foundation", () => {
     }
   });
 
+  it("returns attempt_not_found for a tombstoned causal replay without resurrection", async () => {
+    const fixture = await makeApi();
+    const idempotencyKey = "d3333333-3333-4333-8333-333333333333";
+    try {
+      const created = CreateAttemptResponseSchema.parse(
+        (
+          await fixture.app.inject({
+            method: "POST",
+            url: "/v1/attempts",
+            headers: {
+              ...athleteHeader(ATHLETE_A),
+              "idempotency-key": idempotencyKey,
+            },
+            payload: { mode: "free" },
+          })
+        ).json(),
+      );
+      await fixture.repository.tombstoneAttempt({
+        attemptId: created.id,
+        athleteId: ATHLETE_A,
+      });
+
+      const replay = await fixture.app.inject({
+        method: "POST",
+        url: "/v1/attempts",
+        headers: {
+          ...athleteHeader(ATHLETE_A),
+          "idempotency-key": idempotencyKey,
+        },
+        payload: { mode: "free" },
+      });
+
+      expect(replay.statusCode).toBe(404);
+      expect(RouteErrorSchema.parse(replay.json()).code).toBe(
+        "attempt_not_found",
+      );
+      expect(
+        fixture.database.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM attempts WHERE athlete_id = ?",
+          )
+          .get(ATHLETE_A),
+      ).toEqual({ count: 1 });
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it("registers every shared C2 method at its shared path", async () => {
     const fixture = await makeMediaApi();
     try {

@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttemptOutcome } from "@revelai/contracts";
 import { App } from "../app";
 import { createRevelApiClient } from "../lib/api/client";
-import { resolveUploadReconciliation } from "../verified/upload-reconciliation";
+import { resolveUploadReconciliation } from "../lib/attempt-flow/upload-reconciliation";
 
 const createdFreeAttempt = {
   id: "attempt-free-w5-1",
@@ -233,7 +233,13 @@ describe("production Free Training tracer", () => {
 
   it("creates exactly once for a direct Free route under StrictMode", async () => {
     window.history.replaceState({}, "", "/free-training");
-    const fetchSpy = vi.fn(async () => response(createdFreeAttempt, 201));
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => {
+        void _input;
+        void _init;
+        return response(createdFreeAttempt, 201);
+      },
+    );
     vi.stubGlobal("fetch", fetchSpy);
 
     render(
@@ -515,6 +521,88 @@ describe("production Free Training tracer", () => {
       await screen.findByRole("button", { name: "Selecionar vídeo" }),
     ).toBeEnabled();
     expect(creates).toBe(2);
+  });
+
+  it("does not POST until session storage confirms the causal key, then retries once storage recovers", async () => {
+    window.history.replaceState({}, "", "/free-training");
+    const user = userEvent.setup();
+    const storage = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new DOMException("full", "QuotaExceededError");
+      });
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => {
+        void _input;
+        void _init;
+        return response(createdFreeAttempt, 201);
+      },
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(<App />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Não foi possível guardar este treino livre neste dispositivo.",
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    storage.mockRestore();
+    await user.click(screen.getByRole("button", { name: "Tentar novamente" }));
+
+    expect(
+      await screen.findByRole("button", { name: "Selecionar vídeo" }),
+    ).toBeEnabled();
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(
+      new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get("idempotency-key"),
+    ).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+  });
+
+  it("turns a tombstoned causal replay into a user-started fresh key without an automatic loop", async () => {
+    window.history.replaceState({}, "", "/free-training");
+    const oldKey = "f3333333-3333-4333-8333-333333333333";
+    window.sessionStorage.setItem(
+      "revelai.free-training.create-intent.v1",
+      JSON.stringify({ idempotencyKey: oldKey }),
+    );
+    const user = userEvent.setup();
+    const keys: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        keys.push(new Headers(init?.headers).get("idempotency-key") ?? "");
+        return keys.length === 1
+          ? response(
+              {
+                code: "attempt_not_found",
+                message: "Esta tentativa não está disponível.",
+                retryable: false,
+              },
+              404,
+            )
+          : response(createdFreeAttempt, 201);
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Esta tentativa já foi excluída. Comece outro treino livre.",
+    );
+    expect(keys).toEqual([oldKey]);
+
+    await user.click(screen.getByRole("button", { name: "Tentar novamente" }));
+    expect(
+      await screen.findByRole("button", { name: "Selecionar vídeo" }),
+    ).toBeEnabled();
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).not.toBe(oldKey);
+    expect(
+      window.sessionStorage.getItem("revelai.free-training.owner.v1"),
+    ).toBe(JSON.stringify({ attemptId: "attempt-free-w5-1" }));
   });
 
   it("keeps local validation narrow and preserves source versus normalized wire metadata", async () => {

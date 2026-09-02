@@ -423,3 +423,142 @@ test("served production recovers a commit-wins lost Free create after reload wit
   );
   expect(keys[1]).toBe(keys[0]);
 });
+
+test("served production turns a tombstoned persisted key into one user-started fresh Free Attempt", async ({
+  page,
+}) => {
+  const oldKey = "e3333333-3333-4333-8333-333333333333";
+  const keys: string[] = [];
+  await page.addInitScript((key) => {
+    window.sessionStorage.setItem(
+      "revelai.free-training.create-intent.v1",
+      JSON.stringify({ idempotencyKey: key }),
+    );
+  }, oldKey);
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "POST" && url.pathname === "/v1/attempts") {
+      keys.push(request.headers()["idempotency-key"] ?? "");
+      if (keys.length === 1) {
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "attempt_not_found",
+            message: "Esta tentativa não está disponível.",
+            retryable: false,
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "attempt-free-fresh-after-tombstone",
+          mode: "free",
+          status: "awaiting-upload",
+          createdAt: "2026-08-30T12:01:00.000Z",
+          outcome: {
+            state: "pending",
+            attemptId: "attempt-free-fresh-after-tombstone",
+            mode: "free",
+            status: "awaiting-upload",
+          },
+        }),
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, body: "not expected" });
+  });
+
+  await page.goto("/free-training");
+  await expect(page.getByRole("alert")).toContainText(
+    "Esta tentativa já foi excluída.",
+  );
+  expect(keys).toEqual([oldKey]);
+
+  await page.getByRole("button", { name: "Tentar novamente" }).click();
+  await expect(
+    page.getByRole("button", { name: "Selecionar vídeo" }),
+  ).toBeEnabled();
+  expect(keys).toHaveLength(2);
+  expect(keys[1]).not.toBe(oldKey);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.sessionStorage.getItem("revelai.free-training.owner.v1"),
+      ),
+    )
+    .toBe(JSON.stringify({ attemptId: "attempt-free-fresh-after-tombstone" }));
+});
+
+test("served production makes no Free POST until session storage confirms its causal key", async ({
+  page,
+}) => {
+  const keys: string[] = [];
+  await page.addInitScript(() => {
+    const original = Storage.prototype.setItem;
+    let blocked = true;
+    Storage.prototype.setItem = function (key, value) {
+      if (blocked && key === "revelai.free-training.create-intent.v1")
+        throw new DOMException("full", "QuotaExceededError");
+      return original.call(this, key, value);
+    };
+    (
+      window as typeof window & {
+        __allowFreeTrainingSessionStorage?: () => void;
+      }
+    ).__allowFreeTrainingSessionStorage = () => {
+      blocked = false;
+    };
+  });
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "POST" && url.pathname === "/v1/attempts") {
+      keys.push(request.headers()["idempotency-key"] ?? "");
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "attempt-free-storage-recovered",
+          mode: "free",
+          status: "awaiting-upload",
+          createdAt: "2026-08-30T12:01:00.000Z",
+          outcome: {
+            state: "pending",
+            attemptId: "attempt-free-storage-recovered",
+            mode: "free",
+            status: "awaiting-upload",
+          },
+        }),
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, body: "not expected" });
+  });
+
+  await page.goto("/free-training");
+  await expect(page.getByRole("alert")).toContainText(
+    "Não foi possível guardar este treino livre neste dispositivo.",
+  );
+  expect(keys).toEqual([]);
+
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __allowFreeTrainingSessionStorage?: () => void;
+      }
+    ).__allowFreeTrainingSessionStorage?.();
+  });
+  await page.getByRole("button", { name: "Tentar novamente" }).click();
+  await expect(
+    page.getByRole("button", { name: "Selecionar vídeo" }),
+  ).toBeEnabled();
+  expect(keys).toHaveLength(1);
+  expect(keys[0]).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
+});
