@@ -357,3 +357,30 @@ The only remaining visible deltas are named P3 candidates: approved runtime hero
 The V03/V04 policy is stored before candidate evaluation and is not derived from a candidate artifact. V03 accepts heading height `64–74`, bottom `195–207`, and heading→visual gap `28–38`; V04 accepts heading height `166–180`, bottom `303–317`, and heading→preview gap `10–22`. The added negative proofs make current-style underscaling, wrong bottom, or excessive gap fail. Full-screen caps, required semantic landmarks, scroll reset, viewport overflow checks, and W0 budgets remain in force.
 
 Concerns remain external: FFmpeg is unavailable locally, so normal codec-backed C10 demo acceptance is pending CI after controller push; canonical pixels are Linux/x64-only; final independent Sol acceptance remains pending. `apps/web/design-qa.md` intentionally ends with `final result: pending independent Sol acceptance.`
+
+## CI fix round 4 — asynchronous capture-heading focus evidence — 2026-09-02
+
+Functional/test commit: `c497535` (`test(web): await verified capture focus`). This is a narrowly scoped CI-stability correction. It does not alter production rendering, W0, the verified state machine, or any approved visual artifact; the round-3 individual V02–V06 reference/candidate/overlay/diff inspection remains the applicable visual evidence.
+
+### Hosted RED, root cause, and minimal correction
+
+Hosted run `33689431803` failed only Web Vitest at the capture-focus assertion in `apps/web/src/verified/tracer.test.tsx:297` from the submitted revision. Its diagnostic showed the capture heading was present while `document.body` retained focus. Hosted quality lint/typecheck passed and the probe gates were green.
+
+The browser product contract was already correct: `VerifiedTracer` has one passive effect that focuses `headingRef` whenever `gateIndex`, `stage`, `terminal`, or `rankingView` changes, with `preventScroll: true`. Capture is reached only after two asynchronous client effects transition `creating-session` → `readying-session` → `capture`. `findByRole` resolves as soon as the capture DOM exists; on slower hosted scheduling that DOM observation can precede the passive focus effect. The old immediate `toHaveFocus()` assertion therefore tested an invalid synchronous ordering, not the eventual user-visible focus contract.
+
+The regression now stores the real capture heading returned by `findByRole` and waits for that same element to receive focus with Testing Library's condition retry. It introduces neither an application delay nor a custom timeout, and it keeps the actual component, route, effects, and fetch lifecycle in place. A deliberate mutation that skipped the production focus effect only for `stage === "capture"` failed at the new condition with exactly the captured heading expected and `body` focused; the mutation was restored before the functional commit. This proves the regression will catch a real loss of capture focus rather than merely waiting for DOM presence.
+
+### Round-4 RED/GREEN record
+
+| Phase | Exact command / observed output |
+| --- | --- |
+| Hosted RED | Run `33689431803`: Web Vitest failed at the old immediate capture focus assertion; capture heading existed, `body` had focus. Quality lint/typecheck passed and probes were green. |
+| Local baseline | `rtk env CI=1 pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx -t 'mounts the verified owner before running the exact session-ready-attempt-media sequence' --reporter=dot` — **1 passed, 42 skipped (43)**. This did not reproduce the scheduler race locally. |
+| Mutation RED | The same command with the temporary capture-only focus-effect skip — **1 failed, 42 skipped (43)** at `await waitFor(() => expect(captureHeading).toHaveFocus())`; expected capture heading was mounted and `body` was focused. |
+| Fresh repeated GREEN | `rtk zsh -c 'for run in {1..10}; do CI=1 pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx -t "mounts the verified owner before running the exact session-ready-attempt-media sequence" --reporter=dot || exit 1; done'` — **10 fresh processes × (1 passed, 42 skipped)**. |
+| Full tracer GREEN | `rtk env CI=1 pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx --reporter=dot` — **1 file, 43 passed**. |
+| Root GREEN | `rtk pnpm check` — exit **0**: formatting clean; **7/7 lint**, **12/12 typecheck**, **12/12 test tasks**, and **7/7 build** successful. |
+
+No visual capture was regenerated for this test-only synchronization: no visual surface or artifact-producing code changed. The normal codec-backed hosted acceptance and canonical Linux/x64 execution remain controller-hosted gates, and final independent Sol acceptance remains pending.
+
+final result: pending independent Sol acceptance.
