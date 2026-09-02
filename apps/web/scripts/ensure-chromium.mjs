@@ -3,6 +3,7 @@ import { access } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "@playwright/test";
+import { createPnpmInvocation } from "./pnpm-invocation.mjs";
 
 const forwardedSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
 
@@ -21,15 +22,16 @@ export async function ensureChromium() {
 export function installChromium({
   processRef = process,
   spawnChild = spawn,
+  environment = process.env,
 } = {}) {
-  const command = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-  const child = spawnChild(
-    command,
-    ["exec", "playwright", "install", "chromium"],
-    {
-      stdio: "inherit",
-    },
-  );
+  const command = createPnpmInvocation({
+    argumentsList: ["exec", "playwright", "install", "chromium"],
+    environment,
+    runtime: processRef,
+  });
+  const child = spawnChild(command.command, command.args, {
+    stdio: "inherit",
+  });
   const signalHandlers = new Map(
     forwardedSignals.map((signal) => [signal, () => child.kill(signal)]),
   );

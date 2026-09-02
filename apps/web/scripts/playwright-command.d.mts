@@ -12,13 +12,16 @@ export declare function parseVisualGateArguments(
 };
 
 export declare function createPlaywrightCommand(input: {
-  platform: string;
   mode: VisualGateMode;
   rendererIdentity: string | undefined;
   playwrightArgs: readonly string[];
   environment: NodeJS.ProcessEnv;
+  runtime: {
+    execPath: string;
+    platform?: string;
+  };
 }): {
-  command: "pnpm" | "pnpm.cmd";
+  command: string;
   args: string[];
   environment: NodeJS.ProcessEnv;
 };

@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { installChromium } from "./ensure-chromium.mjs";
 
 const forwardedSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
+const pnpmFixturePath = fileURLToPath(
+  new URL("./test-fixtures/pnpm-entry.mjs", import.meta.url),
+);
 
 function startInstaller() {
   const child = new EventEmitter();
@@ -16,6 +20,8 @@ function startInstaller() {
   const processRef = new EventEmitter();
   const reEmittedSignals = [];
   processRef.pid = 4242;
+  processRef.execPath = process.execPath;
+  processRef.platform = "win32";
   processRef.kill = (pid, signal) => {
     reEmittedSignals.push([pid, signal]);
   };
@@ -32,7 +38,11 @@ function startInstaller() {
     processRef,
     reEmittedSignals,
     spawnCalls,
-    completion: installChromium({ processRef, spawnChild }),
+    completion: installChromium({
+      processRef,
+      spawnChild,
+      environment: { npm_execpath: pnpmFixturePath },
+    }),
   };
 }
 
@@ -71,8 +81,8 @@ test("returns the child exit code and surfaces child process errors", async () =
   assert.equal(await successfulInstaller.completion, 23);
   assert.deepEqual(successfulInstaller.spawnCalls, [
     [
-      process.platform === "win32" ? "pnpm.cmd" : "pnpm",
-      ["exec", "playwright", "install", "chromium"],
+      process.execPath,
+      [pnpmFixturePath, "exec", "playwright", "install", "chromium"],
       { stdio: "inherit" },
     ],
   ]);

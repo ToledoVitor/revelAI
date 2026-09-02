@@ -11,6 +11,10 @@ import {
 } from "../../scripts/playwright-command.mjs";
 import { CANONICAL_LINUX_RENDERER, DARWIN_ARM64_RENDERER } from "./visual-gate";
 
+const pnpmFixturePath = fileURLToPath(
+  new URL("../../scripts/test-fixtures/pnpm-entry.mjs", import.meta.url),
+);
+
 describe("Playwright command", () => {
   it("uses the same renderer identities as the browser gate", () => {
     expect(commandCanonicalRenderer).toBe(CANONICAL_LINUX_RENDERER);
@@ -75,9 +79,8 @@ describe("Playwright command", () => {
     });
   });
 
-  it("creates a Windows-safe pnpm invocation without inline environment syntax", () => {
+  it("creates a Windows-safe Node pnpm-entry invocation without inline environment syntax", () => {
     const command = createPlaywrightCommand({
-      platform: "win32",
       mode: "structural",
       rendererIdentity: undefined,
       playwrightArgs: ["--project", "desktop-home"],
@@ -85,13 +88,25 @@ describe("Playwright command", () => {
         NO_COLOR: "1",
         REVELAI_VISUAL_MODE: "canonical",
         REVELAI_VISUAL_RENDERER: commandCanonicalRenderer,
+        npm_execpath: pnpmFixturePath,
       },
+      runtime: { execPath: process.execPath, platform: "win32" },
     });
 
     expect(command).toEqual({
-      command: "pnpm.cmd",
-      args: ["exec", "playwright", "test", "--project", "desktop-home"],
-      environment: { REVELAI_VISUAL_MODE: "structural" },
+      command: process.execPath,
+      args: [
+        pnpmFixturePath,
+        "exec",
+        "playwright",
+        "test",
+        "--project",
+        "desktop-home",
+      ],
+      environment: {
+        REVELAI_VISUAL_MODE: "structural",
+        npm_execpath: pnpmFixturePath,
+      },
     });
   });
 });

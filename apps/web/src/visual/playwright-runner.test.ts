@@ -14,6 +14,7 @@ type RunnerResult = {
 function runPlaywrightRunner(
   args: readonly string[],
   mode = "darwin",
+  configureEnvironment?: (environment: NodeJS.ProcessEnv) => void,
 ): Promise<RunnerResult> {
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
@@ -21,6 +22,7 @@ function runPlaywrightRunner(
     NO_COLOR: "1",
   };
   delete environment.FORCE_COLOR;
+  configureEnvironment?.(environment);
 
   return new Promise((resolve, reject) => {
     const child = spawn(
@@ -71,6 +73,26 @@ describe("Playwright runner", () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.output).toContain("Unsupported visual gate mode");
+    expect(result.output).not.toContain("Running 22 tests");
+  });
+
+  it("rejects a direct Node invocation without the active pnpm entry", async () => {
+    const result = await runPlaywrightRunner(
+      [
+        "src/visual/playwright-runner-smoke.visual.spec.ts",
+        "--grep",
+        "launches Chromium for runner environment checks",
+        "--project",
+        "desktop-home",
+      ],
+      "darwin",
+      (environment) => {
+        delete environment.npm_execpath;
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain("npm_execpath");
     expect(result.output).not.toContain("Running 22 tests");
   });
 });

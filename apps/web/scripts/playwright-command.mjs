@@ -1,3 +1,5 @@
+import { createPnpmInvocation } from "./pnpm-invocation.mjs";
+
 export const CANONICAL_LINUX_RENDERER = "playwright-1.62.1-noble-linux-amd64";
 export const DARWIN_ARM64_RENDERER = "darwin-arm64-local";
 
@@ -56,11 +58,11 @@ export function parseVisualGateArguments(argumentsList) {
 }
 
 export function createPlaywrightCommand({
-  platform,
   mode,
   rendererIdentity,
   playwrightArgs,
   environment,
+  runtime,
 }) {
   const sanitizedEnvironment = { ...environment };
   delete sanitizedEnvironment.NO_COLOR;
@@ -73,8 +75,11 @@ export function createPlaywrightCommand({
   }
 
   return {
-    command: platform === "win32" ? "pnpm.cmd" : "pnpm",
-    args: ["exec", "playwright", "test", ...playwrightArgs],
+    ...createPnpmInvocation({
+      argumentsList: ["exec", "playwright", "test", ...playwrightArgs],
+      environment: sanitizedEnvironment,
+      runtime,
+    }),
     environment: sanitizedEnvironment,
   };
 }

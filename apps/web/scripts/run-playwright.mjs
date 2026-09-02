@@ -28,11 +28,11 @@ export function runPlaywright(
   const { mode, rendererIdentity, playwrightArgs } =
     parseVisualGateArguments(args);
   const command = createPlaywrightCommand({
-    platform: runtime.platform,
     mode,
     rendererIdentity,
     playwrightArgs,
     environment: sanitizePlaywrightEnvironment(environment),
+    runtime,
   });
   const child = spawn(command.command, command.args, {
     env: command.environment,

@@ -4,28 +4,28 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { createPnpmInvocation } from "./pnpm-invocation.mjs";
 
 const webRoot = new URL("..", import.meta.url);
 const repositoryRoot = new URL("../..", webRoot);
 
 function runWebCommand(browserCache, commandArguments) {
-  const command = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
   const environment = {
     ...process.env,
     CI: "true",
     PLAYWRIGHT_BROWSERS_PATH: browserCache,
   };
   delete environment.NODE_TEST_CONTEXT;
+  const invocation = createPnpmInvocation({
+    argumentsList: ["--filter", "@revelai/web", ...commandArguments],
+    environment,
+  });
 
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      command,
-      ["--filter", "@revelai/web", ...commandArguments],
-      {
-        cwd: repositoryRoot,
-        env: environment,
-      },
-    );
+    const child = spawn(invocation.command, invocation.args, {
+      cwd: repositoryRoot,
+      env: environment,
+    });
     let output = "";
 
     child.stdout.on("data", (chunk) => {
