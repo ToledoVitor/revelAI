@@ -10,9 +10,9 @@ import {
   getUiInkCoverageBaselines,
   selectFixture,
   type CaptureMetadata,
-  type VisualRenderer,
   type Viewport,
 } from "./visual-harness";
+import type { VisualRenderer } from "./visual-gate";
 
 type MaskRegion = {
   x: number;
@@ -126,16 +126,6 @@ function getUiInkRegions(viewport: Viewport): readonly MaskRegion[] {
   }
 
   return [{ x: 1035, y: 20, width: 375, height: 44 }];
-}
-
-function getVisualRenderer(): VisualRenderer {
-  if (process.platform === "darwin" || process.platform === "linux") {
-    return process.platform;
-  }
-
-  throw new Error(
-    `The visual pixel gate supports only Darwin and the pinned Linux renderer; received ${process.platform}. Run the structural visual suite on this platform.`,
-  );
 }
 
 function getVisualBudgets(viewport: Viewport) {
@@ -404,11 +394,13 @@ export async function captureHomeVisualArtifacts({
   page,
   viewport,
   dpr,
+  renderer,
   state = "ready",
 }: {
   page: Page;
   viewport: Viewport;
   dpr: number;
+  renderer: VisualRenderer;
   state?: string;
 }): Promise<VisualArtifacts> {
   const route = new URL(page.url()).pathname;
@@ -466,7 +458,6 @@ export async function captureHomeVisualArtifacts({
     regions: mask.regions,
   });
   const uiInkRegions = getUiInkRegions(viewport);
-  const renderer = getVisualRenderer();
   const uiInkCoverageBaselines = getUiInkCoverageBaselines({
     viewport,
     renderer,

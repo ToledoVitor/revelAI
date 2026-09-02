@@ -8,6 +8,7 @@ import {
   getUiInkCoverageBaselines,
   selectFixture,
 } from "./visual-harness";
+import { CANONICAL_LINUX_RENDERER } from "./visual-gate";
 
 describe("visual harness", () => {
   it("selects the approved home fixture and names desktop screenshots deterministically", () => {
@@ -65,13 +66,20 @@ describe("visual harness", () => {
   });
 
   it("keeps an independent Linux ink floor so a missing normal control fails", () => {
-    const desktopBaseline = getUiInkCoverageBaselines({
+    const canonicalDesktop = {
       viewport: { width: 1440, height: 1024 },
-      renderer: "linux",
+      renderer: CANONICAL_LINUX_RENDERER as never,
+    };
+    const canonicalMobile = {
+      viewport: { width: 390, height: 844 },
+      renderer: CANONICAL_LINUX_RENDERER as never,
+    };
+    expect(() => getUiInkCoverageBaselines(canonicalDesktop)).not.toThrow();
+    const desktopBaseline = getUiInkCoverageBaselines({
+      ...canonicalDesktop,
     });
     const mobileBaseline = getUiInkCoverageBaselines({
-      viewport: { width: 390, height: 844 },
-      renderer: "linux",
+      ...canonicalMobile,
     });
 
     expect(desktopBaseline).toEqual([165]);

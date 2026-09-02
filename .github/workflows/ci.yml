@@ -26,14 +26,33 @@ jobs:
       - run: pnpm --filter @revelai/web exec playwright install --with-deps chromium
       - run: pnpm check
       - name: Run canonical Linux visual gate
-        run: >-
-          docker run --rm
-          --env CI=true
-          --env PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-          --volume "$GITHUB_WORKSPACE:/work"
-          --workdir /work
-          mcr.microsoft.com/playwright:v1.62.1-noble
-          bash -lc 'corepack enable && corepack pnpm@11.20.0 --filter @revelai/design-system run build && corepack pnpm@11.20.0 --filter @revelai/web run test:visual:canonical'
+        env:
+          PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
+        run: |
+          revelai_pnpm_root="$(dirname "$PNPM_HOME")"
+          test -f "$revelai_pnpm_root/pnpm/bin/pnpm.cjs"
+          docker run --rm \
+            --platform linux/amd64 \
+            --network none \
+            --env CI=true \
+            --env PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+            --env PATH=/pnpm/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$revelai_pnpm_root:/pnpm:ro" \
+            --workdir /work \
+            "$PLAYWRIGHT_IMAGE" \
+            node /pnpm/pnpm/bin/pnpm.cjs --filter @revelai/design-system run build
+          docker run --rm \
+            --platform linux/amd64 \
+            --network none \
+            --env CI=true \
+            --env PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+            --env PATH=/pnpm/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$revelai_pnpm_root:/pnpm:ro" \
+            --workdir /work \
+            "$PLAYWRIGHT_IMAGE" \
+            node /pnpm/pnpm/bin/pnpm.cjs --filter @revelai/web run test:visual:canonical
       - run: pnpm --filter @revelai/api run openapi:check
       - run: pnpm --filter @revelai/api exec vitest run src/http/operability-routes.test.ts src/startup.test.ts src/http/openapi.test.ts
 

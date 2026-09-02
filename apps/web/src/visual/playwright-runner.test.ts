@@ -11,7 +11,10 @@ type RunnerResult = {
   output: string;
 };
 
-function runPlaywrightRunner(args: readonly string[]): Promise<RunnerResult> {
+function runPlaywrightRunner(
+  args: readonly string[],
+  mode = "darwin",
+): Promise<RunnerResult> {
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
     CI: "true",
@@ -22,7 +25,7 @@ function runPlaywrightRunner(args: readonly string[]): Promise<RunnerResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
-      ["scripts/run-playwright.mjs", ...args],
+      ["scripts/run-playwright.mjs", "--revelai-visual-mode", mode, ...args],
       {
         cwd: webRoot,
         env: environment,
@@ -61,5 +64,13 @@ describe("Playwright runner", () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.output).toContain("unknown option");
+  });
+
+  it("rejects an unknown visual mode before Playwright starts", async () => {
+    const result = await runPlaywrightRunner([], "preview");
+
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain("Unsupported visual gate mode");
+    expect(result.output).not.toContain("Running 22 tests");
   });
 });

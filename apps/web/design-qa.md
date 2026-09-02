@@ -44,7 +44,9 @@ The full comparison excludes only the runtime-photo rectangle (desktop x=668 onw
 
 ### CI renderer architecture
 
-`pnpm check` runs the browser’s structural checks on every supported host: font readiness, viewport bounds, console cleanliness, layout, interaction, keyboard, and reduced-motion behavior. The full approved-reference comparison, focused ink comparison, static ink floors, and deliberate-removal proof run in a separate canonical CI step inside the version-pinned `mcr.microsoft.com/playwright:v1.62.1-noble` Linux renderer. This keeps pixel rasterization deterministic without loosening a threshold or masking any UI. Unsupported renderers receive the structural suite rather than an uncalibrated pixel baseline.
+`pnpm check` runs the browser’s structural checks on every supported host: font readiness, viewport bounds, console cleanliness, layout, interaction, keyboard, and reduced-motion behavior. Those scripts select their mode through the portable Node runner rather than shell environment-assignment syntax, so Windows runs `pnpm.cmd` and still receives the structural suite. Pixel comparison is explicit: local pixels require the named `darwin-arm64-local` renderer on Darwin/arm64, while CI pixels require exactly `playwright-1.62.1-noble-linux-amd64` on Linux/x64. Missing, unknown, mismatched, or host-incompatible modes fail before any pixel comparison; the harness receives that renderer identity as data and never infers a coverage baseline from `process.platform`.
+
+The canonical CI step uses the immutable `mcr.microsoft.com/playwright@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e` image with `--platform linux/amd64` and `--network none`. It mounts the pnpm/action-setup runtime read-only and invokes its pinned `pnpm.cjs`, avoiding a mutable image tag, Corepack activation, and a package-manager download in the visual container. This keeps pixel rasterization deterministic without loosening a threshold or masking any UI. Unsupported renderers receive the structural suite rather than an uncalibrated pixel baseline.
 
 ## Interaction and console checks
 

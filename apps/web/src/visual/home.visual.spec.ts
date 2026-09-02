@@ -1,8 +1,22 @@
 import { access, readFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
+import { resolveVisualGate } from "./visual-gate";
 import { captureHomeVisualArtifacts } from "./visual-harness.node";
 
-const isStructuralVisualRun = process.env.REVELAI_VISUAL_MODE === "structural";
+const visualGate = resolveVisualGate({
+  mode: process.env.REVELAI_VISUAL_MODE,
+  rendererIdentity: process.env.REVELAI_VISUAL_RENDERER,
+  runtime: { platform: process.platform, arch: process.arch },
+});
+const isStructuralVisualRun = visualGate.mode === "structural";
+
+function getPixelRenderer() {
+  if (!("renderer" in visualGate)) {
+    throw new Error("Pixel visual tests require an explicit renderer.");
+  }
+
+  return visualGate.renderer;
+}
 
 test("loads the bundled display and body fonts before visual capture", async ({
   page,
@@ -136,13 +150,12 @@ test("writes normalized capture, metadata, overlay, and diff for each approved r
       height: number;
     },
     dpr: testInfo.project.use.deviceScaleFactor as number,
+    renderer: getPixelRenderer(),
   });
 
   expect(artifacts.metadata.route).toBe("/");
   expect(artifacts.metadata.state).toBe("ready");
-  expect((artifacts.comparison as { renderer?: string }).renderer).toBe(
-    process.platform === "linux" ? "linux" : "darwin",
-  );
+  expect(artifacts.comparison.renderer).toBe(getPixelRenderer());
   await Promise.all(Object.values(artifacts.files).map((file) => access(file)));
   const persistedMetadata = JSON.parse(
     await readFile(artifacts.files.metadata, "utf8"),
@@ -216,6 +229,7 @@ test("rejects deliberate UI regressions that sit over the masked photo", async (
       },
       dpr: testInfo.project.use.deviceScaleFactor as number,
       state: "ui-ink-mutation",
+      renderer: getPixelRenderer(),
     });
 
     expect(artifacts.metadata).toMatchObject({

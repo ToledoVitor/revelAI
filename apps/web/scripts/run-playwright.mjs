@@ -1,4 +1,10 @@
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import {
+  createPlaywrightCommand,
+  parseVisualGateArguments,
+} from "./playwright-command.mjs";
 
 const forwardedSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
 
@@ -14,10 +20,22 @@ export function sanitizePlaywrightEnvironment(environment) {
   return sanitized;
 }
 
-export function runPlaywright(args, environment = process.env) {
-  const command = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-  const child = spawn(command, ["exec", "playwright", "test", ...args], {
-    env: sanitizePlaywrightEnvironment(environment),
+export function runPlaywright(
+  args,
+  environment = process.env,
+  runtime = process,
+) {
+  const { mode, rendererIdentity, playwrightArgs } =
+    parseVisualGateArguments(args);
+  const command = createPlaywrightCommand({
+    platform: runtime.platform,
+    mode,
+    rendererIdentity,
+    playwrightArgs,
+    environment: sanitizePlaywrightEnvironment(environment),
+  });
+  const child = spawn(command.command, command.args, {
+    env: command.environment,
     stdio: "inherit",
   });
   const signalHandlers = new Map(
@@ -52,9 +70,14 @@ function removeSignalListeners(signalHandlers) {
   }
 }
 
-try {
-  process.exitCode = await runPlaywright(process.argv.slice(2));
-} catch (error) {
-  console.error(error);
-  process.exitCode = 1;
+if (
+  process.argv[1] &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  try {
+    process.exitCode = await runPlaywright(process.argv.slice(2));
+  } catch (error) {
+    console.error(error);
+    process.exitCode = 1;
+  }
 }

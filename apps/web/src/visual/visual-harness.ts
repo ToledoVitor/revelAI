@@ -1,3 +1,9 @@
+import {
+  CANONICAL_LINUX_RENDERER,
+  DARWIN_ARM64_RENDERER,
+  type VisualRenderer,
+} from "./visual-gate";
+
 export type VisualRouteState = {
   route: string;
   state: string;
@@ -7,8 +13,6 @@ export type Viewport = {
   width: number;
   height: number;
 };
-
-export type VisualRenderer = "darwin" | "linux";
 
 export type CaptureMetadata = {
   viewport: Viewport;
@@ -33,11 +37,11 @@ const fixtures = [
 ] as const;
 
 const uiInkCoverageBaselines = {
-  darwin: {
+  [DARWIN_ARM64_RENDERER]: {
     desktop: [416],
     mobile: [1040, 17232, 2287],
   },
-  linux: {
+  [CANONICAL_LINUX_RENDERER]: {
     desktop: [165],
     mobile: [865, 15673, 1578],
   },
