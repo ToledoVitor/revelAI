@@ -134,6 +134,30 @@ first full API run exposed an unrelated intermittent SQLite migration
 contention (`database is locked`); its exact focused test passed twice, and a
 fresh full API run passed 41 files, 497 tests, with one expected skip.
 
+### Admission and multi-error correction
+
+Sol's next review found that `3d549b8` still admitted a late successor by
+spawning it before registration. If draining had already observed an empty
+tracker, an asynchronous A continuation could start B while root cleanup was
+under way. It also found that the single-use error listener handled a TERM
+error but left a later SIGKILL error unhandled.
+
+Commit `bd57535` reserves tracker admission synchronously before spawning.
+Once a test generation is closing, reservation fails and `runProcess` rejects
+without calling its spawner; a failed spawn releases its reservation. The
+error listener now remains installed until close, retains the first error for
+the result, and handles later forced-kill errors without releasing the
+tracker. The normal 1,000-ms grace remains unchanged; only the controlled
+unit regression injects a 1-ms grace.
+
+RED/GREEN coverage delays B until after `closeAndDrain` resolves and proves
+its spawner is never called, so it cannot race root removal. A second
+TERM-error → SIGKILL-error → close regression proves both errors are handled,
+the first is reported, and release still happens only at close. Focused
+verification passed 19 tests with one honest local no-FFmpeg skip; API lint,
+typecheck, and formatting passed. The fresh full API suite passed 41 files,
+500 tests, with one expected skip.
+
 The macOS developer host has no `ffmpeg`, so the real-codec smoke remains an
 honest capability skip locally. The Ubuntu replay covers the hosted codec
 path; a fresh hosted CI run remains the final confirmation after the root task
