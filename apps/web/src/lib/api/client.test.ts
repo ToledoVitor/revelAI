@@ -294,6 +294,37 @@ describe("Revel API client", () => {
     expect(sentHeaders).toEqual(new Map([["x-revelai-athlete-id", athleteId]]));
   });
 
+  it("surfaces an XHR upload without a response as a transport failure for authoritative reconciliation", async () => {
+    const requestListeners = new Map<string, () => void>();
+    const xhr = {
+      upload: {
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+      },
+      status: 0,
+      responseText: "",
+      open: () => undefined,
+      setRequestHeader: () => undefined,
+      addEventListener: (type: string, listener: () => void) =>
+        requestListeners.set(type, listener),
+      removeEventListener: (type: string) => requestListeners.delete(type),
+      send: () => requestListeners.get("error")?.(),
+      abort: () => requestListeners.get("abort")?.(),
+    };
+
+    await expect(
+      createRevelApiClient({
+        baseUrl: "http://revelai.test",
+        athleteId,
+        xhrFactory: () => xhr as unknown as XMLHttpRequest,
+      }).uploadAttemptMedia(
+        "attempt-upload-1",
+        new File(["video"], "attempt.mp4", { type: "video/mp4" }),
+        { onProgress: () => undefined },
+      ),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
   it.each(routeErrorFixtures)(
     "retains only the parsed public error fields for $body.code",
     async (fixture) => {

@@ -363,6 +363,42 @@ describe("production verified tracer", () => {
     expect(stop).toHaveBeenCalledOnce();
   });
 
+  it("requires a new real preview when Back returns to a device gate whose stream was released", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+    const stop = vi.fn();
+    const getUserMedia = vi.fn().mockResolvedValue({
+      getTracks: () => [{ stop }],
+    } as unknown as MediaStream);
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Ativar câmera" }));
+    await screen.findByText("Prévia da câmera pronta.");
+    await user.click(screen.getByRole("button", { name: "Continuar" }));
+    expect(stop).toHaveBeenCalledOnce();
+
+    await user.click(screen.getByRole("button", { name: "Voltar" }));
+
+    expect(
+      screen.getByRole("heading", { name: "Preparação do desafio verificado" }),
+    ).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Continuar" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Ativar câmera" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Usar vídeo existente" }),
+    ).toBeEnabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Ative a câmera ou use um vídeo existente antes de continuar.",
+    );
+  });
+
   it("allows the W2 existing-video fallback to satisfy only the device gate before mutations", async () => {
     const user = userEvent.setup();
     const fetchSpy = vi.fn();
@@ -1247,6 +1283,9 @@ describe("production verified tracer", () => {
         ([input]) => new URL(input.toString()).pathname === "/v1/attempts",
       ),
     ).toHaveLength(1);
+    expect(
+      fetchSpy.mock.calls.map(([input]) => new URL(input.toString()).pathname),
+    ).not.toContain("/v1/attempts/attempt-w4-1");
   });
 
   it("announces indeterminate production upload progress and clears selected media immediately after a parsed 202", async () => {
@@ -1666,5 +1705,194 @@ describe("production verified tracer", () => {
       ),
     ).toBe(true);
     expect(screen.queryByText("wall-pass.webm")).not.toBeInTheDocument();
+  });
+
+  it("reconciles a lost upload response from the authoritative post-commit attempt", async () => {
+    const user = userEvent.setup();
+    let attemptReads = 0;
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname === "/v1/calibration-sessions")
+        return response(calibration, 201);
+      if (pathname === "/v1/calibration-sessions/calibration-w4-1/ready")
+        return new Response(null, { status: 204 });
+      if (pathname === "/v1/attempts") return response(createdAttempt, 201);
+      if (pathname === "/v1/attempts/attempt-w4-1/media")
+        throw new TypeError("The upload connection closed without a response.");
+      if (pathname === "/v1/attempts/attempt-w4-1") {
+        attemptReads += 1;
+        return response({
+          ...createdAttempt,
+          status: "processing",
+          outcome: pendingOutcome,
+        });
+      }
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await enterPending(user);
+
+    expect(attemptReads).toBe(1);
+    expect(screen.queryByText("wall-pass.webm")).not.toBeInTheDocument();
+  });
+
+  it("keeps media and the same attempt retryable when a lost upload response cannot be reconciled", async () => {
+    const user = userEvent.setup();
+    let creates = 0;
+    let uploads = 0;
+    let attemptReads = 0;
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname === "/v1/calibration-sessions")
+        return response(calibration, 201);
+      if (pathname === "/v1/calibration-sessions/calibration-w4-1/ready")
+        return new Response(null, { status: 204 });
+      if (pathname === "/v1/attempts") {
+        creates += 1;
+        return response(createdAttempt, 201);
+      }
+      if (pathname === "/v1/attempts/attempt-w4-1/media") {
+        uploads += 1;
+        if (uploads === 1)
+          throw new TypeError(
+            "The upload connection closed without a response.",
+          );
+        return response(acceptedUpload, 202);
+      }
+      if (pathname === "/v1/attempts/attempt-w4-1") {
+        attemptReads += 1;
+        throw new TypeError(
+          "The attempt read connection closed without a response.",
+        );
+      }
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await enterPending(user).catch(() => undefined);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Não foi possível continuar agora. Tente novamente.",
+    );
+    expect(screen.getByText("wall-pass.webm")).toBeVisible();
+    expect(attemptReads).toBe(1);
+    expect(creates).toBe(1);
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    expect(
+      await screen.findByRole("heading", { name: "Processando tentativa" }),
+    ).toBeVisible();
+    expect(uploads).toBe(2);
+    expect(creates).toBe(1);
+  });
+
+  it("keeps media and the same attempt retryable when reconciliation reports awaiting-upload", async () => {
+    const user = userEvent.setup();
+    let creates = 0;
+    let uploads = 0;
+    let attemptReads = 0;
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname === "/v1/calibration-sessions")
+        return response(calibration, 201);
+      if (pathname === "/v1/calibration-sessions/calibration-w4-1/ready")
+        return new Response(null, { status: 204 });
+      if (pathname === "/v1/attempts") {
+        creates += 1;
+        return response(createdAttempt, 201);
+      }
+      if (pathname === "/v1/attempts/attempt-w4-1/media") {
+        uploads += 1;
+        if (uploads === 1)
+          throw new TypeError(
+            "The upload connection closed without a response.",
+          );
+        return response(acceptedUpload, 202);
+      }
+      if (pathname === "/v1/attempts/attempt-w4-1") {
+        attemptReads += 1;
+        return response(createdAttempt);
+      }
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await enterPending(user).catch(() => undefined);
+
+    expect(screen.getByText("wall-pass.webm")).toBeVisible();
+    expect(attemptReads).toBe(1);
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    expect(
+      await screen.findByRole("heading", { name: "Processando tentativa" }),
+    ).toBeVisible();
+    expect(uploads).toBe(2);
+    expect(creates).toBe(1);
+  });
+
+  it("ignores a stale lost-response reconciliation after a newer upload is accepted", async () => {
+    const user = userEvent.setup();
+    let uploads = 0;
+    const resolveAttemptReads: Array<(value: Response) => void> = [];
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname === "/v1/calibration-sessions")
+        return response(calibration, 201);
+      if (pathname === "/v1/calibration-sessions/calibration-w4-1/ready")
+        return new Response(null, { status: 204 });
+      if (pathname === "/v1/attempts") return response(createdAttempt, 201);
+      if (pathname === "/v1/attempts/attempt-w4-1/media") {
+        uploads += 1;
+        if (uploads === 1)
+          throw new TypeError(
+            "The upload connection closed without a response.",
+          );
+        return response(acceptedUpload, 202);
+      }
+      if (pathname === "/v1/attempts/attempt-w4-1")
+        return new Promise<Response>((resolve) => {
+          resolveAttemptReads.push(resolve);
+        });
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+    await completeVerifiedSetup(user);
+    await screen.findByRole("heading", { name: "Envie o vídeo verificado" });
+    await waitForAttemptReady();
+    fireEvent.change(screen.getByTestId("production-video-input"), {
+      target: {
+        files: [
+          new File(["video"], "lost-response.webm", { type: "video/webm" }),
+        ],
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    await waitFor(() => expect(resolveAttemptReads).toHaveLength(1));
+    await user.click(
+      await screen.findByRole("button", { name: "Cancelar envio" }),
+    );
+    await waitFor(() => expect(resolveAttemptReads).toHaveLength(2));
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    expect(
+      await screen.findByRole("heading", { name: "Processando tentativa" }),
+    ).toBeVisible();
+
+    await act(async () => {
+      resolveAttemptReads[0]?.(response(createdAttempt));
+      resolveAttemptReads[1]?.(response(createdAttempt));
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "Processando tentativa" }),
+    ).toBeVisible();
+    expect(screen.queryByText("lost-response.webm")).not.toBeInTheDocument();
   });
 });

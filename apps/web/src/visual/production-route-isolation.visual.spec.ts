@@ -130,3 +130,29 @@ test("served production verified setup uses real camera controls without review 
   ).toBeVisible();
   expect(apiRequests).toEqual([]);
 });
+
+test("served production verified setup keeps its real device gate coherent across Back", async ({
+  page,
+}) => {
+  const apiRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.startsWith("/v1/"))
+      apiRequests.push(request.url());
+  });
+
+  await page.goto("/verified");
+  const setup = page.getByRole("main", {
+    name: "Preparação do desafio verificado",
+  });
+  await setup.getByRole("button", { name: "Usar vídeo existente" }).click();
+  await expect(setup.getByRole("button", { name: "Continuar" })).toBeEnabled();
+  await setup.getByRole("button", { name: "Continuar" }).click();
+  await expect(setup).toContainText("Etapa 2 de 5");
+  await setup.getByRole("button", { name: "Voltar" }).click();
+
+  await expect(setup).toContainText(
+    "Vídeo existente escolhido como alternativa de captura.",
+  );
+  await expect(setup.getByRole("button", { name: "Continuar" })).toBeEnabled();
+  expect(apiRequests).toEqual([]);
+});

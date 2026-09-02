@@ -39,9 +39,11 @@ export function ProductionSetupCamera({
   const [requesting, setRequesting] = useState(false);
 
   const stopPreview = () => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
+    const stream = streamRef.current;
+    stream?.getTracks().forEach((track) => track.stop());
     streamRef.current = undefined;
     if (videoRef.current) videoRef.current.srcObject = null;
+    return stream !== undefined;
   };
 
   const activateCamera = async () => {
@@ -86,9 +88,9 @@ export function ProductionSetupCamera({
     return () => {
       mountedRef.current = false;
       generationRef.current += 1;
-      stopPreview();
+      if (stopPreview()) onStatus("pending");
     };
-  }, []);
+  }, [onStatus]);
 
   const canRetry =
     status === "denied" || status === "unsupported" || status === "unavailable";

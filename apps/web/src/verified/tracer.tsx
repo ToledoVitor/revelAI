@@ -59,17 +59,19 @@ function isAbort(error: unknown): error is RevelApiAbort {
 }
 
 function safeError(error: unknown): string {
-  if (
+  if (isRouteError(error)) return error.message;
+  return safeGenericError;
+}
+
+function isRouteError(error: unknown): error is RevelApiError {
+  return (
     typeof error === "object" &&
     error !== null &&
     typeof (error as RevelApiError).code === "string" &&
     typeof (error as RevelApiError).message === "string" &&
     typeof (error as RevelApiError).retryable === "boolean" &&
     typeof (error as RevelApiError).status === "number"
-  ) {
-    return (error as RevelApiError).message;
-  }
-  return safeGenericError;
+  );
 }
 
 function hasRouteErrorCode(
@@ -380,7 +382,8 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
         setUploadProgress(undefined);
         if (
           hasRouteErrorCode(error, "duplicate_media_upload") ||
-          isAbort(error)
+          isAbort(error) ||
+          !isRouteError(error)
         ) {
           void reconcileUploadAttempt(
             attemptId,
