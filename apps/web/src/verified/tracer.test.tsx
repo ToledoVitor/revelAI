@@ -289,12 +289,11 @@ describe("production verified tracer", () => {
 
     await completeVerifiedSetup(user);
 
-    expect(
-      await screen.findByRole("heading", {
-        name: "Envie o vídeo verificado",
-        level: 1,
-      }),
-    ).toHaveFocus();
+    const captureHeading = await screen.findByRole("heading", {
+      name: "Envie o vídeo verificado",
+      level: 1,
+    });
+    await waitFor(() => expect(captureHeading).toHaveFocus());
     expect(
       fetchSpy.mock.calls.map(([input]) => new URL(input.toString()).pathname),
     ).toEqual([
