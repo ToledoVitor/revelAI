@@ -521,6 +521,115 @@ describe("training history", () => {
     },
   );
 
+  it("keeps a same-task retry correlated after before-match becomes a partial intent cleanup", async () => {
+    const user = userEvent.setup();
+    const attempt = pendingAttempt(
+      "attempt-history-same-task-cleanup",
+      "2026-08-30T13:30:00.000Z",
+    );
+    const oldKey = "e3333333-3333-4333-8333-333333333333";
+    const originalGet = Storage.prototype.getItem;
+    const originalRemove = Storage.prototype.removeItem;
+    const rawGet = originalGet.bind(window.sessionStorage);
+    let readUnavailable = false;
+    let intentRemovalBlocked = true;
+    const createKeys: string[] = [];
+    window.sessionStorage.setItem(
+      "revelai.free-training.owner.v1",
+      JSON.stringify({ attemptId: attempt.id }),
+    );
+    window.sessionStorage.setItem(
+      "revelai.free-training.create-intent.v1",
+      JSON.stringify({ idempotencyKey: oldKey }),
+    );
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(function getItem(
+      this: Storage,
+      key: string,
+    ): string | null {
+      if (this === window.sessionStorage && readUnavailable) return null;
+      return originalGet.call(this, key);
+    });
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(
+      function removeItem(this: Storage, key: string): void {
+        if (
+          this === window.sessionStorage &&
+          intentRemovalBlocked &&
+          key === "revelai.free-training.create-intent.v1"
+        )
+          return;
+        return originalRemove.call(this, key);
+      },
+    );
+    server.use(
+      http.get("*/v1/attempts", () =>
+        HttpResponse.json({ items: [attempt], nextCursor: null }),
+      ),
+      http.delete(
+        `*/v1/attempts/${attempt.id}`,
+        () => new HttpResponse(null, { status: 204 }),
+      ),
+      http.post("*/v1/attempts", async ({ request }) => {
+        createKeys.push(request.headers.get("idempotency-key") ?? "");
+        return HttpResponse.json(
+          {
+            ...attempt,
+            id: "attempt-history-same-task-fresh",
+            outcome: {
+              ...attempt.outcome,
+              attemptId: "attempt-history-same-task-fresh",
+            },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    render(<App />);
+    await user.click(screen.getByRole("link", { name: "Meus treinos" }));
+    readUnavailable = true;
+    await user.click(screen.getByRole("button", { name: "Excluir treino" }));
+    const cleanupButton = await screen.findByRole("button", {
+      name: "Concluir limpeza",
+    });
+    readUnavailable = false;
+
+    cleanupButton.focus();
+    fireEvent.click(cleanupButton);
+    fireEvent.click(cleanupButton);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "O treino foi excluído, mas a limpeza neste dispositivo precisa ser concluída.",
+    );
+    expect(cleanupButton).toHaveFocus();
+    expect(rawGet("revelai.free-training.owner.v1")).toBeNull();
+    expect(rawGet("revelai.free-training.create-intent.v1")).toBe(
+      JSON.stringify({ idempotencyKey: oldKey }),
+    );
+
+    intentRemovalBlocked = false;
+    await user.click(cleanupButton);
+    expect(await screen.findByText("Treino excluído.")).toHaveAttribute(
+      "role",
+      "status",
+    );
+    expect(
+      screen.getByRole("heading", {
+        name: "Meus treinos neste dispositivo",
+        level: 1,
+      }),
+    ).toHaveFocus();
+    expect(rawGet("revelai.free-training.owner.v1")).toBeNull();
+    expect(rawGet("revelai.free-training.create-intent.v1")).toBeNull();
+
+    await user.click(screen.getByRole("link", { name: "Início" }));
+    await user.click(screen.getByRole("button", { name: "Treino livre" }));
+    expect(
+      await screen.findByRole("button", { name: "Selecionar vídeo" }),
+    ).toBeEnabled();
+    expect(createKeys).toHaveLength(1);
+    expect(createKeys[0]).not.toBe(oldKey);
+  });
+
   it.each([
     ["owner", "revelai.free-training.owner.v1"],
     ["intent", "revelai.free-training.create-intent.v1"],

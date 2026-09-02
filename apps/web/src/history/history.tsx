@@ -43,6 +43,10 @@ function messageFor(error: unknown): string {
 export function TrainingHistory({ client }: TrainingHistoryProps) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const deleteLockRef = useRef<string | undefined>(undefined);
+  const ownershipCleanupRef = useRef<OwnershipCleanupPending | undefined>(
+    undefined,
+  );
+  const ownershipCleanupRetryLockRef = useRef(false);
   const queryClient = useQueryClient();
   const location = useLocation();
   const [deleteMessage, setDeleteMessage] = useState<string | null>(() =>
@@ -52,6 +56,10 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
   );
   const [ownershipCleanup, setOwnershipCleanup] =
     useState<OwnershipCleanupPending>();
+  const setPendingOwnershipCleanup = (pending: OwnershipCleanupPending) => {
+    ownershipCleanupRef.current = pending;
+    setOwnershipCleanup(pending);
+  };
   const history = useInfiniteQuery({
     queryKey: trainingHistoryQueryKey,
     initialPageParam: undefined as HistoryPageParam,
@@ -62,6 +70,7 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
     getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
   });
   const completeDeletedAttempt = (id: string) => {
+    ownershipCleanupRef.current = undefined;
     setOwnershipCleanup(undefined);
     queryClient.setQueryData<
       InfiniteData<AttemptListResponse, HistoryPageParam>
@@ -88,7 +97,7 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
         cleanup === "unavailable-before-match" ||
         cleanup === "matched-but-incomplete"
       ) {
-        setOwnershipCleanup({ attemptId: id, correlation: cleanup });
+        setPendingOwnershipCleanup({ attemptId: id, correlation: cleanup });
         headingRef.current?.focus();
         return;
       }
@@ -121,23 +130,26 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
     deleteAttempt.mutate(id);
   };
   const retryOwnershipCleanup = () => {
-    if (!ownershipCleanup) return;
-    const wasMatched =
-      ownershipCleanup.correlation === "matched-but-incomplete";
+    const pending = ownershipCleanupRef.current;
+    if (!pending || ownershipCleanupRetryLockRef.current) return;
+    ownershipCleanupRetryLockRef.current = true;
+    const wasMatched = pending.correlation === "matched-but-incomplete";
     const cleanup = wasMatched
       ? clearFreeTrainingOwnership()
-      : clearFreeTrainingOwnershipForAttempt(ownershipCleanup.attemptId);
+      : clearFreeTrainingOwnershipForAttempt(pending.attemptId);
     if (cleanup !== "cleared" && cleanup !== "not-owned") {
-      setOwnershipCleanup({
-        attemptId: ownershipCleanup.attemptId,
+      setPendingOwnershipCleanup({
+        attemptId: pending.attemptId,
         correlation:
           wasMatched || cleanup === "matched-but-incomplete"
             ? "matched-but-incomplete"
             : "unavailable-before-match",
       });
+      ownershipCleanupRetryLockRef.current = false;
       return;
     }
-    completeDeletedAttempt(ownershipCleanup.attemptId);
+    completeDeletedAttempt(pending.attemptId);
+    ownershipCleanupRetryLockRef.current = false;
   };
 
   return (

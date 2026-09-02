@@ -336,6 +336,214 @@ for (const failedFact of ["owner", "intent"] as const) {
   });
 }
 
+test("served production keeps same-task History cleanup retries causally matched", async ({
+  page,
+}) => {
+  const attemptId = "attempt-history-same-task-cleanup";
+  const oldKey = "f5555555-5555-4555-8555-555555555555";
+  const paths: string[] = [];
+  const keys: string[] = [];
+  await page.addInitScript(
+    ({ id, key }) => {
+      const originalGet = Storage.prototype.getItem;
+      const originalRemove = Storage.prototype.removeItem;
+      const rawGet = originalGet.bind(window.sessionStorage);
+      window.sessionStorage.setItem(
+        "revelai.free-training.owner.v1",
+        JSON.stringify({ attemptId: id }),
+      );
+      window.sessionStorage.setItem(
+        "revelai.free-training.create-intent.v1",
+        JSON.stringify({ idempotencyKey: key }),
+      );
+      let readBlocked = false;
+      let intentRemovalBlocked = true;
+      Storage.prototype.getItem = function getItem(storageKey) {
+        if (this === window.sessionStorage && readBlocked) return null;
+        return originalGet.call(this, storageKey);
+      };
+      Storage.prototype.removeItem = function removeItem(storageKey) {
+        if (
+          this === window.sessionStorage &&
+          intentRemovalBlocked &&
+          storageKey === "revelai.free-training.create-intent.v1"
+        ) {
+          return;
+        }
+        return originalRemove.call(this, storageKey);
+      };
+      (
+        window as typeof window & {
+          __blockFreeTrainingStorageRead?: () => void;
+          __restoreFreeTrainingStorageRead?: () => void;
+          __restoreFreeTrainingIntentRemoval?: () => void;
+          __readRawFreeTrainingOwnership?: () => {
+            owner: string | null;
+            intent: string | null;
+          };
+        }
+      ).__blockFreeTrainingStorageRead = () => {
+        readBlocked = true;
+      };
+      (
+        window as typeof window & {
+          __restoreFreeTrainingStorageRead?: () => void;
+        }
+      ).__restoreFreeTrainingStorageRead = () => {
+        readBlocked = false;
+      };
+      (
+        window as typeof window & {
+          __restoreFreeTrainingIntentRemoval?: () => void;
+        }
+      ).__restoreFreeTrainingIntentRemoval = () => {
+        intentRemovalBlocked = false;
+      };
+      (
+        window as typeof window & {
+          __readRawFreeTrainingOwnership?: () => {
+            owner: string | null;
+            intent: string | null;
+          };
+        }
+      ).__readRawFreeTrainingOwnership = () => ({
+        owner: rawGet("revelai.free-training.owner.v1"),
+        intent: rawGet("revelai.free-training.create-intent.v1"),
+      });
+    },
+    { id: attemptId, key: oldKey },
+  );
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    paths.push(`${request.method()} ${url.pathname}`);
+    if (request.method() === "GET" && url.pathname === "/v1/attempts") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [freeAwaitingUploadAttempt(attemptId)],
+          nextCursor: null,
+        }),
+      });
+      return;
+    }
+    if (
+      request.method() === "DELETE" &&
+      url.pathname === `/v1/attempts/${attemptId}`
+    ) {
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    if (request.method() === "POST" && url.pathname === "/v1/attempts") {
+      keys.push(request.headers()["idempotency-key"] ?? "");
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(
+          freeAwaitingUploadAttempt("attempt-history-fresh"),
+        ),
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, body: "not expected" });
+  });
+  page.on("dialog", (dialog) => void dialog.accept());
+
+  await page.goto("/training/history");
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __blockFreeTrainingStorageRead?: () => void;
+      }
+    ).__blockFreeTrainingStorageRead?.();
+  });
+  await page.getByRole("button", { name: "Excluir treino" }).click();
+  const cleanupButton = page.getByRole("button", {
+    name: "Concluir limpeza",
+  });
+  await expect(cleanupButton).toBeVisible();
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __restoreFreeTrainingStorageRead?: () => void;
+      }
+    ).__restoreFreeTrainingStorageRead?.();
+    const cleanup = [...document.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Concluir limpeza",
+    );
+    if (!(cleanup instanceof HTMLButtonElement))
+      throw new Error("Missing cleanup button");
+    cleanup.focus();
+    cleanup.click();
+    cleanup.click();
+  });
+
+  await expect(cleanupButton).toBeFocused();
+  await expect(page.getByRole("alert")).toContainText(
+    "O treino foi excluído, mas a limpeza neste dispositivo precisa ser concluída.",
+  );
+  expect(
+    await page.evaluate(() =>
+      (
+        window as typeof window & {
+          __readRawFreeTrainingOwnership?: () => {
+            owner: string | null;
+            intent: string | null;
+          };
+        }
+      ).__readRawFreeTrainingOwnership?.(),
+    ),
+  ).toEqual({
+    owner: null,
+    intent: JSON.stringify({ idempotencyKey: oldKey }),
+  });
+
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __restoreFreeTrainingIntentRemoval?: () => void;
+      }
+    ).__restoreFreeTrainingIntentRemoval?.();
+  });
+  await cleanupButton.click();
+  await expect(page.getByText("Treino excluído.")).toHaveAttribute(
+    "role",
+    "status",
+  );
+  await expect(
+    page.getByRole("heading", {
+      name: "Meus treinos neste dispositivo",
+      level: 1,
+    }),
+  ).toBeFocused();
+  expect(
+    await page.evaluate(() =>
+      (
+        window as typeof window & {
+          __readRawFreeTrainingOwnership?: () => {
+            owner: string | null;
+            intent: string | null;
+          };
+        }
+      ).__readRawFreeTrainingOwnership?.(),
+    ),
+  ).toEqual({ owner: null, intent: null });
+
+  await page.getByRole("link", { name: "Início" }).click();
+  await page.getByRole("button", { name: "Treino livre" }).click();
+  await expect(
+    page.getByRole("button", { name: "Selecionar vídeo" }),
+  ).toBeEnabled();
+  expect(keys).toHaveLength(1);
+  expect(keys[0]).not.toBe(oldKey);
+  expect(paths).toEqual([
+    "GET /v1/attempts",
+    `DELETE /v1/attempts/${attemptId}`,
+    "POST /v1/attempts",
+  ]);
+});
+
 test("served production verified setup uses real camera controls without review simulation copy", async ({
   page,
 }) => {
