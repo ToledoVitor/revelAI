@@ -74,6 +74,9 @@ importers:
 
   apps/web:
     dependencies:
+      "@fontsource/arimo":
+        specifier: 5.3.0
+        version: 5.3.0
       "@fontsource/bebas-neue":
         specifier: 5.3.0
         version: 5.3.0
@@ -744,6 +747,12 @@ packages:
     resolution:
       {
         integrity: sha512-INS+6gh91cLUjB+PVHfu1UqcB76Sqtpyp7bnL+FYojhjygvOPA9ctiD/JDKsyD9Xgu4hUhCSJBPig/w7duNajw==,
+      }
+
+  "@fontsource/arimo@5.3.0":
+    resolution:
+      {
+        integrity: sha512-nhxZ2sTVZYX8DJBgLuyX360B5vE4mxqpmjlKTRfucIqfcWRVx9vOYzWBc1IgEX0ist48VMC10PRKbFyH+4QFvQ==,
       }
 
   "@fontsource/bebas-neue@5.3.0":
@@ -3471,6 +3480,8 @@ snapshots:
     dependencies:
       "@fastify/forwarded": 3.0.2
       ipaddr.js: 2.5.0
+
+  "@fontsource/arimo@5.3.0": {}
 
   "@fontsource/bebas-neue@5.3.0": {}
 

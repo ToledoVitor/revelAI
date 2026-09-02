@@ -2,6 +2,23 @@ import { access, readFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { captureHomeVisualArtifacts } from "./visual-harness.node";
 
+test("loads the bundled display and body fonts before visual capture", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => document.fonts.ready);
+
+  const loadedFamilies = await page.evaluate(() =>
+    Array.from(document.fonts)
+      .filter((font) => font.status === "loaded")
+      .map((font) => font.family.replaceAll('"', "")),
+  );
+
+  expect(loadedFamilies).toEqual(
+    expect.arrayContaining(["Arimo", "Bebas Neue"]),
+  );
+});
+
 test("keeps the home layout and controls usable at each approved viewport", async ({
   page,
 }, testInfo) => {

@@ -1,7 +1,6 @@
 :root {
   color: var(--near-black, #10110f);
   background: var(--warm-white, #f7f5f0);
-  font-family: var(--body-font, Inter, system-ui, sans-serif);
   font-synthesis: none;
 }
 
@@ -35,6 +34,7 @@ a:focus-visible {
   min-height: 100vh;
   overflow: hidden;
   background: var(--warm-white);
+  font-family: var(--body-font, "Arimo", Arial, sans-serif);
 }
 
 .site-header {

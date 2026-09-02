@@ -129,7 +129,7 @@ function getUiInkCoverageBaselines(viewport: Viewport) {
   // gate allows a 10% rasterisation margin below while making a removed control
   // unambiguously fail without depending on the variable hero photograph.
   if (viewport.width <= 700) {
-    return [1264, 17232, 2315] as const;
+    return [1040, 17232, 2287] as const;
   }
 
   return [416] as const;

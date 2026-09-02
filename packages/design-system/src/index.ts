@@ -8,7 +8,7 @@ export const designTokens = {
   },
   typography: {
     display: '"Bebas Neue", "Arial Narrow", sans-serif',
-    body: "Inter, system-ui, sans-serif",
+    body: '"Arimo", Arial, sans-serif',
   },
 } as const;
 

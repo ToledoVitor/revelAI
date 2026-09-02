@@ -1,5 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import "@fontsource/arimo/400.css";
+import "@fontsource/arimo/700.css";
 import "@fontsource/bebas-neue/400.css";
 import { App } from "./app";
 import "./styles.css";
