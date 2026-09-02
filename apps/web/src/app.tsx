@@ -1,7 +1,14 @@
 import { List, X } from "@phosphor-icons/react";
 import { designTokens } from "@revelai/design-system";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import {
   BrowserRouter,
   Link,
@@ -14,6 +21,17 @@ import { TrainingHistory } from "./history/history";
 import { Home } from "./home/home";
 import { createRevelApiClient } from "./lib/api/client";
 import { getDeviceAthleteId } from "./lib/api/identity";
+import type { ReviewSetupPort } from "./verified/setup";
+
+export const reviewRoutesEnabled =
+  import.meta.env.DEV || import.meta.env.MODE === "test";
+
+const ReviewSetupRoute = reviewRoutesEnabled
+  ? lazy(async () => {
+      const reviewModule = await import("./verified/setup");
+      return { default: reviewModule.ReviewSetupRoute };
+    })
+  : null;
 
 const appTheme = {
   "--warm-white": designTokens.color.warmWhite,
@@ -35,7 +53,13 @@ function Brand() {
 
 type RevelApiClient = ReturnType<typeof createRevelApiClient>;
 
-function Shell({ client }: Readonly<{ client: RevelApiClient }>) {
+type ShellProps = Readonly<{
+  client: RevelApiClient;
+  reviewModeEnabled: boolean;
+  reviewSetupPort?: ReviewSetupPort;
+}>;
+
+function Shell({ client, reviewModeEnabled, reviewSetupPort }: ShellProps) {
   const [isNavigationOpen, setNavigationOpen] = useState(false);
   const navigationToggleRef = useRef<HTMLButtonElement>(null);
   const restoreNavigationToggleFocus = useRef(false);
@@ -117,6 +141,16 @@ function Shell({ client }: Readonly<{ client: RevelApiClient }>) {
           path="/indisponivel/:destination"
           element={<UnavailableShell />}
         />
+        {reviewModeEnabled && ReviewSetupRoute ? (
+          <Route
+            path="/_test/verified/setup"
+            element={
+              <Suspense fallback={<p role="status">Carregando orientação.</p>}>
+                <ReviewSetupRoute port={reviewSetupPort} />
+              </Suspense>
+            }
+          />
+        ) : null}
         <Route path="*" element={<UnavailableShell />} />
       </Routes>
     </div>
@@ -144,7 +178,12 @@ function UnavailableShell() {
   );
 }
 
-export function App() {
+type AppProps = Readonly<{
+  reviewModeEnabled?: boolean;
+  reviewSetupPort?: ReviewSetupPort;
+}>;
+
+export function App({ reviewModeEnabled, reviewSetupPort }: AppProps = {}) {
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -163,7 +202,11 @@ export function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <Shell client={client} />
+        <Shell
+          client={client}
+          reviewModeEnabled={reviewModeEnabled ?? reviewRoutesEnabled}
+          reviewSetupPort={reviewSetupPort}
+        />
       </BrowserRouter>
     </QueryClientProvider>
   );

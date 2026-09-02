@@ -357,6 +357,119 @@ a:focus-visible {
   color: var(--near-black);
 }
 
+.calibration-setup {
+  width: min(100% - 3rem, 52rem);
+  margin: 0 auto;
+  padding: clamp(2.5rem, 7vw, 5rem) 0;
+}
+
+.calibration-setup h1 {
+  max-width: 12ch;
+  margin: 0;
+  font-family: var(--display-font);
+  font-size: clamp(3.5rem, 7vw, 6rem);
+  font-weight: 400;
+  line-height: 0.95;
+  text-transform: uppercase;
+}
+
+.calibration-setup h2 {
+  margin: 1.75rem 0 0;
+  color: var(--deep-emerald);
+  font-family: var(--display-font);
+  font-size: 2rem;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.calibration-setup > p {
+  max-width: 44rem;
+  line-height: 1.45;
+}
+
+.setup-challenge-id {
+  margin: 1.5rem 0 0;
+  color: var(--deep-emerald);
+  font-weight: 700;
+}
+
+.camera-preview {
+  display: grid;
+  place-items: center;
+  min-height: 13rem;
+  margin: 1.25rem 0;
+  padding: 1.5rem;
+  color: var(--muted-gray);
+  border: 1px solid var(--border-gray);
+  background: color-mix(in srgb, var(--deep-emerald) 5%, transparent);
+  text-align: center;
+}
+
+.camera-preview svg {
+  width: 3rem;
+  height: 3rem;
+  color: var(--deep-emerald);
+}
+
+.camera-preview p {
+  margin: 0.75rem 0 0;
+}
+
+.calibration-setup fieldset {
+  margin: 1.5rem 0;
+  padding: 1rem;
+  border: 1px solid var(--border-gray);
+}
+
+.calibration-setup legend {
+  padding: 0 0.4rem;
+  color: var(--deep-emerald);
+  font-weight: 700;
+}
+
+.calibration-setup fieldset button,
+.setup-actions button {
+  min-height: 2.75rem;
+  margin: 0.25rem;
+  padding: 0.55rem 0.85rem;
+  color: var(--deep-emerald);
+  border: 1px solid var(--deep-emerald);
+  background: transparent;
+  font-weight: 700;
+}
+
+.setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+}
+
+.setup-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  margin: 0;
+}
+
+.setup-actions button:last-child:not(:disabled) {
+  color: var(--warm-white);
+  background: var(--deep-emerald);
+}
+
+@media (hover: hover) {
+  .calibration-setup fieldset button:hover,
+  .setup-actions button:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--deep-emerald) 10%, transparent);
+  }
+
+  .setup-actions button:last-child:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--deep-emerald) 85%, var(--near-black));
+  }
+}
+
 @media (hover: hover) {
   .primary-navigation a:hover,
   .primary-navigation button:hover,
@@ -517,6 +630,15 @@ a:focus-visible {
   .training-history {
     width: min(100% - 14%, 48rem);
     padding: 2.25rem 0;
+  }
+
+  .calibration-setup {
+    width: min(100% - 14%, 52rem);
+    padding: 2.25rem 0;
+  }
+
+  .setup-actions {
+    display: grid;
   }
 }
 

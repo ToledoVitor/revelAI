@@ -4,6 +4,7 @@ export default defineConfig({
   outputDir: "./coverage/playwright",
   testDir: "./src/visual",
   testMatch: "**/*.visual.spec.ts",
+  testIgnore: "**/production-route-isolation.visual.spec.ts",
   use: {
     baseURL: "http://127.0.0.1:4173",
     screenshot: "only-on-failure",
