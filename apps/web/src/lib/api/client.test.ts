@@ -232,6 +232,68 @@ describe("Revel API client", () => {
     ).resolves.toEqual(accepted.body);
   });
 
+  it("reports real XHR upload bytes while preserving the C2 accepted response", async () => {
+    const accepted = mediaUploadFixtures.accepted.expected;
+    if (accepted.kind !== "accepted") {
+      throw new Error("The shared accepted media fixture is required.");
+    }
+    const uploadListeners = new Map<string, (event: ProgressEvent) => void>();
+    const requestListeners = new Map<string, () => void>();
+    const sentHeaders = new Map<string, string>();
+    const xhr = {
+      upload: {
+        addEventListener(
+          type: string,
+          listener: (event: ProgressEvent) => void,
+        ) {
+          uploadListeners.set(type, listener);
+        },
+        removeEventListener(type: string) {
+          uploadListeners.delete(type);
+        },
+      },
+      status: accepted.status,
+      responseText: JSON.stringify(accepted.body),
+      open: (method: string, url: string) => {
+        expect(method).toBe("POST");
+        expect(url).toBe(
+          "http://revelai.test/v1/attempts/attempt-upload-1/media",
+        );
+      },
+      setRequestHeader: (name: string, value: string) =>
+        sentHeaders.set(name, value),
+      addEventListener: (type: string, listener: () => void) =>
+        requestListeners.set(type, listener),
+      removeEventListener: (type: string) => requestListeners.delete(type),
+      send: (body: unknown) => {
+        expect(body).toBeInstanceOf(FormData);
+        uploadListeners.get("progress")?.({
+          lengthComputable: true,
+          loaded: 7,
+          total: 11,
+        } as ProgressEvent);
+        requestListeners.get("load")?.();
+      },
+      abort: () => requestListeners.get("abort")?.(),
+    };
+    const progress: Array<Readonly<{ loaded: number; total?: number }>> = [];
+
+    await expect(
+      createRevelApiClient({
+        baseUrl: "http://revelai.test",
+        athleteId,
+        xhrFactory: () => xhr as unknown as XMLHttpRequest,
+      }).uploadAttemptMedia(
+        "attempt-upload-1",
+        new File(["video"], "attempt.mp4", { type: "video/mp4" }),
+        { onProgress: (next) => progress.push(next) },
+      ),
+    ).resolves.toEqual(accepted.body);
+
+    expect(progress).toEqual([{ loaded: 7, total: 11 }]);
+    expect(sentHeaders).toEqual(new Map([["x-revelai-athlete-id", athleteId]]));
+  });
+
   it.each(routeErrorFixtures)(
     "retains only the parsed public error fields for $body.code",
     async (fixture) => {

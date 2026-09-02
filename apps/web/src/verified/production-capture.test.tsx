@@ -160,6 +160,21 @@ describe("production verified capture", () => {
     expect(onMedia).toHaveBeenCalledWith(file);
   });
 
+  it("uses the production existing-video and recovery action names", async () => {
+    const user = userEvent.setup();
+    installMedia(
+      vi.fn().mockRejectedValue(new DOMException("denied", "NotAllowedError")),
+    );
+    installRecorder();
+    render(<ProductionCapture disabled={false} onMedia={vi.fn()} />);
+
+    expect(screen.getByLabelText("Enviar vídeo existente")).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Iniciar gravação" }));
+    expect(
+      await screen.findByRole("button", { name: "Tentar novamente" }),
+    ).toBeEnabled();
+  });
+
   it("normalizes an undeclared WebM for the wire while preserving its source metadata and preview lifecycle", async () => {
     const user = userEvent.setup();
     const createObjectUrl = vi.fn(() => "blob:production-webm");
@@ -259,7 +274,11 @@ describe("production verified capture", () => {
 
     const start = async () => {
       await act(async () => {
-        screen.getByRole("button", { name: "Iniciar gravação" }).click();
+        screen
+          .getByRole("button", {
+            name: /Iniciar gravação|Tentar novamente/,
+          })
+          .click();
         await Promise.resolve();
         await vi.advanceTimersByTimeAsync(5_000);
       });

@@ -172,7 +172,7 @@ async function completeVerifiedSetup(user: ReturnType<typeof userEvent.setup>) {
   for (let index = 0; index < 5; index += 1) {
     await user.click(
       screen.getByRole("button", {
-        name: index === 0 ? "Simular câmera pronta" : "Simular etapa pronta",
+        name: index === 0 ? "Usar vídeo existente" : "Confirmar etapa",
       }),
     );
     await user.click(screen.getByRole("button", { name: "Continuar" }));
@@ -306,16 +306,16 @@ describe("production verified tracer", () => {
       screen.getByRole("button", { name: "Desafio verificado" }),
     );
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Simule a disponibilidade da câmera antes de continuar.",
+      "Ative a câmera ou use um vídeo existente antes de continuar.",
     );
     expect(screen.getByRole("button", { name: "Continuar" })).toBeDisabled();
     expect(fetchSpy).not.toHaveBeenCalled();
 
     await user.click(
-      screen.getByRole("button", { name: "Tentar acesso à câmera" }),
+      screen.getByRole("button", { name: "Usar vídeo existente" }),
     );
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Prévia simulada da câmera pronta.",
+      "Vídeo existente escolhido como alternativa de captura.",
     );
     expect(screen.getByRole("button", { name: "Continuar" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Continuar" }));
@@ -328,9 +328,39 @@ describe("production verified tracer", () => {
     );
     await user.click(screen.getByRole("button", { name: "Voltar" }));
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Prévia simulada da câmera pronta.",
+      "Vídeo existente escolhido como alternativa de captura.",
     );
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("uses a real camera activation instead of exposing simulated controls on the public verified route", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+    const stop = vi.fn();
+    const getUserMedia = vi.fn().mockResolvedValue({
+      getTracks: () => [{ stop }],
+    } as unknown as MediaStream);
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+
+    expect(
+      screen.queryByRole("button", { name: /simular/i }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Ativar câmera" }));
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledOnce());
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Prévia da câmera pronta.",
+    );
+    expect(screen.getByRole("button", { name: "Continuar" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Continuar" }));
+    expect(stop).toHaveBeenCalledOnce();
   });
 
   it("allows the W2 existing-video fallback to satisfy only the device gate before mutations", async () => {
@@ -1354,6 +1384,70 @@ describe("production verified tracer", () => {
     expect(screen.queryByText(/AbortError|Aborted/)).not.toBeInTheDocument();
   });
 
+  it("returns an authoritative awaiting-upload cancellation to capture with its same file and attempt", async () => {
+    const user = userEvent.setup();
+    let createCalls = 0;
+    let uploadCalls = 0;
+    const fetchSpy = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname === "/v1/calibration-sessions")
+        return Promise.resolve(response(calibration, 201));
+      if (pathname === "/v1/calibration-sessions/calibration-w4-1/ready")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      if (pathname === "/v1/attempts") {
+        createCalls += 1;
+        return Promise.resolve(response(createdAttempt, 201));
+      }
+      if (pathname === "/v1/attempts/attempt-w4-1/media") {
+        uploadCalls += 1;
+        if (uploadCalls === 1)
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new DOMException("Aborted", "AbortError")),
+            );
+          });
+        return Promise.resolve(response(acceptedUpload, 202));
+      }
+      if (pathname === "/v1/attempts/attempt-w4-1")
+        return Promise.resolve(response(createdAttempt));
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+    await completeVerifiedSetup(user);
+    await screen.findByRole("heading", { name: "Envie o vídeo verificado" });
+    await waitForAttemptReady();
+    fireEvent.change(screen.getByTestId("production-video-input"), {
+      target: {
+        files: [
+          new File(["video"], "before-commit.webm", { type: "video/webm" }),
+        ],
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Cancelar envio" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Envie o vídeo verificado" }),
+    ).toBeVisible();
+    expect(screen.getByText("before-commit.webm")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Enviar vídeo" })).toBeEnabled();
+    expect(createCalls).toBe(1);
+
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    expect(
+      await screen.findByRole("heading", { name: "Processando tentativa" }),
+    ).toBeVisible();
+    expect(uploadCalls).toBe(2);
+    expect(createCalls).toBe(1);
+  });
+
   it("ignores a stale first upload failure after a cancelled retry is accepted", async () => {
     const user = userEvent.setup();
     let rejectFirst: ((reason: unknown) => void) | undefined;
@@ -1413,6 +1507,68 @@ describe("production verified tracer", () => {
     expect(
       screen.queryByText("O serviço está temporariamente indisponível."),
     ).not.toBeInTheDocument();
+  });
+
+  it("does not let a stale cancellation reconciliation replace a newer accepted upload", async () => {
+    const user = userEvent.setup();
+    let uploadCalls = 0;
+    let resolveOldAttempt: ((value: Response) => void) | undefined;
+    const fetchSpy = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname === "/v1/calibration-sessions")
+        return Promise.resolve(response(calibration, 201));
+      if (pathname === "/v1/calibration-sessions/calibration-w4-1/ready")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      if (pathname === "/v1/attempts")
+        return Promise.resolve(response(createdAttempt, 201));
+      if (pathname === "/v1/attempts/attempt-w4-1/media") {
+        uploadCalls += 1;
+        if (uploadCalls === 1)
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new DOMException("Aborted", "AbortError")),
+            );
+          });
+        return Promise.resolve(response(acceptedUpload, 202));
+      }
+      if (pathname === "/v1/attempts/attempt-w4-1")
+        return new Promise<Response>((resolve) => {
+          resolveOldAttempt = resolve;
+        });
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+    await completeVerifiedSetup(user);
+    await screen.findByRole("heading", { name: "Envie o vídeo verificado" });
+    await waitForAttemptReady();
+    fireEvent.change(screen.getByTestId("production-video-input"), {
+      target: {
+        files: [new File(["video"], "stale-get.webm", { type: "video/webm" })],
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Cancelar envio" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    expect(
+      await screen.findByRole("heading", { name: "Processando tentativa" }),
+    ).toBeVisible();
+
+    await act(async () => {
+      resolveOldAttempt?.(response(createdAttempt));
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "Processando tentativa" }),
+    ).toBeVisible();
+    expect(screen.queryByText("stale-get.webm")).not.toBeInTheDocument();
   });
 
   it("reconciles an abort-after-commit from the authoritative accepted attempt", async () => {

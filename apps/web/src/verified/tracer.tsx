@@ -11,13 +11,17 @@ import {
   type RevelApiError,
 } from "../lib/api/client";
 import { ProductionCapture } from "./production-capture";
+import { ProductionSetupCamera } from "./production-setup-camera";
 import {
   captureTimingGuidance,
-  setupCameraMessage,
   setupGates,
   type SetupCameraStatus,
   type SetupGate,
 } from "./setup-model";
+import {
+  isVerifiedOutcomeForAttempt,
+  resolveUploadReconciliation,
+} from "./upload-reconciliation";
 
 type RevelApiClient = ReturnType<typeof createRevelApiClient>;
 
@@ -84,20 +88,6 @@ function focusHeading(ref: React.RefObject<HTMLHeadingElement | null>) {
   ref.current?.focus();
 }
 
-function isVerifiedOutcomeForAttempt(
-  outcome: AttemptOutcome,
-  attemptId: string,
-): boolean {
-  if (outcome.state === "pending")
-    return outcome.mode === "verified" && outcome.attemptId === attemptId;
-  if (outcome.state === "valid")
-    return (
-      outcome.result.kind === "verified-result" &&
-      outcome.result.attemptId === attemptId
-    );
-  return outcome.mode === "verified" && outcome.attemptId === attemptId;
-}
-
 type VerifiedTracerProps = Readonly<{ client: RevelApiClient }>;
 
 export function VerifiedTracer({ client }: VerifiedTracerProps) {
@@ -138,6 +128,9 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
   const [backoffSeconds, setBackoffSeconds] = useState(1);
   const [pollTick, setPollTick] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<
+    Readonly<{ loaded: number; total?: number }> | undefined
+  >();
 
   const rankingView =
     new URLSearchParams(location.search).get("view") === "ranking";
@@ -170,8 +163,96 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
     setBackoffSeconds(1);
     setPollTick(0);
     setRefreshing(false);
+    setUploadProgress(undefined);
     setStage("setup");
   }, []);
+
+  const stopPolling = useCallback(() => {
+    if (timeoutRef.current !== undefined)
+      window.clearTimeout(timeoutRef.current);
+    timeoutRef.current = undefined;
+    const pending = pendingRequestRef.current;
+    pendingRequestRef.current = undefined;
+    pending?.controller.abort();
+    pollAbortRef.current = undefined;
+  }, []);
+
+  const completeOutcome = useCallback(
+    (nextOutcome: AttemptOutcome, ownedAttemptId: string) => {
+      stopPolling();
+      if (
+        resolveUploadReconciliation(nextOutcome, ownedAttemptId).kind ===
+        "mismatch"
+      ) {
+        setMessage("Este resultado não está disponível neste fluxo.");
+        setTerminal(undefined);
+        setStage("terminal");
+        return;
+      }
+      setTerminal(nextOutcome);
+      setStage("terminal");
+    },
+    [stopPolling],
+  );
+
+  const applyUploadOutcome = useCallback(
+    (nextOutcome: AttemptOutcome, ownedAttemptId: string) => {
+      const transition = resolveUploadReconciliation(
+        nextOutcome,
+        ownedAttemptId,
+      );
+      if (transition.kind === "mismatch") {
+        setMessage("Este resultado não está disponível neste fluxo.");
+        setStage("capture");
+        return;
+      }
+      setOutcome(transition.outcome);
+      if (!transition.preserveMedia) {
+        setMedia(undefined);
+        setUploadProgress(undefined);
+      }
+      if (transition.kind === "capture") {
+        setStage("capture");
+        return;
+      }
+      setBackoffSeconds(1);
+      if (transition.kind === "pending") {
+        setStage("pending");
+        return;
+      }
+      completeOutcome(transition.outcome, ownedAttemptId);
+    },
+    [completeOutcome],
+  );
+
+  const reconcileUploadAttempt = useCallback(
+    async (
+      ownedAttemptId: string,
+      generation: number,
+      uploadGeneration: number,
+      fallbackMessage = safeGenericError,
+    ) => {
+      try {
+        const attempt = await client.getAttempt(ownedAttemptId);
+        if (
+          generation !== generationRef.current ||
+          uploadGeneration !== uploadGenerationRef.current
+        )
+          return;
+        applyUploadOutcome(attempt.outcome, ownedAttemptId);
+      } catch (error) {
+        if (
+          generation !== generationRef.current ||
+          uploadGeneration !== uploadGenerationRef.current ||
+          isAbort(error)
+        )
+          return;
+        setMessage(fallbackMessage);
+        setStage("capture");
+      }
+    },
+    [applyUploadOutcome, client],
+  );
 
   useEffect(() => {
     focusHeading(headingRef);
@@ -261,7 +342,17 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
     const controller = new AbortController();
     activeUploadRef.current = controller;
     void client
-      .uploadAttemptMedia(attemptId, media, { signal: controller.signal })
+      .uploadAttemptMedia(attemptId, media, {
+        signal: controller.signal,
+        onProgress: (nextProgress) => {
+          if (
+            generation === generationRef.current &&
+            uploadGeneration === uploadGenerationRef.current &&
+            activeUploadRef.current === controller
+          )
+            setUploadProgress(nextProgress);
+        },
+      })
       .then((accepted) => {
         if (
           generation !== generationRef.current ||
@@ -269,21 +360,14 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           activeUploadRef.current !== controller
         )
           return;
-        if (
-          accepted.attemptId !== attemptId ||
-          accepted.mode !== "verified" ||
-          accepted.outcome.attemptId !== attemptId ||
-          accepted.outcome.mode !== "verified"
-        ) {
+        if (accepted.attemptId !== attemptId || accepted.mode !== "verified") {
           setMessage("Este envio não pertence a esta tentativa verificada.");
           setStage("capture");
           return;
         }
         activeUploadRef.current = undefined;
-        setOutcome(accepted.outcome);
-        setMedia(undefined);
-        setBackoffSeconds(1);
-        setStage("pending");
+        setUploadProgress(undefined);
+        applyUploadOutcome(accepted.outcome, attemptId);
       })
       .catch((error: unknown) => {
         if (
@@ -293,41 +377,17 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
         )
           return;
         activeUploadRef.current = undefined;
-        if (hasRouteErrorCode(error, "duplicate_media_upload")) {
-          void client
-            .getAttempt(attemptId)
-            .then((attempt) => {
-              if (
-                generation !== generationRef.current ||
-                uploadGeneration !== uploadGenerationRef.current
-              )
-                return;
-              const nextOutcome = attempt.outcome;
-              if (!isVerifiedOutcomeForAttempt(nextOutcome, attemptId)) {
-                setMessage("Este resultado não está disponível neste fluxo.");
-                setStage("capture");
-                return;
-              }
-              setOutcome(nextOutcome);
-              setMedia(undefined);
-              setBackoffSeconds(1);
-              if (nextOutcome.state === "pending") {
-                setStage("pending");
-                return;
-              }
-              setTerminal(nextOutcome);
-              setStage("terminal");
-            })
-            .catch((reconciliationError: unknown) => {
-              if (
-                generation !== generationRef.current ||
-                uploadGeneration !== uploadGenerationRef.current ||
-                isAbort(reconciliationError)
-              )
-                return;
-              setMessage(safeError(reconciliationError));
-              setStage("capture");
-            });
+        setUploadProgress(undefined);
+        if (
+          hasRouteErrorCode(error, "duplicate_media_upload") ||
+          isAbort(error)
+        ) {
+          void reconcileUploadAttempt(
+            attemptId,
+            generation,
+            uploadGeneration,
+            safeError(error),
+          );
           return;
         }
         setMessage(safeError(error));
@@ -339,64 +399,14 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
         controller.abort();
       }
     };
-  }, [attemptId, client, media, stage]);
-
-  const stopPolling = useCallback(() => {
-    if (timeoutRef.current !== undefined)
-      window.clearTimeout(timeoutRef.current);
-    timeoutRef.current = undefined;
-    const pending = pendingRequestRef.current;
-    pendingRequestRef.current = undefined;
-    pending?.controller.abort();
-    pollAbortRef.current = undefined;
-  }, []);
-
-  const completeOutcome = useCallback(
-    (nextOutcome: AttemptOutcome, ownedAttemptId: string) => {
-      stopPolling();
-      if (!isVerifiedOutcomeForAttempt(nextOutcome, ownedAttemptId)) {
-        setMessage("Este resultado não está disponível neste fluxo.");
-        setTerminal(undefined);
-        setStage("terminal");
-        return;
-      }
-      setTerminal(nextOutcome);
-      setStage("terminal");
-    },
-    [stopPolling],
-  );
-
-  const reconcileUploadAttempt = useCallback(
-    async (
-      ownedAttemptId: string,
-      generation: number,
-      fallbackMessage = safeGenericError,
-    ) => {
-      try {
-        const attempt = await client.getAttempt(ownedAttemptId);
-        if (generation !== generationRef.current) return;
-        const nextOutcome = attempt.outcome;
-        if (!isVerifiedOutcomeForAttempt(nextOutcome, ownedAttemptId)) {
-          setMessage("Este resultado não está disponível neste fluxo.");
-          setStage("capture");
-          return;
-        }
-        setOutcome(nextOutcome);
-        setMedia(undefined);
-        setBackoffSeconds(1);
-        if (nextOutcome.state === "pending") {
-          setStage("pending");
-          return;
-        }
-        completeOutcome(nextOutcome, ownedAttemptId);
-      } catch (error) {
-        if (generation !== generationRef.current || isAbort(error)) return;
-        setMessage(fallbackMessage);
-        setStage("capture");
-      }
-    },
-    [client, completeOutcome],
-  );
+  }, [
+    applyUploadOutcome,
+    attemptId,
+    client,
+    media,
+    reconcileUploadAttempt,
+    stage,
+  ]);
 
   const refreshOutcome = useCallback(async () => {
     if (stage !== "pending" || !attemptId) return;
@@ -492,11 +502,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           : false;
     const currentGateStatus =
       activeGate?.id === "device"
-        ? currentGatePassed
-          ? setupCameraMessage(cameraStatus)
-          : cameraStatus === "pending"
-            ? activeGate.correction
-            : setupCameraMessage(cameraStatus)
+        ? ""
         : currentGatePassed
           ? activeGate?.ready
           : activeGate?.correction;
@@ -514,43 +520,27 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
         </p>
         <p>{captureTimingGuidance}</p>
         <h2>{activeGate?.title}</h2>
-        <section aria-label="Prévia da câmera">
-          <p role="status">{currentGateStatus}</p>
-        </section>
+        {activeGate?.id === "device" ? (
+          <ProductionSetupCamera
+            disabled={stage !== "setup"}
+            status={cameraStatus}
+            onStatus={setCameraStatus}
+          />
+        ) : (
+          <section aria-label="Prévia da câmera">
+            <p role="status">{currentGateStatus}</p>
+          </section>
+        )}
         {message ? <p role="alert">{message}</p> : null}
-        <button
-          type="button"
-          disabled={stage !== "setup" || !activeGate}
-          onClick={() => {
-            if (activeGate?.id === "device") {
-              setCameraStatus("ready");
-              return;
-            }
-            if (activeGate) {
-              setPassedGates((current) => new Set([...current, activeGate.id]));
-            }
-          }}
-        >
-          {activeGate?.id === "device"
-            ? "Simular câmera pronta"
-            : "Simular etapa pronta"}
-        </button>
-        {activeGate?.id === "device" && !currentGatePassed ? (
+        {activeGate && activeGate.id !== "device" ? (
           <button
             type="button"
             disabled={stage !== "setup"}
-            onClick={() => setCameraStatus("ready")}
+            onClick={() =>
+              setPassedGates((current) => new Set([...current, activeGate.id]))
+            }
           >
-            Tentar acesso à câmera
-          </button>
-        ) : null}
-        {activeGate?.id === "device" && !currentGatePassed ? (
-          <button
-            type="button"
-            disabled={stage !== "setup"}
-            onClick={() => setCameraStatus("existing-video")}
-          >
-            Usar vídeo existente
+            Confirmar etapa
           </button>
         ) : null}
         <button
@@ -620,8 +610,20 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
         />
         {uploading ? (
           <>
-            <progress aria-label="Envio do vídeo verificado" />
-            <p role="status">Enviando vídeo ao servidor.</p>
+            <progress
+              aria-label="Envio do vídeo verificado"
+              {...(uploadProgress && uploadProgress.total !== undefined
+                ? {
+                    value: uploadProgress.loaded,
+                    max: uploadProgress.total,
+                  }
+                : {})}
+            />
+            <p role="status">
+              {uploadProgress
+                ? `Enviando ${uploadProgress.loaded} de ${uploadProgress.total ?? "tamanho não informado"} bytes.`
+                : "Enviando vídeo ao servidor."}
+            </p>
           </>
         ) : null}
         {message ? <p role="alert">{message}</p> : null}
@@ -644,6 +646,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           onClick={() => {
             uploadGenerationRef.current += 1;
             setMessage("");
+            setUploadProgress(undefined);
             setStage("uploading");
           }}
         >
@@ -653,10 +656,11 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           <button
             type="button"
             onClick={() => {
-              uploadGenerationRef.current += 1;
+              const uploadGeneration = ++uploadGenerationRef.current;
               const upload = activeUploadRef.current;
               activeUploadRef.current = undefined;
               upload?.abort();
+              setUploadProgress(undefined);
               setStage("capture");
               setMessage(
                 "Envio cancelado. O vídeo continua pronto para tentar novamente.",
@@ -665,6 +669,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
                 void reconcileUploadAttempt(
                   attemptId,
                   generationRef.current,
+                  uploadGeneration,
                   "Envio cancelado. O vídeo continua pronto para tentar novamente.",
                 );
             }}

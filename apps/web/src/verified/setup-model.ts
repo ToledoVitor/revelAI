@@ -20,8 +20,9 @@ export const setupGates: readonly SetupGate[] = [
   {
     id: "device",
     title: "Dispositivo",
-    correction: "Simule a disponibilidade da câmera antes de continuar.",
-    ready: "Prévia simulada da câmera pronta.",
+    correction:
+      "Ative a câmera ou escolha um vídeo existente antes de continuar.",
+    ready: "Prévia da câmera pronta.",
   },
   {
     id: "space",
@@ -54,7 +55,7 @@ export const setupGates: readonly SetupGate[] = [
 ];
 
 export function setupCameraMessage(status: SetupCameraStatus): string {
-  if (status === "ready") return "Prévia simulada da câmera pronta.";
+  if (status === "ready") return "Prévia da câmera pronta.";
   if (status === "denied")
     return "O acesso à câmera foi negado. Permita o acesso nas configurações do navegador ou use um vídeo existente.";
   if (status === "unsupported")
@@ -63,5 +64,5 @@ export function setupCameraMessage(status: SetupCameraStatus): string {
     return "Nenhuma câmera está disponível. Conecte uma câmera ou use um vídeo existente.";
   if (status === "existing-video")
     return "Vídeo existente escolhido como alternativa de captura. Ele mantém a pré-rolagem de calibração de 4 segundos e o intervalo ativo de exatamente 60 segundos; as próximas orientações continuam necessárias.";
-  return "Aguardando simulação da câmera.";
+  return "Aguardando preparação da câmera.";
 }

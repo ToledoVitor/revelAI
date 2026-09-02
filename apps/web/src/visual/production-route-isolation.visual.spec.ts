@@ -105,3 +105,28 @@ for (const path of reviewPaths) {
     expect(apiRequests).toEqual([]);
   });
 }
+
+test("served production verified setup uses real camera controls without review simulation copy", async ({
+  page,
+}) => {
+  const apiRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.startsWith("/v1/"))
+      apiRequests.push(request.url());
+  });
+
+  await page.goto("/verified");
+
+  const setup = page.getByRole("main", {
+    name: "Preparação do desafio verificado",
+  });
+  await expect(setup).toBeVisible();
+  await expect(setup).not.toContainText(/simular|simulação|simulada/i);
+  await expect(
+    setup.getByRole("button", { name: "Ativar câmera" }),
+  ).toBeVisible();
+  await expect(
+    setup.getByRole("button", { name: "Usar vídeo existente" }),
+  ).toBeVisible();
+  expect(apiRequests).toEqual([]);
+});

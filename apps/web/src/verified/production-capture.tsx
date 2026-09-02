@@ -386,9 +386,9 @@ export function ProductionCapture({
         disabled={disabled || busy}
         onClick={() => void start()}
       >
-        Iniciar gravação
+        {state === "error" ? "Tentar novamente" : "Iniciar gravação"}
       </button>
-      <label htmlFor="production-video-input">Selecionar vídeo</label>
+      <label htmlFor="production-video-input">Enviar vídeo existente</label>
       <input
         id="production-video-input"
         data-testid="production-video-input"

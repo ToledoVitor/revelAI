@@ -56,6 +56,13 @@ export function createReviewSetupPort(
   });
 }
 
+function reviewCameraMessage(status: CameraStatus): string {
+  if (status === "pending")
+    return "Simule a disponibilidade da câmera antes de continuar.";
+  if (status === "ready") return "Prévia simulada da câmera pronta.";
+  return setupCameraMessage(status);
+}
+
 type ReviewSetupRouteProps = Readonly<{ port?: ReviewSetupPort }>;
 
 export function ReviewSetupRoute({ port }: ReviewSetupRouteProps) {
@@ -81,11 +88,7 @@ export function ReviewSetupRoute({ port }: ReviewSetupRouteProps) {
     activeGate.id === "device" ? deviceReady : passedGates.has(activeGate.id);
   const currentGateStatus =
     activeGate.id === "device"
-      ? currentGatePassed
-        ? setupCameraMessage(cameraStatus)
-        : cameraStatus === "pending"
-          ? activeGate.correction
-          : setupCameraMessage(cameraStatus)
+      ? reviewCameraMessage(cameraStatus)
       : currentGatePassed
         ? activeGate.ready
         : activeGate.correction;
