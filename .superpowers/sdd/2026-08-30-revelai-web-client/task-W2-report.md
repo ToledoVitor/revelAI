@@ -205,3 +205,28 @@ Reviewer verdict: `CHANGES_REQUIRED` on the round-3 signal proof. The production
 - A repeated signal now cannot regain Node's default process termination while any staged output may still need restoration. The one first-signal guard preserves the previous controlled child-stop behavior and avoids multiple `kill` calls or multiple completion paths.
 - The subprocess proof uses genuine operating-system `SIGTERM`, rather than an emitter fake, and verifies the critical order: first forwarding, recovery held, repeated signals ignored, exact restoration/listener cleanup, then sentinel and normal exit.
 - Cleanup remains narrowly scoped to explicit temporary test paths and the pre-existing recovery module's two validated dependency-output paths. No W1 production request path, W2 review runtime state, W3 capture behavior, or production artifact boundary was expanded. No push was made.
+
+## Hosted CI regression fix (commit `98dd490`)
+
+Hosted run `33611887462` failed the Ubuntu `pnpm check` after the W2 review candidate. The only failing test was the real production Vite graph assertion in `apps/web/src/app.test.tsx`: it timed out at 5,304 ms against Vitest's implicit 5,000 ms test budget while awaiting `buildWithProductionEnvironment()`. Its sibling production-router harness completed and passed in 9,357 ms, confirming that the CI worker was executing real production transformations under contention rather than reporting a graph assertion failure.
+
+### Root-cause evidence
+
+- CI-mode isolated app-graph runs were finite and passed in 1,711 ms, 1,700 ms, and 1,564 ms. The same app/harness pair with ordinary local file parallelism passed in 1,658 ms, 1,655 ms, and 1,653 ms, so local parallelism alone was not sufficient to reproduce the hosted failure.
+- A deterministic guarded CPU-contention loop started 24 short-lived `yes` workers with a `trap` that kills and waits for every recorded PID. Under the original implicit budget, it reproduced the exact timeout deterministically: app/harness runs failed at 5,086 ms, 5,043 ms, and 5,015 ms; the app graph test alone also failed at 5,073 ms. Thus file parallelism can increase pressure but is not required for the failure.
+- Under the same contention with a temporary CLI 15-second budget, the original graph build completed at 6,651 ms and 6,906 ms. This ruled out a hidden hang or unfinished Vite handle: the assertions execute and complete once the legitimate build is given a finite integration budget.
+- The clean dependency-output probe passed 6/6, including its real rebuild/restoration, and an immediate focused graph build passed in 1,518 ms with a clean worktree. Clean-dist prior state was therefore falsified.
+- The exact pinned Linux/amd64 Playwright image was not usable as a fast reproduction on the Apple host because emulation produced no useful output; the hosted log plus the deterministic local stress loop are the evidence basis.
+
+### Minimal fix and RED → GREEN
+
+- `apps/web/src/app.test.tsx` now declares `productionGraphIntegrationTimeoutMs = 15_000` and passes it only as the third argument of the existing production-graph `it`. This matches the repository's named, finite real-browser integration budget pattern. It does not change the test name, the production environment setup/restoration, graph/module/marker assertions, routing behavior, or global Vitest configuration.
+- RED was the pre-fix guarded contention loop above, which failed at the same implicit 5-second boundary as hosted CI. After the scoped change, that exact loop was GREEN twice: 6,557 ms and 6,227 ms, with the review-module graph and evaluation-marker assertions still passing.
+
+### Verification and review status
+
+- `rtk pnpm --dir apps/web exec vitest run src/app.test.tsx src/production-router-harness.test.ts src/verified/setup.test.tsx --config vitest.config.ts` → 3 files / 16 tests passed.
+- `rtk pnpm --dir apps/web run lint`, `typecheck`, `build`, and `test` → all passed; web test has 11 Node checks, 14 Vitest files / 114 tests, and 20 structural browser checks with 8 established skips.
+- `rtk pnpm check` → root format, lint, typecheck, test, and build passed.
+- Stress workers and temporary diagnosis artifacts were removed; `git diff --check` passed before the functional commit.
+- Sol review is pending. No push was made.
