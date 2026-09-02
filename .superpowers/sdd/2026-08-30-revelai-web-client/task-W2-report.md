@@ -95,3 +95,43 @@ The follow-up review identified seven important gaps and one minor copy gap. Thi
 - The only remaining review-related runtime input is the fake setup port, which can supply test data only after the compile-time guard has registered the review route. It cannot enable a production route.
 - The isolated production output is explicitly scoped under `apps/web/coverage/production-router-dist`; no `dist` contents are reused by its preview command.
 - No W1 production flow, real client mutation, capture timer, media request, verification claim, or unapproved visual dependency is introduced.
+
+## Review fix round 2 (commit `c06b978`)
+
+The second review found that the first production graph test needed a separate, behaviour-level production transform proof; the artifact builder needed to work with no pre-existing workspace outputs; process cancellation needed the same lifecycle protection as the existing Playwright tooling; and the new selection/completion buttons needed the app's action styling. This round resolves those concerns without adding a second route switch or any real capture/API behaviour.
+
+### Changes made
+
+- `apps/web/src/production-router-harness.test.ts` creates a normal Vite application build from a small test-only entry while `NODE_ENV=production` is set before Vite transforms modules. It imports the resulting entry into a JSDOM document and mounts the emitted `App`; it is therefore distinct from both a unit JSX render and served Playwright. Direct and history-driven navigation for setup and capture each assert the normal unavailable boundary, the route-specific safe copy, zero `fetch`, zero fake-port calls, and no review evaluation marker.
+- `apps/web/src/app.test.tsx` now uses that same pre-transform production environment for its graph-level build. It proves the actual review source module is absent from `moduleIds` and its evaluation marker is absent from emitted code; it does not mutate an already evaluated router environment.
+- `apps/web/scripts/production-router-build.mjs` owns the isolated-artifact workflow. Before compiling the web app it builds every workspace dependency of `@revelai/web` through the filtered dependency graph (contracts and design system), rather than assuming their `dist` folders exist. It removes/recreates only `apps/web/coverage/production-router-dist`, builds into it, then asserts the result. The artifact assertion rejects a review `setup-*.js` chunk as well as the existing review-content marker scan.
+- `apps/web/scripts/production-router-build.check.mjs` uses the existing Chromium-runner lifecycle pattern to prove `SIGINT`, `SIGTERM`, and `SIGHUP` are forwarded to the active pnpm child, every listener is removed after one settlement, and child errors, non-zero exits, and child signals reject. `runPnpm` protects settlement with one cleanup path.
+- `apps/web/scripts/production-router-clean-dist.check.mjs` temporarily moves only the contracts and design-system output directories aside, runs the normal `test:production-router` command, verifies those outputs were rebuilt, and restores the exact original outputs in `finally`. It is wired into the normal web test command, so the clean-install property cannot silently regress.
+- The review setup challenge-selection, continuation, and completion-return controls use the shared `setup-action` treatment. The selected challenge and primary continuation/return states use design tokens for normal, selected, disabled, hover, and inherited visible-focus behaviour; no new icon or custom visual asset was introduced.
+
+### RED → GREEN evidence
+
+1. The first production-transform harness test was RED before its browser entry existed (Vite could not resolve the entry). After adding the entry, it exposed the real test environment issue: a Vite build invoked while the test process still had `NODE_ENV=test` treated the review import as development even with `mode: "production"`. Setting `NODE_ENV=production` before `build()` starts transforming modules made the production harness GREEN: 4 cases for direct/in-app setup/capture navigation.
+2. The isolated builder lifecycle test was RED before the extracted builder module existed. The minimal builder module then made the two Node lifecycle tests GREEN, including all three forwarded terminal signals and single-settlement failure paths.
+3. The clean-output probe first failed when invoked as a bare Node runner because the project deliberately requires `npm_execpath` to run pnpm safely. Running it through its durable package script is the real contract and was GREEN: it removed both dependency outputs, rebuilt the artifact/served proof, checked new outputs, and restored the prior folders. The first full web run then caught the Node lifecycle file being collected by Vitest because of its `.test.mjs` suffix; renaming it to the repository's established `.check.mjs` convention was the single runner-isolation fix. The full suite then passed.
+4. The button-structure assertions were RED because challenge selection, initial Continue, and completion Return had no action classes. The minimal classes/styles made the focused setup suite GREEN: 11 tests.
+
+### Fix-round verification
+
+- `rtk pnpm --dir apps/web exec vitest run src/app.test.tsx src/production-router-harness.test.ts src/verified/setup.test.tsx` → 3 files / 16 tests passed.
+- `rtk node --test apps/web/scripts/production-router-build.check.mjs` → 2/2 lifecycle tests passed.
+- `rtk pnpm --dir apps/web run test:production-router:clean` → clean dependency-output probe passed and restored original outputs.
+- `rtk pnpm --dir apps/web run build:production-router` → filtered dependency build plus a fresh isolated production artifact passed; the graph/file assertion found no review source/chunk/marker.
+- `rtk pnpm --dir apps/web run test:production-router` → 4/4 served artifact tests passed for direct and in-app setup/capture.
+- `rtk pnpm --dir apps/web exec playwright test --config playwright.config.ts src/visual/review-setup-lazy-import.visual.spec.ts --project desktop-home` → an actual served DEV browser loaded the review heading without console or review-module 4xx errors.
+- `rtk pnpm --dir apps/web run lint`, `typecheck`, and `build` → all passed.
+- `rtk pnpm --dir apps/web run test` → 6 Node checks, 14 Vitest files / 114 tests, and 20 structural browser checks passed (8 established visual skips).
+- `rtk pnpm check` → root format, lint, typecheck, test, and build passed (exit 0).
+- `rtk git diff --check` and cached diff check passed before the functional commit.
+
+### Final self-review
+
+- No `reviewModeEnabled` or other injectable router switch was reintroduced. The only production-route test seams are erased type imports and a fake port that the transformed production router does not evaluate or call.
+- The harness mutates `NODE_ENV` only around Vite's module transformation and restores its previous value in `finally`; it does not fake an environment after router evaluation.
+- The clean probe targets two explicit workspace `dist` folders, not a broad workspace path, and restores their prior contents. The artifact itself remains scoped to the ignored web coverage folder.
+- No known functional concern remains. No push was made.
