@@ -520,6 +520,116 @@ describe("training history", () => {
       expect(creates).toBe(1);
     },
   );
+
+  it.each([
+    ["owner", "revelai.free-training.owner.v1"],
+    ["intent", "revelai.free-training.create-intent.v1"],
+  ] as const)(
+    "retries a matched partial %s cleanup without re-adopting its deleted causal key",
+    async (failedFact, failedKey) => {
+      const user = userEvent.setup();
+      const attempt = pendingAttempt(
+        `attempt-history-partial-${failedFact}`,
+        "2026-08-30T13:00:00.000Z",
+      );
+      const oldKey = "e2222222-2222-4222-8222-222222222222";
+      const originalRemove = Storage.prototype.removeItem;
+      let removalAvailable = false;
+      const createKeys: string[] = [];
+      window.sessionStorage.setItem(
+        "revelai.free-training.owner.v1",
+        JSON.stringify({ attemptId: attempt.id }),
+      );
+      window.sessionStorage.setItem(
+        "revelai.free-training.create-intent.v1",
+        JSON.stringify({ idempotencyKey: oldKey }),
+      );
+      vi.spyOn(Storage.prototype, "removeItem").mockImplementation(
+        function removeItem(this: Storage, key: string): void {
+          if (!removalAvailable && key === failedKey) return;
+          return originalRemove.call(this, key);
+        },
+      );
+      server.use(
+        http.get("*/v1/attempts", () =>
+          HttpResponse.json({ items: [attempt], nextCursor: null }),
+        ),
+        http.delete(
+          `*/v1/attempts/${attempt.id}`,
+          () => new HttpResponse(null, { status: 204 }),
+        ),
+        http.post("*/v1/attempts", async ({ request }) => {
+          createKeys.push(request.headers.get("idempotency-key") ?? "");
+          return HttpResponse.json(
+            {
+              ...attempt,
+              id: `attempt-history-fresh-after-${failedFact}`,
+              outcome: {
+                ...attempt.outcome,
+                attemptId: `attempt-history-fresh-after-${failedFact}`,
+              },
+            },
+            { status: 201 },
+          );
+        }),
+      );
+
+      render(<App />);
+      await user.click(screen.getByRole("link", { name: "Meus treinos" }));
+      await user.click(screen.getByRole("button", { name: "Excluir treino" }));
+      const cleanupButton = await screen.findByRole("button", {
+        name: "Concluir limpeza",
+      });
+      expect(
+        screen.getByRole("heading", {
+          name: "Meus treinos neste dispositivo",
+          level: 1,
+        }),
+      ).toHaveFocus();
+
+      await user.click(cleanupButton);
+      expect(cleanupButton).toHaveFocus();
+      await user.click(cleanupButton);
+      expect(cleanupButton).toHaveFocus();
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "O treino foi excluído, mas a limpeza neste dispositivo precisa ser concluída.",
+      );
+      expect(
+        window.sessionStorage.getItem(
+          failedFact === "owner"
+            ? "revelai.free-training.create-intent.v1"
+            : "revelai.free-training.owner.v1",
+        ),
+      ).toBeNull();
+
+      removalAvailable = true;
+      await user.click(cleanupButton);
+      expect(await screen.findByText("Treino excluído.")).toHaveAttribute(
+        "role",
+        "status",
+      );
+      expect(
+        screen.getByRole("heading", {
+          name: "Meus treinos neste dispositivo",
+          level: 1,
+        }),
+      ).toHaveFocus();
+      expect(
+        window.sessionStorage.getItem("revelai.free-training.owner.v1"),
+      ).toBeNull();
+      expect(
+        window.sessionStorage.getItem("revelai.free-training.create-intent.v1"),
+      ).toBeNull();
+
+      await user.click(screen.getByRole("link", { name: "Início" }));
+      await user.click(screen.getByRole("button", { name: "Treino livre" }));
+      expect(
+        await screen.findByRole("button", { name: "Selecionar vídeo" }),
+      ).toBeEnabled();
+      expect(createKeys).toHaveLength(1);
+      expect(createKeys[0]).not.toBe(oldKey);
+    },
+  );
 });
 
 function pendingAttempt(id: string, createdAt: string) {

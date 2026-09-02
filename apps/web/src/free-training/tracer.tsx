@@ -242,7 +242,7 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
       const cleanup = ownedAttemptId
         ? clearFreeTrainingOwnershipForAttempt(ownedAttemptId)
         : "not-owned";
-      if (cleanup === "unavailable") {
+      if (cleanup !== "cleared" && cleanup !== "not-owned") {
         creationBlockedRef.current = true;
         cleanupRequiredRef.current = true;
         setMessage(safeStorageError);
@@ -427,7 +427,7 @@ export function FreeTrainingTracer({ client }: FreeTrainingTracerProps) {
           return;
         activeDeleteRef.current = undefined;
         const cleanup = clearFreeTrainingOwnershipForAttempt(attemptId);
-        if (cleanup === "unavailable") {
+        if (cleanup !== "cleared" && cleanup !== "not-owned") {
           creationBlockedRef.current = true;
           cleanupRequiredRef.current = true;
           createStartedRef.current = false;

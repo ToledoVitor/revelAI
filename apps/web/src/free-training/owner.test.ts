@@ -67,7 +67,7 @@ describe("Free training causal ownership", () => {
       );
 
       expect(clearFreeTrainingOwnershipForAttempt("attempt-owned")).toBe(
-        "unavailable",
+        "unavailable-before-match",
       );
       expect(rawRead(freeTrainingOwnerStorageKey)).toBe(
         JSON.stringify({ attemptId: "attempt-owned" }),
@@ -205,12 +205,49 @@ describe("Free training causal ownership", () => {
       );
 
       expect(clearFreeTrainingOwnershipForAttempt("attempt-owned")).toBe(
-        "unavailable",
+        "matched-but-incomplete",
       );
       expect(removals.slice(-2)).toEqual([
         freeTrainingOwnerStorageKey,
         freeTrainingCreateIntentStorageKey,
       ]);
+    },
+  );
+
+  it.each([
+    ["owner", freeTrainingOwnerStorageKey],
+    ["intent", freeTrainingCreateIntentStorageKey],
+  ] as const)(
+    "records a matched partial cleanup when only %s removal fails",
+    (failedFact, failedKey) => {
+      const oldKey = "a4444444-4444-4444-8444-444444444444";
+      const originalRemove = Storage.prototype.removeItem;
+      window.sessionStorage.setItem(
+        freeTrainingOwnerStorageKey,
+        JSON.stringify({ attemptId: "attempt-owned" }),
+      );
+      window.sessionStorage.setItem(
+        freeTrainingCreateIntentStorageKey,
+        JSON.stringify({ idempotencyKey: oldKey }),
+      );
+      vi.spyOn(Storage.prototype, "removeItem").mockImplementation(
+        function removeItem(this: Storage, key: string): void {
+          if (key === failedKey) return;
+          return originalRemove.call(this, key);
+        },
+      );
+
+      expect(clearFreeTrainingOwnershipForAttempt("attempt-owned")).toBe(
+        "matched-but-incomplete",
+      );
+      expect(window.sessionStorage.getItem(failedKey)).not.toBeNull();
+      expect(
+        window.sessionStorage.getItem(
+          failedFact === "owner"
+            ? freeTrainingCreateIntentStorageKey
+            : freeTrainingOwnerStorageKey,
+        ),
+      ).toBeNull();
     },
   );
 

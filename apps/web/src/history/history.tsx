@@ -9,7 +9,10 @@ import { useLocation } from "react-router-dom";
 import type { AttemptListResponse } from "@revelai/contracts";
 import type { createRevelApiClient, RevelApiError } from "../lib/api/client";
 import { trainingHistoryQueryKey } from "./query";
-import { clearFreeTrainingOwnershipForAttempt } from "../free-training/owner";
+import {
+  clearFreeTrainingOwnership,
+  clearFreeTrainingOwnershipForAttempt,
+} from "../free-training/owner";
 
 type HistoryClient = Pick<
   ReturnType<typeof createRevelApiClient>,
@@ -18,6 +21,10 @@ type HistoryClient = Pick<
 type HistoryPageParam = string | undefined;
 type TrainingHistoryProps = Readonly<{ client: HistoryClient }>;
 type HistoryNavigationState = Readonly<{ deletedFreeTraining?: boolean }>;
+type OwnershipCleanupPending = Readonly<{
+  attemptId: string;
+  correlation: "unavailable-before-match" | "matched-but-incomplete";
+}>;
 
 function messageFor(error: unknown): string {
   if (
@@ -43,9 +50,8 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
       ? "Treino excluído."
       : null,
   );
-  const [ownershipCleanupAttemptId, setOwnershipCleanupAttemptId] = useState<
-    string | undefined
-  >(undefined);
+  const [ownershipCleanup, setOwnershipCleanup] =
+    useState<OwnershipCleanupPending>();
   const history = useInfiniteQuery({
     queryKey: trainingHistoryQueryKey,
     initialPageParam: undefined as HistoryPageParam,
@@ -56,7 +62,7 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
     getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
   });
   const completeDeletedAttempt = (id: string) => {
-    setOwnershipCleanupAttemptId(undefined);
+    setOwnershipCleanup(undefined);
     queryClient.setQueryData<
       InfiniteData<AttemptListResponse, HistoryPageParam>
     >(trainingHistoryQueryKey, (current) => {
@@ -77,8 +83,12 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
     mutationFn: (id: string) => client.deleteAttempt(id),
     onMutate: () => setDeleteMessage(null),
     onSuccess: (_result, id) => {
-      if (clearFreeTrainingOwnershipForAttempt(id) === "unavailable") {
-        setOwnershipCleanupAttemptId(id);
+      const cleanup = clearFreeTrainingOwnershipForAttempt(id);
+      if (
+        cleanup === "unavailable-before-match" ||
+        cleanup === "matched-but-incomplete"
+      ) {
+        setOwnershipCleanup({ attemptId: id, correlation: cleanup });
         headingRef.current?.focus();
         return;
       }
@@ -98,7 +108,7 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
   const initialLoadFailed =
     history.isError && !history.isFetchNextPageError && attempts.length === 0;
   const requestDelete = (id: string) => {
-    if (deleteLockRef.current || ownershipCleanupAttemptId) return;
+    if (deleteLockRef.current || ownershipCleanup) return;
     deleteLockRef.current = id;
     if (
       !window.confirm(
@@ -111,15 +121,23 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
     deleteAttempt.mutate(id);
   };
   const retryOwnershipCleanup = () => {
-    if (!ownershipCleanupAttemptId) return;
-    if (
-      clearFreeTrainingOwnershipForAttempt(ownershipCleanupAttemptId) ===
-      "unavailable"
-    ) {
-      headingRef.current?.focus();
+    if (!ownershipCleanup) return;
+    const wasMatched =
+      ownershipCleanup.correlation === "matched-but-incomplete";
+    const cleanup = wasMatched
+      ? clearFreeTrainingOwnership()
+      : clearFreeTrainingOwnershipForAttempt(ownershipCleanup.attemptId);
+    if (cleanup !== "cleared" && cleanup !== "not-owned") {
+      setOwnershipCleanup({
+        attemptId: ownershipCleanup.attemptId,
+        correlation:
+          wasMatched || cleanup === "matched-but-incomplete"
+            ? "matched-but-incomplete"
+            : "unavailable-before-match",
+      });
       return;
     }
-    completeDeletedAttempt(ownershipCleanupAttemptId);
+    completeDeletedAttempt(ownershipCleanup.attemptId);
   };
 
   return (
@@ -130,7 +148,7 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
       <h1 id="training-history-heading" ref={headingRef} tabIndex={-1}>
         Meus treinos neste dispositivo
       </h1>
-      {ownershipCleanupAttemptId ? (
+      {ownershipCleanup ? (
         <section aria-label="Limpeza pendente do treino excluído">
           <p role="alert">
             O treino foi excluído, mas a limpeza neste dispositivo precisa ser
@@ -173,9 +191,7 @@ export function TrainingHistory({ client }: TrainingHistoryProps) {
                     ? "Excluindo treino"
                     : "Excluir treino"
                 }
-                disabled={
-                  deleteAttempt.isPending || Boolean(ownershipCleanupAttemptId)
-                }
+                disabled={deleteAttempt.isPending || Boolean(ownershipCleanup)}
                 onClick={() => requestDelete(attempt.id)}
               >
                 {deleteAttempt.isPending && deletingId === attempt.id

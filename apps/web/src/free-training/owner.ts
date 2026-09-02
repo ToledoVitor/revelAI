@@ -7,7 +7,9 @@ export type FreeTrainingCreateIntent = Readonly<{ idempotencyKey: string }>;
 export type FreeTrainingOwnershipCleanup =
   | "cleared"
   | "not-owned"
-  | "unavailable";
+  | "unavailable"
+  | "unavailable-before-match"
+  | "matched-but-incomplete";
 
 type StorageRead =
   | Readonly<{ kind: "available"; value: string | null }>
@@ -181,9 +183,11 @@ export function clearFreeTrainingOwnership(): FreeTrainingOwnershipCleanup {
 export function clearFreeTrainingOwnershipForAttempt(
   attemptId: string,
 ): FreeTrainingOwnershipCleanup {
-  if (!hasVerifiedSessionStorage()) return "unavailable";
+  if (!hasVerifiedSessionStorage()) return "unavailable-before-match";
   const owner = readOwner();
-  if (owner.kind === "unavailable") return "unavailable";
+  if (owner.kind === "unavailable") return "unavailable-before-match";
   if (owner.value?.attemptId !== attemptId) return "not-owned";
-  return clearFreeTrainingOwnership();
+  return clearFreeTrainingOwnership() === "cleared"
+    ? "cleared"
+    : "matched-but-incomplete";
 }
