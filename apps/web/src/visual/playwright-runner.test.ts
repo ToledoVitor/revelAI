@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const webRoot = fileURLToPath(new URL("../..", import.meta.url));
+const realBrowserIntegrationTimeoutMs = 15_000;
 
 type RunnerResult = {
   exitCode: number | null;
@@ -47,21 +48,25 @@ function runPlaywrightRunner(
 }
 
 describe("Playwright runner", () => {
-  it("removes NO_COLOR before Playwright forces color in descendant processes", async () => {
-    const result = await runPlaywrightRunner([
-      "--config",
-      "playwright.runner.config.ts",
-      "src/visual/playwright-runner-smoke.visual.spec.ts",
-      "--grep",
-      "launches Chromium for runner environment checks",
-      "--project",
-      "runner-smoke",
-    ]);
+  it(
+    "removes NO_COLOR before Playwright forces color in descendant processes",
+    async () => {
+      const result = await runPlaywrightRunner([
+        "--config",
+        "playwright.runner.config.ts",
+        "src/visual/playwright-runner-smoke.visual.spec.ts",
+        "--grep",
+        "launches Chromium for runner environment checks",
+        "--project",
+        "runner-smoke",
+      ]);
 
-    expect(result.exitCode).toBe(0);
-    expect(result.output).toContain("1 passed");
-    expect(result.output).not.toContain("NO_COLOR");
-  });
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toContain("1 passed");
+      expect(result.output).not.toContain("NO_COLOR");
+    },
+    realBrowserIntegrationTimeoutMs,
+  );
 
   it("propagates a Playwright process failure", async () => {
     const result = await runPlaywrightRunner(["--not-a-playwright-option"]);
