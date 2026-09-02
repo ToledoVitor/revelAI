@@ -51,10 +51,15 @@ type TrackedProcess = Readonly<{
 }>;
 
 type ProcessTracker = Readonly<{
-  register: (process: TrackedProcess) => void;
+  tryReserve: () => ProcessReservation | undefined;
   release: (process: TrackedProcess) => void;
   closeAndDrain: () => Promise<void>;
   size: () => number;
+}>;
+
+type ProcessReservation = Readonly<{
+  activate: (process: TrackedProcess) => void;
+  cancel: () => void;
 }>;
 
 type ProcessResult = Readonly<{
@@ -67,7 +72,7 @@ type ProcessChild = {
   stdout: Pick<PassThrough, "on">;
   stderr: Pick<PassThrough, "on">;
   kill: (signal: NodeJS.Signals) => boolean;
-  once(event: "error", listener: (error: Error) => void): unknown;
+  on(event: "error", listener: (error: Error) => void): unknown;
   once(event: "close", listener: (exitCode: number | null) => void): unknown;
 };
 
@@ -264,9 +269,11 @@ describe("LocalFrameExtraction", () => {
     const root = await setupRoot(roots);
     const tracker = createProcessTracker();
     const child = new ControlledChildProcess();
-    child.errorOnTerminate = true;
+    child.errorSignals.add("SIGTERM");
     const completed = runProcess("controlled-child", [], tracker, () => child);
-    const rejected = expect(completed).rejects.toThrow("simulated kill error");
+    const rejected = expect(completed).rejects.toThrow(
+      "simulated SIGTERM error",
+    );
 
     const draining = tracker.closeAndDrain();
     expect(tracker.size()).toBe(1);
@@ -281,7 +288,38 @@ describe("LocalFrameExtraction", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("drains a child registered by a closing child continuation before root removal", async () => {
+  it("keeps handling termination errors until close", async () => {
+    const root = await setupRoot(roots);
+    const tracker = createProcessTracker();
+    const child = new ControlledChildProcess();
+    child.errorSignals.add("SIGTERM");
+    child.errorSignals.add("SIGKILL");
+    const completed = runProcess(
+      "controlled-child",
+      [],
+      tracker,
+      () => child,
+      1,
+    );
+    const rejected = expect(completed).rejects.toThrow(
+      "simulated SIGTERM error",
+    );
+
+    const draining = tracker.closeAndDrain();
+    await child.waitForSignal("SIGKILL");
+    expect(child.receivedSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(tracker.size()).toBe(1);
+    child.emitClose(1);
+
+    await draining;
+    await rejected;
+    expect(tracker.size()).toBe(0);
+    await expect(
+      rm(root, { recursive: true, force: true }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not spawn a continuation successor while its test generation is closing", async () => {
     const root = await setupRoot(roots);
     const tracker = createProcessTracker();
     const first = new ControlledChildProcess();
@@ -291,26 +329,54 @@ describe("LocalFrameExtraction", () => {
     const secondRegistered = new Promise<void>((resolve) => {
       resolveSecondRegistered = resolve;
     });
+    let secondSpawns = 0;
     const secondCompleted = firstCompleted.then(() => {
-      const completed = runProcess("second-child", [], tracker, () => second);
+      const completed = runProcess("second-child", [], tracker, () => {
+        secondSpawns += 1;
+        return second;
+      });
       resolveSecondRegistered();
       return completed;
     });
-    let drained = false;
-    const draining = tracker.closeAndDrain().then(() => {
-      drained = true;
-    });
+    const rejected = expect(secondCompleted).rejects.toThrow(
+      "test process tracker is closed",
+    );
+    const draining = tracker.closeAndDrain();
 
     first.emitClose(0);
     await secondRegistered;
-    await Promise.resolve();
-    expect(second.receivedSignals).toEqual(["SIGTERM"]);
-    expect(drained).toBe(false);
-    second.emitClose(1);
 
     await draining;
-    await expect(secondCompleted).resolves.toMatchObject({ exitCode: 1 });
+    await rejected;
+    expect(secondSpawns).toBe(0);
     expect(tracker.size()).toBe(0);
+    await expect(
+      rm(root, { recursive: true, force: true }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not spawn a successor after its test generation has drained", async () => {
+    const root = await setupRoot(roots);
+    const tracker = createProcessTracker();
+    const first = new ControlledChildProcess();
+    const firstCompleted = runProcess("first-child", [], tracker, () => first);
+
+    const draining = tracker.closeAndDrain();
+    first.emitClose(0);
+    await draining;
+    await Promise.resolve();
+
+    const successor = new ControlledChildProcess();
+    let successorSpawns = 0;
+    const lateResult = runProcess("late-child", [], tracker, () => {
+      successorSpawns += 1;
+      return successor;
+    });
+    successor.emitClose(1);
+
+    expect(successorSpawns).toBe(0);
+    await expect(lateResult).rejects.toThrow("test process tracker is closed");
+    await expect(firstCompleted).resolves.toMatchObject({ exitCode: 0 });
     await expect(
       rm(root, { recursive: true, force: true }),
     ).resolves.toBeUndefined();
@@ -1091,13 +1157,26 @@ class ControlledChildProcess extends EventEmitter {
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly receivedSignals: NodeJS.Signals[] = [];
-  errorOnTerminate = false;
+  readonly errorSignals = new Set<NodeJS.Signals>();
+  private readonly signalWaiters = new Map<NodeJS.Signals, Array<() => void>>();
 
   kill(signal: NodeJS.Signals): boolean {
     this.receivedSignals.push(signal);
-    if (this.errorOnTerminate)
-      this.emit("error", new Error("simulated kill error"));
-    return !this.errorOnTerminate;
+    const waiters = this.signalWaiters.get(signal) ?? [];
+    this.signalWaiters.delete(signal);
+    for (const resolve of waiters) resolve();
+    if (this.errorSignals.has(signal))
+      this.emit("error", new Error(`simulated ${signal} error`));
+    return !this.errorSignals.has(signal);
+  }
+
+  waitForSignal(signal: NodeJS.Signals): Promise<void> {
+    if (this.receivedSignals.includes(signal)) return Promise.resolve();
+    return new Promise((resolve) => {
+      const waiters = this.signalWaiters.get(signal) ?? [];
+      waiters.push(resolve);
+      this.signalWaiters.set(signal, waiters);
+    });
   }
 
   emitClose(exitCode: number | null): void {
@@ -1112,8 +1191,18 @@ async function runProcess(
   arguments_: readonly string[],
   tracker?: ProcessTracker,
   spawnProcess: ProcessSpawner = spawnProcessNative,
+  terminationGraceMilliseconds = testProcessTerminationGraceMilliseconds,
 ): Promise<ProcessResult> {
-  const child = spawnProcess(executable, arguments_);
+  const reservation = tracker?.tryReserve();
+  if (tracker && !reservation)
+    return Promise.reject(new Error("test process tracker is closed"));
+  let child: ProcessChild;
+  try {
+    child = spawnProcess(executable, arguments_);
+  } catch (error) {
+    reservation?.cancel();
+    return Promise.reject(error);
+  }
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   let forceKill: ReturnType<typeof setTimeout> | undefined;
@@ -1137,16 +1226,15 @@ async function runProcess(
         child.kill("SIGTERM");
         forceKill = setTimeout(() => {
           if (!finished) child.kill("SIGKILL");
-        }, testProcessTerminationGraceMilliseconds);
+        }, terminationGraceMilliseconds);
         forceKill.unref();
       }
       await closed;
     },
   });
-  tracker?.register(tracked);
   child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-  child.once("error", (error: Error) => {
+  child.on("error", (error: Error) => {
     processError ??= error;
   });
   child.once("close", (code) => {
@@ -1165,6 +1253,7 @@ async function runProcess(
       );
     resolveClosed();
   });
+  reservation?.activate(tracked);
   return completed;
 }
 
@@ -1175,9 +1264,36 @@ function createProcessTracker(): ProcessTracker {
   const processes = new Set<TrackedProcess>();
   let closing = false;
   return Object.freeze({
-    register: (process) => {
-      processes.add(process);
-      if (closing) void process.terminate();
+    tryReserve: () => {
+      if (closing) return undefined;
+      let claimed = true;
+      let resolveActivation: (process: TrackedProcess | undefined) => void;
+      const activated = new Promise<TrackedProcess | undefined>((resolve) => {
+        resolveActivation = resolve;
+      });
+      const reservation: TrackedProcess = Object.freeze({
+        terminate: async () => {
+          const process = await activated;
+          if (process) await process.terminate();
+        },
+      });
+      processes.add(reservation);
+      return Object.freeze({
+        activate: (process) => {
+          if (!claimed) throw new Error("process reservation already settled");
+          claimed = false;
+          processes.delete(reservation);
+          processes.add(process);
+          resolveActivation(process);
+          if (closing) void process.terminate();
+        },
+        cancel: () => {
+          if (!claimed) return;
+          claimed = false;
+          processes.delete(reservation);
+          resolveActivation(undefined);
+        },
+      });
     },
     release: (process) => {
       processes.delete(process);
