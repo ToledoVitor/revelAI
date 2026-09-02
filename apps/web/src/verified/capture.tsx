@@ -5,6 +5,13 @@ import {
   type RouteError,
 } from "@revelai/contracts";
 import { useEffect, useRef, useState } from "react";
+import {
+  captureRequirementLines,
+  normalizeSelectedMedia,
+  selectedRecorderCandidate,
+  type AcceptedMediaMime,
+  type RecorderCandidate,
+} from "./capture-media";
 
 export type BrowserCaptureState =
   | "idle"
@@ -22,8 +29,6 @@ export type VerifiedDraft = Readonly<{
   challengeId: "wall-pass";
   challengeVersion: 1;
 }>;
-
-type AcceptedMediaMime = "video/mp4" | "video/quicktime" | "video/webm";
 
 type LocalMedia = Readonly<{
   file: File;
@@ -55,40 +60,6 @@ export type ReviewCapturePort = Readonly<{
     }>,
   ): Promise<ReviewUploadResult>;
 }>;
-
-type RecorderCandidate = Readonly<{
-  recorderMime: string;
-  name: "wall-pass.mp4" | "wall-pass.webm";
-  declaredMime: "video/mp4" | "video/webm";
-}>;
-
-const recorderCandidates: readonly RecorderCandidate[] = [
-  {
-    recorderMime: "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
-    name: "wall-pass.mp4",
-    declaredMime: "video/mp4",
-  },
-  {
-    recorderMime: "video/mp4",
-    name: "wall-pass.mp4",
-    declaredMime: "video/mp4",
-  },
-  {
-    recorderMime: "video/webm;codecs=vp9",
-    name: "wall-pass.webm",
-    declaredMime: "video/webm",
-  },
-  {
-    recorderMime: "video/webm;codecs=vp8",
-    name: "wall-pass.webm",
-    declaredMime: "video/webm",
-  },
-  {
-    recorderMime: "video/webm",
-    name: "wall-pass.webm",
-    declaredMime: "video/webm",
-  },
-];
 
 const acceptedMediaFormDataDescriptor: MediaUploadFormDataRequestDescriptor =
   mediaUploadFixtures.accepted.request.adapter === "form-data"
@@ -158,33 +129,8 @@ function defaultReviewCapturePort(): ReviewCapturePort {
   });
 }
 
-function selectedMediaMime(file: File): AcceptedMediaMime | undefined {
-  const extension = file.name.toLowerCase().split(".").at(-1);
-  const expectedMime =
-    extension === "mp4"
-      ? "video/mp4"
-      : extension === "mov"
-        ? "video/quicktime"
-        : extension === "webm"
-          ? "video/webm"
-          : undefined;
-
-  if (!expectedMime) return undefined;
-  const declaredMime = file.type.split(";", 1)[0]?.trim().toLowerCase();
-  return declaredMime === "" || declaredMime === expectedMime
-    ? expectedMime
-    : undefined;
-}
-
 function formatBytes(size: number) {
   return `${size} bytes`;
-}
-
-function selectedRecorderCandidate() {
-  if (typeof MediaRecorder === "undefined") return undefined;
-  return recorderCandidates.find((candidate) =>
-    MediaRecorder.isTypeSupported(candidate.recorderMime),
-  );
 }
 
 function buildMediaFormData(media: LocalMedia) {
@@ -523,8 +469,8 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
     if (!file || activeUploadRef.current) return;
     releaseLocalMedia();
     clearCaptureChunks();
-    const mime = selectedMediaMime(file);
-    if (!mime) {
+    const normalized = normalizeSelectedMedia(file);
+    if (!normalized) {
       finishCaptureError(
         "Escolha um arquivo MP4, MOV ou WebM com tipo declarado correspondente.",
       );
@@ -542,9 +488,11 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
       );
       return;
     }
-    const normalizedFile =
-      file.type === mime ? file : new File([file], file.name, { type: mime });
-    const localMedia = makeLocalMedia(file, normalizedFile, mime);
+    const localMedia = makeLocalMedia(
+      file,
+      normalized.file,
+      normalized.wireMime,
+    );
     assetRef.current = localMedia;
     setAsset(localMedia);
     setCaptureState("preview");
@@ -672,29 +620,15 @@ export function ReviewCaptureRoute({ port }: ReviewCaptureRouteProps) {
       <section aria-label="Requisitos da captura">
         <h2>Antes de gravar ou selecionar</h2>
         <ul>
-          <li>MP4 (video/mp4), MOV (video/quicktime) e WebM (video/webm).</li>
+          <li>{captureRequirementLines[0]}</li>
           <li>
             Tamanho máximo de {MAX_UPLOAD_BYTES / 1024 / 1024} MiB. Esta
             conferência no navegador é apenas orientação; o servidor decide a
             aceitação.
           </li>
-          <li>
-            Vídeo em paisagem, mínimo 1280×720, proporção 1,30–2,00 e ao menos
-            24 fps.
-          </li>
-          <li>
-            Um único vídeo contínuo de 64,0–65,0 segundos: pré-rolagem [0,4) e
-            intervalo ativo [4,64).
-          </li>
-          <li>
-            Duas placas fiduciais quadradas de 0,20 m no chão. Parede/chão é
-            Y=0, Y positivo aponta ao atleta e X negativo fica à esquerda.
-          </li>
-          <li>
-            Centro A (-1,50, 3,00) m; cantos TL/TR/BR/BL: (-1,60,2,90),
-            (-1,40,2,90), (-1,40,3,10), (-1,60,3,10). Centro B (1,50, 3,00) m;
-            cantos: (1,40,2,90), (1,60,2,90), (1,60,3,10), (1,40,3,10).
-          </li>
+          {captureRequirementLines.slice(1).map((requirement) => (
+            <li key={requirement}>{requirement}</li>
+          ))}
         </ul>
       </section>
       <section aria-label="Prévia da câmera" className="capture-preview">

@@ -1,4 +1,11 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { MAX_UPLOAD_BYTES } from "@revelai/contracts";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -43,11 +50,15 @@ class RecorderMock {
   }
 }
 
-function streamHarness() {
+function streamHarness(facingMode?: string) {
   const stop = vi.fn();
   return {
     stop,
-    stream: { getTracks: () => [{ stop }] } as unknown as MediaStream,
+    stream: {
+      getTracks: () => [{ stop }],
+      getVideoTracks: () =>
+        facingMode ? [{ getSettings: () => ({ facingMode }) }] : [],
+    } as unknown as MediaStream,
   };
 }
 
@@ -149,6 +160,87 @@ describe("production verified capture", () => {
     expect(onMedia).toHaveBeenCalledWith(file);
   });
 
+  it("normalizes an undeclared WebM for the wire while preserving its source metadata and preview lifecycle", async () => {
+    const user = userEvent.setup();
+    const createObjectUrl = vi.fn(() => "blob:production-webm");
+    const revokeObjectUrl = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectUrl,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: revokeObjectUrl,
+    });
+    const onMedia = vi.fn();
+    render(<ProductionCapture disabled={false} onMedia={onMedia} />);
+
+    fireEvent.change(screen.getByTestId("production-video-input"), {
+      target: {
+        files: [new File(["video"], "source.webm", { type: "" })],
+      },
+    });
+
+    expect(onMedia).toHaveBeenLastCalledWith(
+      expect.objectContaining({ name: "source.webm", type: "video/webm" }),
+    );
+    expect(
+      screen.getByText("Tipo declarado: não declarado pelo arquivo."),
+    ).toBeVisible();
+    expect(
+      screen.getByText("Formato de envio normalizado: video/webm."),
+    ).toBeVisible();
+    expect(
+      screen
+        .getAllByLabelText("Prévia do vídeo selecionado")
+        .find((element) => element.tagName === "VIDEO"),
+    ).toHaveAttribute("src", "blob:production-webm");
+
+    await user.click(screen.getByRole("button", { name: "Descartar" }));
+    expect(onMedia).toHaveBeenLastCalledWith(undefined);
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:production-webm");
+  });
+
+  it("announces rear-camera fallback and keeps rejected source files out of the verified wire", async () => {
+    const user = userEvent.setup();
+    const { stream } = streamHarness("user");
+    installMedia(vi.fn().mockResolvedValue(stream));
+    installRecorder();
+    const onMedia = vi.fn();
+    render(<ProductionCapture disabled={false} onMedia={onMedia} />);
+
+    await user.click(screen.getByRole("button", { name: "Iniciar gravação" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      screen
+        .getAllByRole("status")
+        .find((status) =>
+          status.textContent?.includes(
+            "O navegador selecionou uma câmera diferente da traseira",
+          ),
+        ),
+    ).toBeTruthy();
+
+    const tooLarge = new File(["video"], "large.webm", {
+      type: "video/webm",
+    });
+    Object.defineProperty(tooLarge, "size", {
+      configurable: true,
+      value: MAX_UPLOAD_BYTES + 1,
+    });
+    // A busy camera leaves the file input disabled; unmounting/re-mounting
+    // models the available existing-video fallback after capture cleanup.
+    cleanup();
+    render(<ProductionCapture disabled={false} onMedia={onMedia} />);
+    await user.upload(screen.getByTestId("production-video-input"), tooLarge);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "excede o limite exibido",
+    );
+    expect(onMedia).not.toHaveBeenCalled();
+  });
+
   it("discards early, recorder-error, and empty automatic recordings", async () => {
     const first = streamHarness();
     const second = streamHarness();
@@ -223,5 +315,52 @@ describe("production verified capture", () => {
       ),
     ).toEqual(["dataavailable", "error", "stop"]);
     expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("stops a stream that resolves after the capture unmounts", async () => {
+    const { stream, stop } = streamHarness();
+    let resolveCamera: ((value: MediaStream) => void) | undefined;
+    installMedia(
+      vi.fn(
+        () =>
+          new Promise<MediaStream>((resolve) => {
+            resolveCamera = resolve;
+          }),
+      ),
+    );
+    installRecorder();
+    const view = render(
+      <ProductionCapture disabled={false} onMedia={vi.fn()} />,
+    );
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Iniciar gravação" }));
+    view.unmount();
+    await act(async () => {
+      resolveCamera?.(stream);
+      await Promise.resolve();
+    });
+
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("falls back before countdown when MediaRecorder is unavailable", async () => {
+    const { stream } = streamHarness();
+    installMedia(vi.fn().mockResolvedValue(stream));
+    Reflect.deleteProperty(globalThis, "MediaRecorder");
+    render(<ProductionCapture disabled={false} onMedia={vi.fn()} />);
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Iniciar gravação" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Este navegador não consegue gravar em um formato aceito",
+    );
+    expect(screen.queryByText(/Contagem regressiva/)).not.toBeInTheDocument();
   });
 });

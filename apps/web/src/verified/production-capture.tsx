@@ -1,4 +1,11 @@
+import { MAX_UPLOAD_BYTES } from "@revelai/contracts";
 import { useEffect, useRef, useState } from "react";
+import {
+  captureRequirementLines,
+  normalizeSelectedMedia,
+  selectedRecorderCandidate,
+  type AcceptedMediaMime,
+} from "./capture-media";
 
 type CaptureState =
   | "idle"
@@ -9,31 +16,12 @@ type CaptureState =
   | "stopping"
   | "error";
 
-type RecorderCandidate = Readonly<{
-  mime: string;
-  name: "wall-pass.mp4" | "wall-pass.webm";
-  declaredMime: "video/mp4" | "video/webm";
+type LocalProductionMedia = Readonly<{
+  sourceFile: File;
+  wireFile: File;
+  wireMime: AcceptedMediaMime;
+  previewUrl?: string;
 }>;
-
-const candidates: readonly RecorderCandidate[] = [
-  {
-    mime: "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
-    name: "wall-pass.mp4",
-    declaredMime: "video/mp4",
-  },
-  { mime: "video/mp4", name: "wall-pass.mp4", declaredMime: "video/mp4" },
-  {
-    mime: "video/webm;codecs=vp9",
-    name: "wall-pass.webm",
-    declaredMime: "video/webm",
-  },
-  {
-    mime: "video/webm;codecs=vp8",
-    name: "wall-pass.webm",
-    declaredMime: "video/webm",
-  },
-  { mime: "video/webm", name: "wall-pass.webm", declaredMime: "video/webm" },
-];
 
 export function ProductionCapture({
   disabled,
@@ -42,7 +30,7 @@ export function ProductionCapture({
 }: Readonly<{
   disabled: boolean;
   media?: File;
-  onMedia(file: File): void;
+  onMedia(file?: File): void;
 }>) {
   const previewRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | undefined>(undefined);
@@ -58,7 +46,10 @@ export function ProductionCapture({
   >(undefined);
   const timerIdsRef = useRef<Set<number>>(new Set());
   const chunksRef = useRef<Blob[]>([]);
+  const localMediaRef = useRef<LocalProductionMedia | undefined>(undefined);
   const autoStopRef = useRef(false);
+  const mountedRef = useRef(true);
+  const captureGenerationRef = useRef(0);
   const [state, setState] = useState<CaptureState>("idle");
   const [message, setMessage] = useState(
     "Pronto para gravar ou selecionar um vídeo existente.",
@@ -66,6 +57,8 @@ export function ProductionCapture({
   const [countdown, setCountdown] = useState(5);
   const [preRoll, setPreRoll] = useState(0);
   const [active, setActive] = useState(0);
+  const [cameraNotice, setCameraNotice] = useState("");
+  const [localMedia, setLocalMedia] = useState<LocalProductionMedia>();
 
   const clearTimers = () => {
     for (const timer of timerIdsRef.current) window.clearTimeout(timer);
@@ -82,6 +75,28 @@ export function ProductionCapture({
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = undefined;
     if (previewRef.current) previewRef.current.srcObject = null;
+  };
+  const releaseLocalMedia = (notifyParent = false) => {
+    const current = localMediaRef.current;
+    if (current?.previewUrl) URL.revokeObjectURL?.(current.previewUrl);
+    localMediaRef.current = undefined;
+    if (mountedRef.current) setLocalMedia(undefined);
+    if (notifyParent && current) onMedia(undefined);
+  };
+  const keepLocalMedia = (
+    sourceFile: File,
+    wireFile: File,
+    wireMime: AcceptedMediaMime,
+  ) => {
+    releaseLocalMedia();
+    const previewUrl =
+      typeof URL.createObjectURL === "function"
+        ? URL.createObjectURL(sourceFile)
+        : undefined;
+    const next = { sourceFile, wireFile, wireMime, previewUrl };
+    localMediaRef.current = next;
+    setLocalMedia(next);
+    onMedia(wireFile);
   };
   const detachRecorderListeners = () => {
     const listeners = recorderListenersRef.current;
@@ -104,9 +119,17 @@ export function ProductionCapture({
   };
 
   const beginRecorder = (stream: MediaStream) => {
-    const candidate = candidates.find((item) =>
-      MediaRecorder.isTypeSupported(item.mime),
-    );
+    if (typeof MediaRecorder === "undefined") {
+      stopTracks();
+      if (mountedRef.current) {
+        setState("error");
+        setMessage(
+          "Este navegador não consegue gravar em um formato aceito. Envie um vídeo existente.",
+        );
+      }
+      return;
+    }
+    const candidate = selectedRecorderCandidate();
     if (!candidate) {
       stopTracks();
       setState("error");
@@ -117,7 +140,9 @@ export function ProductionCapture({
     }
     let recorder: MediaRecorder;
     try {
-      recorder = new MediaRecorder(stream, { mimeType: candidate.mime });
+      recorder = new MediaRecorder(stream, {
+        mimeType: candidate.recorderMime,
+      });
     } catch {
       fail(
         "Não foi possível iniciar a gravação neste navegador. Envie um vídeo existente.",
@@ -159,9 +184,10 @@ export function ProductionCapture({
         );
         return;
       }
-      onMedia(
-        new File([blob], candidate.name, { type: candidate.declaredMime }),
-      );
+      const file = new File([blob], candidate.name, {
+        type: candidate.declaredMime,
+      });
+      keepLocalMedia(file, file, candidate.declaredMime);
       setState("idle");
       setMessage("Gravação concluída. Revise o arquivo antes do envio.");
     };
@@ -204,8 +230,18 @@ export function ProductionCapture({
 
   const start = async () => {
     if (disabled) return;
+    const generation = ++captureGenerationRef.current;
     clearTimers();
     stopTracks();
+    releaseLocalMedia(true);
+    setCameraNotice("");
+    if (typeof MediaRecorder === "undefined") {
+      setState("error");
+      setMessage(
+        "Este navegador não consegue gravar em um formato aceito. Envie um vídeo existente.",
+      );
+      return;
+    }
     if (!navigator.mediaDevices?.getUserMedia) {
       setState("error");
       setMessage(
@@ -220,10 +256,22 @@ export function ProductionCapture({
         video: { facingMode: { ideal: "environment" } },
         audio: false,
       });
+      if (!mountedRef.current || generation !== captureGenerationRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       streamRef.current = stream;
       if (previewRef.current) {
         previewRef.current.srcObject = stream;
         void previewRef.current.play().catch(() => undefined);
+      }
+      const facingMode = stream
+        .getVideoTracks?.()[0]
+        ?.getSettings?.().facingMode;
+      if (facingMode && facingMode !== "environment") {
+        setCameraNotice(
+          "O navegador selecionou uma câmera diferente da traseira. Ajuste o enquadramento antes de gravar.",
+        );
       }
       setState("countdown");
       setMessage("Prévia ativa durante a contagem regressiva.");
@@ -232,14 +280,51 @@ export function ProductionCapture({
         schedule(() => setCountdown(5 - second), second * 1_000);
       schedule(() => beginRecorder(stream), 5_000);
     } catch {
+      if (!mountedRef.current || generation !== captureGenerationRef.current)
+        return;
       fail(
         "Não foi possível acessar a câmera. Permita o acesso ou envie um vídeo existente.",
       );
     }
   };
 
-  useEffect(
-    () => () => {
+  const selectExistingVideo = (file?: File) => {
+    if (!file || disabled || busy) return;
+    const normalized = normalizeSelectedMedia(file);
+    if (!normalized) {
+      releaseLocalMedia(true);
+      setState("error");
+      setMessage(
+        "Escolha um arquivo MP4, MOV ou WebM com tipo declarado correspondente.",
+      );
+      return;
+    }
+    if (file.size === 0) {
+      releaseLocalMedia(true);
+      setState("error");
+      setMessage(
+        "O vídeo selecionado não contém dados. Escolha outro arquivo.",
+      );
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      releaseLocalMedia(true);
+      setState("error");
+      setMessage(
+        "O vídeo selecionado excede o limite exibido. O servidor continua sendo a autoridade para a aceitação.",
+      );
+      return;
+    }
+    keepLocalMedia(file, normalized.file, normalized.wireMime);
+    setState("idle");
+    setMessage("Vídeo existente selecionado. Revise o arquivo antes do envio.");
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      captureGenerationRef.current += 1;
       clearTimers();
       const recorder = recorderRef.current;
       recorderRef.current = undefined;
@@ -247,9 +332,9 @@ export function ProductionCapture({
       if (recorder && recorder.state !== "inactive") recorder.stop();
       stopTracks();
       chunksRef.current = [];
-    },
-    [],
-  );
+      releaseLocalMedia();
+    };
+  }, []);
 
   const busy = [
     "requesting-permission",
@@ -260,25 +345,42 @@ export function ProductionCapture({
   ].includes(state);
   return (
     <section aria-label="Captura do vídeo verificado">
-      <video
-        ref={previewRef}
-        autoPlay
-        muted
-        playsInline
-        aria-label="Prévia da câmera"
-      />
-      <p role={state === "error" ? "alert" : "status"}>
-        Estado da captura: {state}. {message}
-      </p>
-      {state === "countdown" ? (
-        <p>Contagem regressiva: {countdown} segundos</p>
-      ) : null}
-      {state === "pre-roll" ? (
-        <p>Pré-rolagem: {preRoll} de 4 segundos</p>
-      ) : null}
-      {state === "active" ? (
-        <p>Duração ativa: {active} de 60 segundos</p>
-      ) : null}
+      <section aria-label="Requisitos da captura">
+        <h2>Antes de gravar ou selecionar</h2>
+        <ul>
+          <li>{captureRequirementLines[0]}</li>
+          <li>
+            Tamanho máximo de {MAX_UPLOAD_BYTES / 1024 / 1024} MiB. Esta
+            conferência no navegador é apenas orientação; o servidor decide a
+            aceitação.
+          </li>
+          {captureRequirementLines.slice(1).map((requirement) => (
+            <li key={requirement}>{requirement}</li>
+          ))}
+        </ul>
+      </section>
+      <section aria-label="Prévia da câmera">
+        <video
+          ref={previewRef}
+          autoPlay
+          muted
+          playsInline
+          aria-label="Prévia da câmera"
+        />
+        <p role={state === "error" ? "alert" : "status"}>
+          Estado da captura: {state}. {message}
+        </p>
+        {cameraNotice ? <p role="status">{cameraNotice}</p> : null}
+        {state === "countdown" ? (
+          <p>Contagem regressiva: {countdown} segundos</p>
+        ) : null}
+        {state === "pre-roll" ? (
+          <p>Pré-rolagem: {preRoll} de 4 segundos</p>
+        ) : null}
+        {state === "active" ? (
+          <p>Duração ativa: {active} de 60 segundos</p>
+        ) : null}
+      </section>
       <button
         type="button"
         disabled={disabled || busy}
@@ -294,11 +396,41 @@ export function ProductionCapture({
         accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm"
         disabled={disabled || busy}
         onChange={(event) => {
-          const file = event.currentTarget.files?.[0];
-          if (file) onMedia(file);
+          selectExistingVideo(event.currentTarget.files?.[0]);
+          event.currentTarget.value = "";
         }}
       />
-      {media ? <p>{media.name}</p> : null}
+      {localMedia ? (
+        <section aria-label="Prévia do vídeo selecionado">
+          {localMedia.previewUrl ? (
+            <video
+              controls
+              src={localMedia.previewUrl}
+              aria-label="Prévia do vídeo selecionado"
+            />
+          ) : null}
+          <p>{localMedia.sourceFile.name}</p>
+          <p>
+            Tipo declarado:{" "}
+            {localMedia.sourceFile.type || "não declarado pelo arquivo."}
+          </p>
+          <p>Formato de envio normalizado: {localMedia.wireMime}.</p>
+          <p>{localMedia.sourceFile.size} bytes</p>
+          <button
+            type="button"
+            disabled={disabled || busy}
+            onClick={() => {
+              releaseLocalMedia(true);
+              setState("idle");
+              setMessage("Vídeo descartado. Selecione ou grave outro vídeo.");
+            }}
+          >
+            Descartar
+          </button>
+        </section>
+      ) : media ? (
+        <p>{media.name}</p>
+      ) : null}
     </section>
   );
 }

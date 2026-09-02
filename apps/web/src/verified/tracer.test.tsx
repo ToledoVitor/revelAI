@@ -4,6 +4,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -149,16 +150,9 @@ function response(value: unknown, status = 200) {
 
 async function enterPending(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole("button", { name: "Desafio verificado" }));
-  for (const label of [
-    "Confirmar Dispositivo",
-    "Confirmar Espaço",
-    "Confirmar Atleta",
-    "Confirmar Ensaio",
-    "Confirmar Registro",
-  ]) {
-    await user.click(screen.getByRole("button", { name: label }));
-  }
+  await completeVerifiedSetup(user);
   await screen.findByRole("heading", { name: "Envie o vídeo verificado" });
+  await waitForAttemptReady();
   fireEvent.change(screen.getByTestId("production-video-input"), {
     target: {
       files: [new File(["video"], "wall-pass.webm", { type: "video/webm" })],
@@ -166,6 +160,23 @@ async function enterPending(user: ReturnType<typeof userEvent.setup>) {
   });
   await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
   await screen.findByRole("heading", { name: "Processando tentativa" });
+}
+
+async function waitForAttemptReady() {
+  await waitFor(() =>
+    expect(screen.getByTestId("production-video-input")).toBeEnabled(),
+  );
+}
+
+async function completeVerifiedSetup(user: ReturnType<typeof userEvent.setup>) {
+  for (let index = 0; index < 5; index += 1) {
+    await user.click(
+      screen.getByRole("button", {
+        name: index === 0 ? "Simular câmera pronta" : "Simular etapa pronta",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Continuar" }));
+  }
 }
 
 function workflowFetch(result: unknown | (() => unknown)) {
@@ -229,15 +240,7 @@ describe("production verified tracer", () => {
     ).toHaveFocus();
     expect(fetchSpy).not.toHaveBeenCalled();
 
-    for (const label of [
-      "Confirmar Dispositivo",
-      "Confirmar Espaço",
-      "Confirmar Atleta",
-      "Confirmar Ensaio",
-      "Confirmar Registro",
-    ]) {
-      await user.click(screen.getByRole("button", { name: label }));
-    }
+    await completeVerifiedSetup(user);
 
     expect(
       await screen.findByRole("heading", {
@@ -267,6 +270,7 @@ describe("production verified tracer", () => {
     });
 
     const file = new File(["video"], "wall-pass.webm", { type: "video/webm" });
+    await waitForAttemptReady();
     fireEvent.change(screen.getByTestId("production-video-input"), {
       target: { files: [file] },
     });
@@ -290,6 +294,115 @@ describe("production verified tracer", () => {
       name: file.name,
       type: file.type,
     });
+  });
+
+  it("preserves the gated setup correction, recovery, back navigation, and focus before any mutation", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Simule a disponibilidade da câmera antes de continuar.",
+    );
+    expect(screen.getByRole("button", { name: "Continuar" })).toBeDisabled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole("button", { name: "Tentar acesso à câmera" }),
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Prévia simulada da câmera pronta.",
+    );
+    expect(screen.getByRole("button", { name: "Continuar" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Continuar" }));
+
+    expect(
+      screen.getByRole("heading", { name: "Preparação do desafio verificado" }),
+    ).toHaveFocus();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Posicione dois marcadores visíveis a três metros da parede.",
+    );
+    await user.click(screen.getByRole("button", { name: "Voltar" }));
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Prévia simulada da câmera pronta.",
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("allows the W2 existing-video fallback to satisfy only the device gate before mutations", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Usar vídeo existente" }),
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Vídeo existente escolhido como alternativa de captura.",
+    );
+    expect(screen.getByRole("button", { name: "Continuar" })).toBeEnabled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("recovers a failed attempt creation without enabling capture until the same prepared session gets a new attempt", async () => {
+    const user = userEvent.setup();
+    let createCalls = 0;
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname === "/v1/calibration-sessions")
+        return response(calibration, 201);
+      if (pathname === "/v1/calibration-sessions/calibration-w4-1/ready")
+        return new Response(null, { status: 204 });
+      if (pathname === "/v1/attempts") {
+        createCalls += 1;
+        return createCalls === 1
+          ? response(
+              {
+                code: "service_not_ready",
+                message: "O serviço está temporariamente indisponível.",
+                retryable: true,
+              },
+              503,
+            )
+          : response(createdAttempt, 201);
+      }
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+    await completeVerifiedSetup(user);
+    expect(
+      await screen.findByRole("button", { name: "Tentar preparar tentativa" }),
+    ).toBeVisible();
+    expect(screen.getByTestId("production-video-input")).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "O serviço está temporariamente indisponível.",
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Tentar preparar tentativa" }),
+    );
+    await waitForAttemptReady();
+    expect(createCalls).toBe(2);
+    expect(
+      fetchSpy.mock.calls.filter(
+        ([input]) =>
+          new URL(input.toString()).pathname === "/v1/calibration-sessions",
+      ),
+    ).toHaveLength(1);
   });
 
   it("renders a demo result without competitive fields after a manual pending refresh", async () => {
@@ -322,6 +435,12 @@ describe("production verified tracer", () => {
     expect(screen.getByText("Demo — não vale para ranking")).toBeVisible();
     expect(screen.getByText("Score: 86")).toBeVisible();
     expect(screen.getByText("Passes válidos")).toBeVisible();
+    expect(screen.getByLabelText("Proveniência demo")).toHaveTextContent(
+      "wall-pass-balanced-v1",
+    );
+    expect(screen.getByLabelText("Proveniência demo")).toHaveTextContent(
+      "demo-observations-v1",
+    );
     expect(screen.queryByText(/Posição:/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Percentil:/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Top percent:/)).not.toBeInTheDocument();
@@ -343,9 +462,22 @@ describe("production verified tracer", () => {
     expect(screen.getByText("93.5%")).toBeVisible();
     expect(screen.getByText("1.32 s")).toBeVisible();
     expect(screen.getByText("Proveniência: roboflow.")).toBeVisible();
-    expect(
-      screen.getByRole("region", { name: "Snapshot de ranking congelado" }),
-    ).toHaveTextContent("Posição: 3");
+    for (const value of [
+      "workspace-w4",
+      "revelai-wall-pass-geometry-v1",
+      "1.0.0",
+      "bundle-w4",
+      "roboflow-w4",
+    ])
+      expect(screen.getByLabelText("Proveniência Roboflow")).toHaveTextContent(
+        value,
+      );
+    const snapshot = screen.getByRole("region", {
+      name: "Snapshot de ranking congelado",
+    });
+    expect(snapshot).toHaveTextContent(
+      "Snapshot: frozenDesafio do snapshot: wall-pass v1Regra do snapshot: wall-pass-v1-score-1Posição: 3Coorte: 24",
+    );
     expect(
       screen.getByText(/percentual da coorte com pontuação igual ou menor/),
     ).toBeVisible();
@@ -353,6 +485,9 @@ describe("production verified tracer", () => {
       screen.getByText(/distância até o topo, não um sinônimo de percentil/),
     ).toBeVisible();
     expect(screen.getByText("Pontuações no cálculo: 24")).toBeVisible();
+    expect(snapshot).toHaveTextContent(
+      "Calculado em: 2026-08-30T12:02:00.000ZTentativa do snapshot: attempt-w4-1",
+    );
     expect(
       screen.getByRole("link", { name: "Ver Ranking atual" }),
     ).toHaveAttribute("href", "/verified?view=ranking");
@@ -427,6 +562,63 @@ describe("production verified tracer", () => {
       screen.queryByText(/Boa cobertura para uma análise/),
     ).not.toBeInTheDocument();
   });
+
+  it.each([
+    ["pending", { ...pendingOutcome, attemptId: "attempt-other" }],
+    [
+      "valid",
+      {
+        ...rankedOutcome,
+        result: {
+          ...rankedOutcome.result,
+          attemptId: "attempt-other",
+          rankingSnapshot: {
+            ...rankedOutcome.result.rankingSnapshot,
+            asOfAttemptId: "attempt-other",
+          },
+        },
+      },
+    ],
+    [
+      "invalid",
+      {
+        state: "invalid",
+        attemptId: "attempt-other",
+        mode: "verified",
+        code: "tracking_insufficient",
+        message: "Não foi possível acompanhar a atividade no vídeo.",
+        retryable: true,
+      },
+    ],
+    [
+      "failed",
+      {
+        state: "failed",
+        attemptId: "attempt-other",
+        mode: "verified",
+        code: "analysis_internal_error",
+        message: "A análise não pôde ser concluída.",
+        retryable: false,
+      },
+    ],
+  ] as const)(
+    "fails closed when a mismatched %s outcome arrives for the active attempt",
+    async (_state, mismatchedOutcome) => {
+      const user = userEvent.setup();
+      vi.stubGlobal("fetch", workflowFetch(mismatchedOutcome));
+      render(<App />);
+
+      await enterPending(user);
+      await user.click(screen.getByRole("button", { name: "Atualizar agora" }));
+
+      expect(
+        await screen.findByRole("heading", { name: "Resultado indisponível" }),
+      ).toBeVisible();
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Este resultado não está disponível neste fluxo.",
+      );
+    },
+  );
 
   it("polls only while pending with capped 1, 2, 4, 5 second backoff and stops at terminal", async () => {
     const user = userEvent.setup();
@@ -535,6 +727,89 @@ describe("production verified tracer", () => {
     );
   });
 
+  it("coalesces leaderboard loads, disables competing controls, and ignores a stale unmounted page", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState({}, "", "/verified?view=ranking");
+    let calls = 0;
+    let resolveInitial: ((value: Response) => void) | undefined;
+    let resolvePage: ((value: Response) => void) | undefined;
+    const ranking = (entries: readonly unknown[], nextCursor: string | null) =>
+      response({
+        view: "live",
+        challengeId: "wall-pass",
+        challengeVersion: 1,
+        ruleVersion: "wall-pass-v1-score-1",
+        calculatedAt: "2026-08-30T12:03:00.000Z",
+        cohortSize: entries.length,
+        entries,
+        nextCursor,
+      });
+    const firstEntry = {
+      entryId: "entry-live-1",
+      rank: 1,
+      score: 94,
+      completedAt: "2026-08-30T12:00:00.000Z",
+    };
+    const fetchSpy = vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(input.toString());
+      expect(url.pathname).toBe("/v1/leaderboards/wall-pass");
+      calls += 1;
+      if (calls === 1)
+        return new Promise<Response>((resolve) => {
+          resolveInitial = resolve;
+        });
+      if (calls === 2)
+        return new Promise<Response>((resolve) => {
+          resolvePage = resolve;
+        });
+      return Promise.resolve(ranking([], null));
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const view = render(<App />);
+
+    expect(
+      screen.getByRole("button", { name: "Atualizar ranking" }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Atualizar ranking" }));
+    expect(calls).toBe(1);
+    await act(async () => {
+      resolveInitial?.(ranking([firstEntry], "cursor-2"));
+      await Promise.resolve();
+    });
+    expect(
+      await screen.findByRole("listitem", { name: /Entrada entry-live-1/ }),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Carregar mais" }));
+    expect(
+      screen.getByRole("button", { name: "Carregar mais" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Atualizar ranking" }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Atualizar ranking" }));
+    expect(calls).toBe(2);
+    view.unmount();
+    render(<App />);
+    await act(async () => {
+      resolvePage?.(
+        ranking(
+          [
+            {
+              entryId: "stale-page-entry",
+              rank: 2,
+              score: 90,
+              completedAt: "2026-08-30T12:01:00.000Z",
+            },
+          ],
+          null,
+        ),
+      );
+      await Promise.resolve();
+    });
+    expect(screen.queryByText(/stale-page-entry/)).not.toBeInTheDocument();
+  });
+
   it("announces a safe leaderboard fetch error and recovers with the empty live state", async () => {
     const user = userEvent.setup();
     window.history.replaceState({}, "", "/verified?view=ranking");
@@ -623,6 +898,107 @@ describe("production verified tracer", () => {
     expect(
       screen.queryByText("Demo — não vale para ranking"),
     ).not.toBeInTheDocument();
+  });
+
+  it("does not let an ignored aborted poll from an old generation block the next attempt", async () => {
+    const user = userEvent.setup();
+    let cycle = 0;
+    let resolveOldPoll: ((value: Response) => void) | undefined;
+    const fetchSpy = vi.fn((input: RequestInfo | URL) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname === "/v1/calibration-sessions") {
+        cycle += 1;
+        return Promise.resolve(
+          response({ ...calibration, id: `calibration-${cycle}` }, 201),
+        );
+      }
+      if (pathname.startsWith("/v1/calibration-sessions/calibration-"))
+        return Promise.resolve(new Response(null, { status: 204 }));
+      if (pathname === "/v1/attempts") {
+        const attemptId = `attempt-${cycle}`;
+        return Promise.resolve(
+          response(
+            {
+              ...createdAttempt,
+              id: attemptId,
+              outcome: { ...createdAttempt.outcome, attemptId },
+            },
+            201,
+          ),
+        );
+      }
+      if (pathname === "/v1/attempts/attempt-1/media")
+        return Promise.resolve(
+          response(
+            {
+              ...acceptedUpload,
+              attemptId: "attempt-1",
+              outcome: { ...acceptedUpload.outcome, attemptId: "attempt-1" },
+            },
+            202,
+          ),
+        );
+      if (pathname === "/v1/attempts/attempt-2/media")
+        return Promise.resolve(
+          response(
+            {
+              ...acceptedUpload,
+              attemptId: "attempt-2",
+              outcome: { ...acceptedUpload.outcome, attemptId: "attempt-2" },
+            },
+            202,
+          ),
+        );
+      if (pathname === "/v1/attempts/attempt-1/result")
+        return new Promise<Response>((resolve) => {
+          resolveOldPoll = resolve;
+        });
+      if (pathname === "/v1/attempts/attempt-2/result")
+        return Promise.resolve(
+          response({
+            ...demoOutcome,
+            result: { ...demoOutcome.result, attemptId: "attempt-2" },
+          }),
+        );
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await enterPending(user);
+    await user.click(screen.getByRole("button", { name: "Atualizar agora" }));
+    await waitFor(() =>
+      expect(
+        fetchSpy.mock.calls.some(
+          ([input]) =>
+            new URL(input.toString()).pathname ===
+            "/v1/attempts/attempt-1/result",
+        ),
+      ).toBe(true),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Iniciar outro desafio" }),
+    );
+    await completeVerifiedSetup(user);
+    await screen.findByRole("heading", { name: "Envie o vídeo verificado" });
+    await waitForAttemptReady();
+    fireEvent.change(screen.getByTestId("production-video-input"), {
+      target: {
+        files: [new File(["second"], "second.webm", { type: "video/webm" })],
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    await screen.findByRole("heading", { name: "Processando tentativa" });
+    await user.click(screen.getByRole("button", { name: "Atualizar agora" }));
+    expect(
+      await screen.findByText("Demo — não vale para ranking"),
+    ).toBeVisible();
+
+    await act(async () => {
+      resolveOldPoll?.(response({ ...pendingOutcome, attemptId: "attempt-1" }));
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Demo — não vale para ranking")).toBeVisible();
   });
 
   it.each([
@@ -730,15 +1106,7 @@ describe("production verified tracer", () => {
     await user.click(
       await screen.findByRole("button", { name: "Tentar novo desafio" }),
     );
-    for (const label of [
-      "Confirmar Dispositivo",
-      "Confirmar Espaço",
-      "Confirmar Atleta",
-      "Confirmar Ensaio",
-      "Confirmar Registro",
-    ]) {
-      await user.click(screen.getByRole("button", { name: label }));
-    }
+    await completeVerifiedSetup(user);
     await screen.findByRole("heading", { name: "Envie o vídeo verificado" });
     expect(
       fetchSpy.mock.calls.filter(
@@ -851,6 +1219,52 @@ describe("production verified tracer", () => {
     ).toHaveLength(1);
   });
 
+  it("announces indeterminate production upload progress and clears selected media immediately after a parsed 202", async () => {
+    const user = userEvent.setup();
+    let resolveUpload: ((value: Response) => void) | undefined;
+    const fetchSpy = vi.fn((input: RequestInfo | URL) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname === "/v1/calibration-sessions")
+        return Promise.resolve(response(calibration, 201));
+      if (pathname === "/v1/calibration-sessions/calibration-w4-1/ready")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      if (pathname === "/v1/attempts")
+        return Promise.resolve(response(createdAttempt, 201));
+      if (pathname === "/v1/attempts/attempt-w4-1/media")
+        return new Promise<Response>((resolve) => {
+          resolveUpload = resolve;
+        });
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+    await completeVerifiedSetup(user);
+    await screen.findByRole("heading", { name: "Envie o vídeo verificado" });
+    await waitForAttemptReady();
+    fireEvent.change(screen.getByTestId("production-video-input"), {
+      target: {
+        files: [new File(["video"], "accepted.webm", { type: "video/webm" })],
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    expect(
+      screen.getByRole("progressbar", { name: "Envio do vídeo verificado" }),
+    ).toBeVisible();
+
+    await act(async () => {
+      resolveUpload?.(response(acceptedUpload, 202));
+      await Promise.resolve();
+    });
+    expect(
+      await screen.findByRole("heading", { name: "Processando tentativa" }),
+    ).toBeVisible();
+    expect(screen.queryByText("accepted.webm")).not.toBeInTheDocument();
+  });
+
   it("rejects the shared accepted-upload fixture when it does not belong to the verified attempt", async () => {
     const user = userEvent.setup();
     const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
@@ -919,16 +1333,9 @@ describe("production verified tracer", () => {
     await user.click(
       screen.getByRole("button", { name: "Desafio verificado" }),
     );
-    for (const label of [
-      "Confirmar Dispositivo",
-      "Confirmar Espaço",
-      "Confirmar Atleta",
-      "Confirmar Ensaio",
-      "Confirmar Registro",
-    ]) {
-      await user.click(screen.getByRole("button", { name: label }));
-    }
+    await completeVerifiedSetup(user);
     await screen.findByRole("heading", { name: "Envie o vídeo verificado" });
+    await waitForAttemptReady();
     fireEvent.change(screen.getByTestId("production-video-input"), {
       target: {
         files: [new File(["video"], "retained.webm", { type: "video/webm" })],
@@ -945,5 +1352,163 @@ describe("production verified tracer", () => {
     expect(screen.getByText("retained.webm")).toBeVisible();
     expect(createCalls).toBe(1);
     expect(screen.queryByText(/AbortError|Aborted/)).not.toBeInTheDocument();
+  });
+
+  it("ignores a stale first upload failure after a cancelled retry is accepted", async () => {
+    const user = userEvent.setup();
+    let rejectFirst: ((reason: unknown) => void) | undefined;
+    let uploadCalls = 0;
+    const fetchSpy = vi.fn((input: RequestInfo | URL) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname === "/v1/calibration-sessions")
+        return Promise.resolve(response(calibration, 201));
+      if (pathname === "/v1/calibration-sessions/calibration-w4-1/ready")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      if (pathname === "/v1/attempts")
+        return Promise.resolve(response(createdAttempt, 201));
+      if (pathname === "/v1/attempts/attempt-w4-1/media") {
+        uploadCalls += 1;
+        if (uploadCalls === 1)
+          return new Promise<Response>((_resolve, reject) => {
+            rejectFirst = reject;
+          });
+        return Promise.resolve(response(acceptedUpload, 202));
+      }
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+    await completeVerifiedSetup(user);
+    await screen.findByRole("heading", { name: "Envie o vídeo verificado" });
+    await waitForAttemptReady();
+    fireEvent.change(screen.getByTestId("production-video-input"), {
+      target: {
+        files: [new File(["video"], "race.webm", { type: "video/webm" })],
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Cancelar envio" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    expect(
+      await screen.findByRole("heading", { name: "Processando tentativa" }),
+    ).toBeVisible();
+    await act(async () => {
+      rejectFirst?.({
+        code: "service_not_ready",
+        message: "O serviço está temporariamente indisponível.",
+        retryable: true,
+        status: 503,
+      });
+      await Promise.resolve();
+    });
+    expect(
+      screen.getByRole("heading", { name: "Processando tentativa" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByText("O serviço está temporariamente indisponível."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("reconciles an abort-after-commit from the authoritative accepted attempt", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname === "/v1/calibration-sessions")
+        return Promise.resolve(response(calibration, 201));
+      if (pathname === "/v1/calibration-sessions/calibration-w4-1/ready")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      if (pathname === "/v1/attempts")
+        return Promise.resolve(response(createdAttempt, 201));
+      if (pathname === "/v1/attempts/attempt-w4-1/media") {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("Aborted", "AbortError")),
+          );
+        });
+      }
+      if (pathname === "/v1/attempts/attempt-w4-1")
+        return Promise.resolve(
+          response({
+            ...createdAttempt,
+            status: "uploaded",
+            outcome: acceptedUpload.outcome,
+          }),
+        );
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Desafio verificado" }),
+    );
+    await completeVerifiedSetup(user);
+    await screen.findByRole("heading", { name: "Envie o vídeo verificado" });
+    await waitForAttemptReady();
+    fireEvent.change(screen.getByTestId("production-video-input"), {
+      target: {
+        files: [new File(["video"], "committed.webm", { type: "video/webm" })],
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Enviar vídeo" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Cancelar envio" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Processando tentativa" }),
+    ).toBeVisible();
+    expect(
+      fetchSpy.mock.calls.map(([input]) => new URL(input.toString()).pathname),
+    ).toContain("/v1/attempts/attempt-w4-1");
+  });
+
+  it("reconciles a duplicate upload against the authoritative attempt instead of stranding its media", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname === "/v1/calibration-sessions")
+        return response(calibration, 201);
+      if (pathname === "/v1/calibration-sessions/calibration-w4-1/ready")
+        return new Response(null, { status: 204 });
+      if (pathname === "/v1/attempts") return response(createdAttempt, 201);
+      if (pathname === "/v1/attempts/attempt-w4-1/media")
+        return response(
+          {
+            code: "duplicate_media_upload",
+            message: "Esta tentativa já possui um vídeo.",
+            retryable: false,
+          },
+          409,
+        );
+      if (pathname === "/v1/attempts/attempt-w4-1")
+        return response({
+          ...createdAttempt,
+          status: "processing",
+          outcome: pendingOutcome,
+        });
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    render(<App />);
+
+    await enterPending(user);
+
+    expect(
+      await screen.findByRole("heading", { name: "Processando tentativa" }),
+    ).toBeVisible();
+    expect(
+      fetchSpy.mock.calls.some(
+        ([input]) =>
+          new URL(input.toString()).pathname === "/v1/attempts/attempt-w4-1",
+      ),
+    ).toBe(true);
+    expect(screen.queryByText("wall-pass.webm")).not.toBeInTheDocument();
   });
 });

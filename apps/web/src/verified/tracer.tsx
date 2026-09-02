@@ -11,16 +11,23 @@ import {
   type RevelApiError,
 } from "../lib/api/client";
 import { ProductionCapture } from "./production-capture";
+import {
+  captureTimingGuidance,
+  setupCameraMessage,
+  setupGates,
+  type SetupCameraStatus,
+  type SetupGate,
+} from "./setup-model";
 
 type RevelApiClient = ReturnType<typeof createRevelApiClient>;
 
-const requiredGates = [
-  ["device", "Dispositivo"],
-  ["space", "Espaço"],
-  ["athlete", "Atleta"],
-  ["rehearsal", "Ensaio"],
-  ["record", "Registro"],
-] as const;
+const requiredGateIds: ["device", "space", "athlete", "rehearsal", "record"] = [
+  "device",
+  "space",
+  "athlete",
+  "rehearsal",
+  "record",
+];
 
 const safeGenericError = "Não foi possível continuar agora. Tente novamente.";
 const leaderboardInput = {
@@ -61,15 +68,34 @@ function safeError(error: unknown): string {
   return safeGenericError;
 }
 
+function hasRouteErrorCode(
+  error: unknown,
+  code: RevelApiError["code"],
+): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === code
+  );
+}
+
 function focusHeading(ref: React.RefObject<HTMLHeadingElement | null>) {
   ref.current?.focus();
 }
 
-function isVerifiedOutcome(outcome: AttemptOutcome): boolean {
-  if (outcome.state === "pending") return outcome.mode === "verified";
+function isVerifiedOutcomeForAttempt(
+  outcome: AttemptOutcome,
+  attemptId: string,
+): boolean {
+  if (outcome.state === "pending")
+    return outcome.mode === "verified" && outcome.attemptId === attemptId;
   if (outcome.state === "valid")
-    return outcome.result.kind === "verified-result";
-  return outcome.mode === "verified";
+    return (
+      outcome.result.kind === "verified-result" &&
+      outcome.result.attemptId === attemptId
+    );
+  return outcome.mode === "verified" && outcome.attemptId === attemptId;
 }
 
 type VerifiedTracerProps = Readonly<{ client: RevelApiClient }>;
@@ -80,20 +106,38 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const generationRef = useRef(0);
   const createStartedRef = useRef(false);
-  const uploadStartedRef = useRef(false);
-  const pendingRequestRef = useRef(false);
+  const activeUploadRef = useRef<AbortController | undefined>(undefined);
+  const uploadGenerationRef = useRef(0);
+  const pendingRequestRef = useRef<
+    | Readonly<{
+        attemptId: string;
+        generation: number;
+        controller: AbortController;
+      }>
+    | undefined
+  >(undefined);
   const timeoutRef = useRef<number | undefined>(undefined);
   const pollAbortRef = useRef<AbortController | undefined>(undefined);
   const [stage, setStage] = useState<TracerStage>("setup");
   const [gateIndex, setGateIndex] = useState(0);
+  const [passedGates, setPassedGates] = useState<ReadonlySet<SetupGate["id"]>>(
+    () => new Set(),
+  );
+  const [cameraStatus, setCameraStatus] =
+    useState<SetupCameraStatus>("pending");
   const [calibrationId, setCalibrationId] = useState<string>();
   const [attemptId, setAttemptId] = useState<string>();
   const [media, setMedia] = useState<File>();
   const [outcome, setOutcome] = useState<AttemptOutcome>();
   const [terminal, setTerminal] = useState<AttemptOutcome>();
   const [message, setMessage] = useState("");
+  const [attemptState, setAttemptState] = useState<
+    "creating" | "ready" | "error"
+  >("creating");
+  const [createTick, setCreateTick] = useState(0);
   const [backoffSeconds, setBackoffSeconds] = useState(1);
   const [pollTick, setPollTick] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
 
   const rankingView =
     new URLSearchParams(location.search).get("view") === "ranking";
@@ -101,26 +145,37 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
   const resetToSetup = useCallback(() => {
     generationRef.current += 1;
     createStartedRef.current = false;
-    uploadStartedRef.current = false;
+    uploadGenerationRef.current += 1;
+    const upload = activeUploadRef.current;
+    activeUploadRef.current = undefined;
+    upload?.abort();
+    const pending = pendingRequestRef.current;
+    pendingRequestRef.current = undefined;
+    pending?.controller.abort();
     pollAbortRef.current?.abort();
     if (timeoutRef.current !== undefined)
       window.clearTimeout(timeoutRef.current);
     timeoutRef.current = undefined;
     setGateIndex(0);
+    setPassedGates(new Set());
+    setCameraStatus("pending");
     setCalibrationId(undefined);
     setAttemptId(undefined);
     setMedia(undefined);
     setOutcome(undefined);
     setTerminal(undefined);
     setMessage("");
+    setAttemptState("creating");
+    setCreateTick(0);
     setBackoffSeconds(1);
     setPollTick(0);
+    setRefreshing(false);
     setStage("setup");
   }, []);
 
   useEffect(() => {
     focusHeading(headingRef);
-  }, [stage, terminal, rankingView]);
+  }, [gateIndex, stage, terminal, rankingView]);
 
   useEffect(() => {
     if (stage !== "creating-session") return;
@@ -152,7 +207,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
       .readyCalibrationSession(
         calibrationId,
         {
-          requiredGates: ["device", "space", "athlete", "rehearsal", "record"],
+          requiredGates: requiredGateIds,
         },
         { signal: controller.signal },
       )
@@ -172,6 +227,7 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
     if (stage !== "capture" || !calibrationId || createStartedRef.current)
       return;
     createStartedRef.current = true;
+    setAttemptState("creating");
     const generation = generationRef.current;
     const controller = new AbortController();
     void client
@@ -187,29 +243,32 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
       .then((attempt) => {
         if (generation !== generationRef.current) return;
         setAttemptId(attempt.id);
+        setAttemptState("ready");
       })
       .catch((error: unknown) => {
         if (generation !== generationRef.current || isAbort(error)) return;
+        createStartedRef.current = false;
+        setAttemptState("error");
         setMessage(safeError(error));
       });
     return () => controller.abort();
-  }, [calibrationId, client, stage]);
+  }, [calibrationId, client, createTick, stage]);
 
   useEffect(() => {
-    if (
-      stage !== "uploading" ||
-      !attemptId ||
-      !media ||
-      uploadStartedRef.current
-    )
-      return;
-    uploadStartedRef.current = true;
+    if (stage !== "uploading" || !attemptId || !media) return;
     const generation = generationRef.current;
+    const uploadGeneration = uploadGenerationRef.current;
     const controller = new AbortController();
+    activeUploadRef.current = controller;
     void client
       .uploadAttemptMedia(attemptId, media, { signal: controller.signal })
       .then((accepted) => {
-        if (generation !== generationRef.current) return;
+        if (
+          generation !== generationRef.current ||
+          uploadGeneration !== uploadGenerationRef.current ||
+          activeUploadRef.current !== controller
+        )
+          return;
         if (
           accepted.attemptId !== attemptId ||
           accepted.mode !== "verified" ||
@@ -220,38 +279,82 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           setStage("capture");
           return;
         }
+        activeUploadRef.current = undefined;
         setOutcome(accepted.outcome);
+        setMedia(undefined);
         setBackoffSeconds(1);
         setStage("pending");
       })
       .catch((error: unknown) => {
-        if (generation !== generationRef.current || isAbort(error)) {
-          if (generation === generationRef.current && isAbort(error)) {
-            setMessage(
-              "Envio cancelado. O vídeo continua pronto para tentar novamente.",
-            );
-            setStage("capture");
-          }
+        if (
+          generation !== generationRef.current ||
+          uploadGeneration !== uploadGenerationRef.current ||
+          activeUploadRef.current !== controller
+        )
+          return;
+        activeUploadRef.current = undefined;
+        if (hasRouteErrorCode(error, "duplicate_media_upload")) {
+          void client
+            .getAttempt(attemptId)
+            .then((attempt) => {
+              if (
+                generation !== generationRef.current ||
+                uploadGeneration !== uploadGenerationRef.current
+              )
+                return;
+              const nextOutcome = attempt.outcome;
+              if (!isVerifiedOutcomeForAttempt(nextOutcome, attemptId)) {
+                setMessage("Este resultado não está disponível neste fluxo.");
+                setStage("capture");
+                return;
+              }
+              setOutcome(nextOutcome);
+              setMedia(undefined);
+              setBackoffSeconds(1);
+              if (nextOutcome.state === "pending") {
+                setStage("pending");
+                return;
+              }
+              setTerminal(nextOutcome);
+              setStage("terminal");
+            })
+            .catch((reconciliationError: unknown) => {
+              if (
+                generation !== generationRef.current ||
+                uploadGeneration !== uploadGenerationRef.current ||
+                isAbort(reconciliationError)
+              )
+                return;
+              setMessage(safeError(reconciliationError));
+              setStage("capture");
+            });
           return;
         }
         setMessage(safeError(error));
         setStage("capture");
       });
-    return () => controller.abort();
+    return () => {
+      if (activeUploadRef.current === controller) {
+        activeUploadRef.current = undefined;
+        controller.abort();
+      }
+    };
   }, [attemptId, client, media, stage]);
 
   const stopPolling = useCallback(() => {
     if (timeoutRef.current !== undefined)
       window.clearTimeout(timeoutRef.current);
     timeoutRef.current = undefined;
-    pollAbortRef.current?.abort();
+    const pending = pendingRequestRef.current;
+    pendingRequestRef.current = undefined;
+    pending?.controller.abort();
     pollAbortRef.current = undefined;
   }, []);
 
   const completeOutcome = useCallback(
-    (nextOutcome: AttemptOutcome) => {
+    (nextOutcome: AttemptOutcome, ownedAttemptId: string) => {
       stopPolling();
-      if (!isVerifiedOutcome(nextOutcome)) {
+      if (!isVerifiedOutcomeForAttempt(nextOutcome, ownedAttemptId)) {
         setMessage("Este resultado não está disponível neste fluxo.");
         setTerminal(undefined);
         setStage("terminal");
@@ -263,30 +366,87 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
     [stopPolling],
   );
 
+  const reconcileUploadAttempt = useCallback(
+    async (
+      ownedAttemptId: string,
+      generation: number,
+      fallbackMessage = safeGenericError,
+    ) => {
+      try {
+        const attempt = await client.getAttempt(ownedAttemptId);
+        if (generation !== generationRef.current) return;
+        const nextOutcome = attempt.outcome;
+        if (!isVerifiedOutcomeForAttempt(nextOutcome, ownedAttemptId)) {
+          setMessage("Este resultado não está disponível neste fluxo.");
+          setStage("capture");
+          return;
+        }
+        setOutcome(nextOutcome);
+        setMedia(undefined);
+        setBackoffSeconds(1);
+        if (nextOutcome.state === "pending") {
+          setStage("pending");
+          return;
+        }
+        completeOutcome(nextOutcome, ownedAttemptId);
+      } catch (error) {
+        if (generation !== generationRef.current || isAbort(error)) return;
+        setMessage(fallbackMessage);
+        setStage("capture");
+      }
+    },
+    [client, completeOutcome],
+  );
+
   const refreshOutcome = useCallback(async () => {
-    if (stage !== "pending" || !attemptId || pendingRequestRef.current) return;
-    pendingRequestRef.current = true;
+    if (stage !== "pending" || !attemptId) return;
+    const generation = generationRef.current;
+    const activeRequest = pendingRequestRef.current;
+    if (
+      activeRequest &&
+      activeRequest.generation === generation &&
+      activeRequest.attemptId === attemptId
+    )
+      return;
     const controller = new AbortController();
+    const request = { attemptId, generation, controller };
+    pendingRequestRef.current = request;
+    setRefreshing(true);
     pollAbortRef.current = controller;
     try {
       const nextOutcome = await client.getAttemptOutcome(attemptId, {
         signal: controller.signal,
       });
-      if (controller.signal.aborted) return;
+      if (
+        controller.signal.aborted ||
+        pendingRequestRef.current !== request ||
+        generation !== generationRef.current
+      )
+        return;
+      if (!isVerifiedOutcomeForAttempt(nextOutcome, attemptId)) {
+        completeOutcome(nextOutcome, attemptId);
+        return;
+      }
       setMessage("");
       setOutcome(nextOutcome);
       if (nextOutcome.state === "pending") {
         const nextDelay = Math.min(backoffSeconds * 2, 5);
         setBackoffSeconds(nextDelay);
       } else {
-        completeOutcome(nextOutcome);
+        completeOutcome(nextOutcome, attemptId);
       }
     } catch (error) {
       if (!isAbort(error)) setMessage(safeError(error));
     } finally {
       if (pollAbortRef.current === controller) pollAbortRef.current = undefined;
-      pendingRequestRef.current = false;
-      if (!controller.signal.aborted && stage === "pending") {
+      if (pendingRequestRef.current === request)
+        pendingRequestRef.current = undefined;
+      if (generation === generationRef.current) setRefreshing(false);
+      if (
+        !controller.signal.aborted &&
+        generation === generationRef.current &&
+        stage === "pending"
+      ) {
         setPollTick((current) => current + 1);
       }
     }
@@ -323,7 +483,23 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
     stage === "creating-session" ||
     stage === "readying-session"
   ) {
-    const activeGate = requiredGates[gateIndex];
+    const activeGate = setupGates[gateIndex];
+    const currentGatePassed =
+      activeGate?.id === "device"
+        ? cameraStatus === "ready" || cameraStatus === "existing-video"
+        : activeGate
+          ? passedGates.has(activeGate.id)
+          : false;
+    const currentGateStatus =
+      activeGate?.id === "device"
+        ? currentGatePassed
+          ? setupCameraMessage(cameraStatus)
+          : cameraStatus === "pending"
+            ? activeGate.correction
+            : setupCameraMessage(cameraStatus)
+        : currentGatePassed
+          ? activeGate?.ready
+          : activeGate?.correction;
     return (
       <main
         className="calibration-setup"
@@ -334,18 +510,54 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           Preparação do desafio verificado
         </h1>
         <p>
-          Etapa {gateIndex + 1} de {requiredGates.length} — {activeGate?.[1]}
+          Etapa {gateIndex + 1} de {setupGates.length} — {activeGate?.title}
         </p>
-        <p role="status">
-          A orientação ajuda a preparar a captura, mas a verificação é decidida
-          no servidor.
-        </p>
+        <p>{captureTimingGuidance}</p>
+        <h2>{activeGate?.title}</h2>
+        <section aria-label="Prévia da câmera">
+          <p role="status">{currentGateStatus}</p>
+        </section>
         {message ? <p role="alert">{message}</p> : null}
         <button
           type="button"
           disabled={stage !== "setup" || !activeGate}
           onClick={() => {
-            if (gateIndex === requiredGates.length - 1) {
+            if (activeGate?.id === "device") {
+              setCameraStatus("ready");
+              return;
+            }
+            if (activeGate) {
+              setPassedGates((current) => new Set([...current, activeGate.id]));
+            }
+          }}
+        >
+          {activeGate?.id === "device"
+            ? "Simular câmera pronta"
+            : "Simular etapa pronta"}
+        </button>
+        {activeGate?.id === "device" && !currentGatePassed ? (
+          <button
+            type="button"
+            disabled={stage !== "setup"}
+            onClick={() => setCameraStatus("ready")}
+          >
+            Tentar acesso à câmera
+          </button>
+        ) : null}
+        {activeGate?.id === "device" && !currentGatePassed ? (
+          <button
+            type="button"
+            disabled={stage !== "setup"}
+            onClick={() => setCameraStatus("existing-video")}
+          >
+            Usar vídeo existente
+          </button>
+        ) : null}
+        <button
+          type="button"
+          disabled={stage !== "setup" || !currentGatePassed}
+          onClick={() => {
+            if (gateIndex === setupGates.length - 1) {
               setMessage("");
               setStage("creating-session");
               return;
@@ -353,7 +565,20 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
             setGateIndex((current) => current + 1);
           }}
         >
-          Confirmar {activeGate?.[1]}
+          Continuar
+        </button>
+        <button
+          type="button"
+          disabled={stage !== "setup"}
+          onClick={() => {
+            if (gateIndex === 0) {
+              navigate("/");
+              return;
+            }
+            setGateIndex((current) => current - 1);
+          }}
+        >
+          {gateIndex === 0 ? "Voltar para Início" : "Voltar"}
         </button>
         <button
           type="button"
@@ -382,19 +607,42 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           60 segundos. O servidor confirma a elegibilidade.
         </p>
         {!attemptId ? (
-          <p role="status">Preparando uma tentativa para este envio.</p>
+          <p role="status">
+            {attemptState === "error"
+              ? "Não foi possível preparar a tentativa. Tente novamente."
+              : "Preparando uma tentativa para este envio."}
+          </p>
         ) : null}
         <ProductionCapture
           disabled={uploading || !attemptId}
           media={media}
           onMedia={setMedia}
         />
+        {uploading ? (
+          <>
+            <progress aria-label="Envio do vídeo verificado" />
+            <p role="status">Enviando vídeo ao servidor.</p>
+          </>
+        ) : null}
         {message ? <p role="alert">{message}</p> : null}
+        {attemptState === "error" ? (
+          <button
+            type="button"
+            onClick={() => {
+              createStartedRef.current = false;
+              setAttemptState("creating");
+              setMessage("");
+              setCreateTick((current) => current + 1);
+            }}
+          >
+            Tentar preparar tentativa
+          </button>
+        ) : null}
         <button
           type="button"
           disabled={!attemptId || !media || uploading}
           onClick={() => {
-            uploadStartedRef.current = false;
+            uploadGenerationRef.current += 1;
             setMessage("");
             setStage("uploading");
           }}
@@ -405,12 +653,20 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           <button
             type="button"
             onClick={() => {
-              pollAbortRef.current?.abort();
-              uploadStartedRef.current = false;
+              uploadGenerationRef.current += 1;
+              const upload = activeUploadRef.current;
+              activeUploadRef.current = undefined;
+              upload?.abort();
               setStage("capture");
               setMessage(
                 "Envio cancelado. O vídeo continua pronto para tentar novamente.",
               );
+              if (attemptId)
+                void reconcileUploadAttempt(
+                  attemptId,
+                  generationRef.current,
+                  "Envio cancelado. O vídeo continua pronto para tentar novamente.",
+                );
             }}
           >
             Cancelar envio
@@ -432,9 +688,15 @@ export function VerifiedTracer({ client }: VerifiedTracerProps) {
           voltar; não prometemos uma notificação com o navegador fechado.
         </p>
         {message ? <p role="alert">{message}</p> : null}
-        <button type="button" onClick={() => void refreshOutcome()}>
+        <button
+          type="button"
+          disabled={refreshing}
+          aria-busy={refreshing}
+          onClick={() => void refreshOutcome()}
+        >
           Atualizar agora
         </button>
+        {refreshing ? <p role="status">Atualizando tentativa.</p> : null}
         <button type="button" onClick={() => resetToSetup()}>
           Iniciar outro desafio
         </button>
@@ -552,6 +814,27 @@ function VerifiedReport({
       <p>Regra: {result.ruleVersion}</p>
       <p>Concluído em: {result.completedAt}</p>
       <p>Proveniência: {result.provenance.kind}.</p>
+      {result.provenance.kind === "demo" ? (
+        <dl aria-label="Proveniência demo">
+          <dt>Fixture</dt>
+          <dd>{result.provenance.fixtureId}</dd>
+          <dt>Versão do provider</dt>
+          <dd>{result.provenance.providerVersion}</dd>
+        </dl>
+      ) : (
+        <dl aria-label="Proveniência Roboflow">
+          <dt>Workspace</dt>
+          <dd>{result.provenance.workspaceId}</dd>
+          <dt>Workflow</dt>
+          <dd>{result.provenance.workflowId}</dd>
+          <dt>Versão do workflow</dt>
+          <dd>{result.provenance.workflowVersion}</dd>
+          <dt>Bundle do modelo</dt>
+          <dd>{result.provenance.modelBundleId}</dd>
+          <dt>Versão do provider</dt>
+          <dd>{result.provenance.providerVersion}</dd>
+        </dl>
+      )}
       <dl>
         <dt>Passes válidos</dt>
         <dd>{result.metrics.validPasses} passes</dd>
@@ -567,6 +850,12 @@ function VerifiedReport({
       {result.competitiveStatus === "ranked" ? (
         <section aria-label="Snapshot de ranking congelado">
           <h2>Ranking no resultado</h2>
+          <p>Snapshot: {result.rankingSnapshot.kind}</p>
+          <p>
+            Desafio do snapshot: {result.rankingSnapshot.challengeId} v
+            {result.rankingSnapshot.challengeVersion}
+          </p>
+          <p>Regra do snapshot: {result.rankingSnapshot.ruleVersion}</p>
           <p>Posição: {result.rankingSnapshot.rank}</p>
           <p>Coorte: {result.rankingSnapshot.cohortSize}</p>
           <p>
@@ -582,6 +871,7 @@ function VerifiedReport({
             {result.rankingSnapshot.scoreCountAtFinalization}
           </p>
           <p>Calculado em: {result.rankingSnapshot.calculatedAt}</p>
+          <p>Tentativa do snapshot: {result.rankingSnapshot.asOfAttemptId}</p>
         </section>
       ) : null}
       <Link to="/verified?view=ranking">Ver Ranking atual</Link>
@@ -602,14 +892,32 @@ function LiveLeaderboard({
   const [response, setResponse] = useState<LeaderboardResponse>();
   const [error, setError] = useState("");
   const [cursor, setCursor] = useState<string>();
+  const [loading, setLoading] = useState(false);
+  const mountedRef = useRef(true);
+  const generationRef = useRef(0);
+  const activeRequestRef = useRef<AbortController | undefined>(undefined);
   const load = useCallback(
     async (requestedCursor?: string) => {
+      if (activeRequestRef.current) return;
+      const generation = generationRef.current;
+      const controller = new AbortController();
+      activeRequestRef.current = controller;
+      setLoading(true);
       try {
         setError("");
-        const next = await client.getLeaderboard({
-          ...leaderboardInput,
-          ...(requestedCursor ? { cursor: requestedCursor } : {}),
-        });
+        const next = await client.getLeaderboard(
+          {
+            ...leaderboardInput,
+            ...(requestedCursor ? { cursor: requestedCursor } : {}),
+          },
+          { signal: controller.signal },
+        );
+        if (
+          !mountedRef.current ||
+          generation !== generationRef.current ||
+          activeRequestRef.current !== controller
+        )
+          return;
         setResponse((current) =>
           requestedCursor && current
             ? { ...next, entries: [...current.entries, ...next.entries] }
@@ -617,11 +925,33 @@ function LiveLeaderboard({
         );
         setCursor(next.nextCursor ?? undefined);
       } catch (loadError) {
+        if (
+          controller.signal.aborted ||
+          !mountedRef.current ||
+          generation !== generationRef.current ||
+          activeRequestRef.current !== controller
+        )
+          return;
         setError(safeError(loadError));
+      } finally {
+        if (activeRequestRef.current === controller) {
+          activeRequestRef.current = undefined;
+          if (mountedRef.current && generation === generationRef.current)
+            setLoading(false);
+        }
       }
     },
     [client],
   );
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      generationRef.current += 1;
+      activeRequestRef.current?.abort();
+      activeRequestRef.current = undefined;
+    };
+  }, []);
   useEffect(() => {
     void load();
   }, [load]);
@@ -648,7 +978,11 @@ function LiveLeaderboard({
           ) : (
             <ol>
               {response.entries.map((entry) => (
-                <li key={entry.entryId}>
+                <li
+                  key={entry.entryId}
+                  aria-label={`Entrada ${entry.entryId}: posição ${entry.rank}, score ${entry.score}`}
+                >
+                  <span className="sr-only">Entrada {entry.entryId}. </span>
                   Posição {entry.rank} — score {entry.score} —{" "}
                   {entry.completedAt}
                 </li>
@@ -656,13 +990,17 @@ function LiveLeaderboard({
             </ol>
           )}
           {cursor ? (
-            <button type="button" onClick={() => void load(cursor)}>
+            <button
+              type="button"
+              disabled={loading}
+              onClick={() => void load(cursor)}
+            >
               Carregar mais
             </button>
           ) : null}
         </>
       ) : null}
-      <button type="button" onClick={() => void load()}>
+      <button type="button" disabled={loading} onClick={() => void load()}>
         Atualizar ranking
       </button>
       <Link to="/verified">Voltar ao desafio</Link>

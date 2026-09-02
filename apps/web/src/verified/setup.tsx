@@ -1,14 +1,15 @@
 import { ArrowLeft, VideoCamera } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import {
+  captureTimingGuidance,
+  setupCameraMessage,
+  setupGates,
+  type SetupCameraStatus,
+  type SetupGate,
+} from "./setup-model";
 
-type CameraStatus =
-  | "pending"
-  | "ready"
-  | "denied"
-  | "unsupported"
-  | "unavailable"
-  | "existing-video";
+type CameraStatus = SetupCameraStatus;
 
 export type ReviewSetupFixture = Readonly<{
   challenges: readonly Readonly<{
@@ -22,53 +23,6 @@ export type ReviewSetupPort = Readonly<{
   getFixture(): ReviewSetupFixture;
   retryCamera(): CameraStatus;
 }>;
-
-type Gate = Readonly<{
-  id: "device" | "space" | "athlete" | "rehearsal" | "record";
-  title: string;
-  correction: string;
-  ready: string;
-}>;
-
-const captureTimingGuidance =
-  "A captura completa inclui uma pré-rolagem de calibração de 4 segundos e um intervalo ativo de exatamente 60 segundos.";
-
-const gates: readonly Gate[] = [
-  {
-    id: "device",
-    title: "Dispositivo",
-    correction: "Simule a disponibilidade da câmera antes de continuar.",
-    ready: "Prévia simulada da câmera pronta.",
-  },
-  {
-    id: "space",
-    title: "Espaço",
-    correction: "Posicione dois marcadores visíveis a três metros da parede.",
-    ready: "Os marcadores estão confirmados na prévia. Você pode continuar.",
-  },
-  {
-    id: "athlete",
-    title: "Atleta",
-    correction:
-      "Mantenha o corpo inteiro visível entre os marcadores durante o passe.",
-    ready:
-      "O enquadramento do atleta está confirmado na prévia. Você pode continuar.",
-  },
-  {
-    id: "rehearsal",
-    title: "Ensaio",
-    correction: "Ensaie passes na parede alternando os dois pés.",
-    ready: "O ensaio está confirmado na prévia. Você pode continuar.",
-  },
-  {
-    id: "record",
-    title: "Registro",
-    correction:
-      "Confira a preparação antes de seguir para a captura completa quando ela estiver disponível.",
-    ready:
-      "A preparação para o registro está confirmada na prévia. Você pode continuar.",
-  },
-];
 
 declare global {
   interface Window {
@@ -93,23 +47,6 @@ function reviewFixture(): ReviewSetupFixture {
   });
 }
 
-function cameraMessage(status: CameraStatus): string {
-  if (status === "ready") return "Prévia simulada da câmera pronta.";
-  if (status === "denied") {
-    return "O acesso à câmera foi negado. Permita o acesso nas configurações do navegador ou use um vídeo existente.";
-  }
-  if (status === "unsupported") {
-    return "Este navegador não oferece suporte à prévia da câmera. Use um navegador compatível ou um vídeo existente.";
-  }
-  if (status === "unavailable") {
-    return "Nenhuma câmera está disponível. Conecte uma câmera ou use um vídeo existente.";
-  }
-  if (status === "existing-video") {
-    return "Vídeo existente escolhido como alternativa de captura. Ele mantém a pré-rolagem de calibração de 4 segundos e o intervalo ativo de exatamente 60 segundos; as próximas orientações continuam necessárias.";
-  }
-  return "Aguardando simulação da câmera.";
-}
-
 export function createReviewSetupPort(
   fixture: ReviewSetupFixture = reviewFixture(),
 ): ReviewSetupPort {
@@ -130,11 +67,11 @@ export function ReviewSetupRoute({ port }: ReviewSetupRouteProps) {
   const [hasStartedSetup, setHasStartedSetup] = useState(false);
   const [cameraStatus, setCameraStatus] = useState(fixture.cameraStatus);
   const [activeGateIndex, setActiveGateIndex] = useState(0);
-  const [passedGates, setPassedGates] = useState<ReadonlySet<Gate["id"]>>(
+  const [passedGates, setPassedGates] = useState<ReadonlySet<SetupGate["id"]>>(
     () => new Set(),
   );
   const [complete, setComplete] = useState(false);
-  const activeGate = gates[activeGateIndex];
+  const activeGate = setupGates[activeGateIndex];
   const selectedChallenge = fixture.challenges.find(
     (challenge) => challenge.id === selectedChallengeId,
   );
@@ -145,10 +82,10 @@ export function ReviewSetupRoute({ port }: ReviewSetupRouteProps) {
   const currentGateStatus =
     activeGate.id === "device"
       ? currentGatePassed
-        ? cameraMessage(cameraStatus)
+        ? setupCameraMessage(cameraStatus)
         : cameraStatus === "pending"
           ? activeGate.correction
-          : cameraMessage(cameraStatus)
+          : setupCameraMessage(cameraStatus)
       : currentGatePassed
         ? activeGate.ready
         : activeGate.correction;
@@ -167,7 +104,7 @@ export function ReviewSetupRoute({ port }: ReviewSetupRouteProps) {
 
   const continueSetup = () => {
     if (!currentGatePassed) return;
-    if (activeGateIndex === gates.length - 1) {
+    if (activeGateIndex === setupGates.length - 1) {
       setComplete(true);
       return;
     }
@@ -249,7 +186,7 @@ export function ReviewSetupRoute({ port }: ReviewSetupRouteProps) {
       <p>{selectedChallenge.name}</p>
       <p>{captureTimingGuidance}</p>
       <p>
-        Etapa {activeGateIndex + 1} de {gates.length} — {activeGate.title}
+        Etapa {activeGateIndex + 1} de {setupGates.length} — {activeGate.title}
       </p>
       <h2>{activeGate.title}</h2>
       <section
