@@ -30,16 +30,22 @@ jobs:
           PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
         run: |
           revelai_pnpm_root="$(dirname "$PNPM_HOME")"
+          revelai_pnpm_store="$(pnpm store path)"
           test -f "$revelai_pnpm_root/pnpm/bin/pnpm.cjs"
+          test -d "$revelai_pnpm_store"
           docker run --rm \
             --platform linux/amd64 \
             --network none \
             --env CI=true \
             --env PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+            --env PNPM_CONFIG_STORE_DIR="$revelai_pnpm_store" \
+            --env PNPM_CONFIG_OFFLINE=true \
+            --env pnpm_config_verify_deps_before_run=error \
             --env PATH=/pnpm/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             --volume "$revelai_pnpm_root:/pnpm:ro" \
-            --workdir /work \
+            --volume "$revelai_pnpm_store:$revelai_pnpm_store:ro" \
+            --workdir "$GITHUB_WORKSPACE" \
             "$PLAYWRIGHT_IMAGE" \
             node /pnpm/pnpm/bin/pnpm.cjs --filter @revelai/design-system run build
           docker run --rm \
@@ -47,10 +53,14 @@ jobs:
             --network none \
             --env CI=true \
             --env PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+            --env PNPM_CONFIG_STORE_DIR="$revelai_pnpm_store" \
+            --env PNPM_CONFIG_OFFLINE=true \
+            --env pnpm_config_verify_deps_before_run=error \
             --env PATH=/pnpm/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             --volume "$revelai_pnpm_root:/pnpm:ro" \
-            --workdir /work \
+            --volume "$revelai_pnpm_store:$revelai_pnpm_store:ro" \
+            --workdir "$GITHUB_WORKSPACE" \
             "$PLAYWRIGHT_IMAGE" \
             node /pnpm/pnpm/bin/pnpm.cjs --filter @revelai/web run test:visual:canonical
       - run: pnpm --filter @revelai/api run openapi:check
