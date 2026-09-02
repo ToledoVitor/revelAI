@@ -429,7 +429,8 @@ a:focus-visible {
 }
 
 .calibration-setup fieldset button,
-.setup-actions button {
+.setup-actions button,
+.setup-action {
   min-height: 2.75rem;
   margin: 0.25rem;
   padding: 0.55rem 0.85rem;
@@ -437,6 +438,18 @@ a:focus-visible {
   border: 1px solid var(--deep-emerald);
   background: transparent;
   font-weight: 700;
+}
+
+.challenge-selection {
+  display: grid;
+  gap: 0.5rem;
+  margin: 1.5rem 0;
+}
+
+.challenge-selection .setup-action {
+  width: 100%;
+  margin: 0;
+  text-align: left;
 }
 
 .setup-actions {
@@ -459,13 +472,22 @@ a:focus-visible {
   background: var(--deep-emerald);
 }
 
+.setup-action--primary:not(:disabled),
+.setup-action[aria-pressed="true"] {
+  color: var(--warm-white);
+  background: var(--deep-emerald);
+}
+
 @media (hover: hover) {
   .calibration-setup fieldset button:hover,
-  .setup-actions button:hover:not(:disabled) {
+  .setup-actions button:hover:not(:disabled),
+  .setup-action:hover:not(:disabled) {
     background: color-mix(in srgb, var(--deep-emerald) 10%, transparent);
   }
 
-  .setup-actions button:last-child:hover:not(:disabled) {
+  .setup-actions button:last-child:hover:not(:disabled),
+  .setup-action--primary:hover:not(:disabled),
+  .setup-action[aria-pressed="true"]:hover:not(:disabled) {
     background: color-mix(in srgb, var(--deep-emerald) 85%, var(--near-black));
   }
 }

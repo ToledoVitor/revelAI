@@ -1,6 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { dirname, extname, resolve } from "node:path";
+import { basename, dirname, extname, resolve } from "node:path";
 
 const webDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outputDirectory = resolve(
@@ -29,6 +29,10 @@ const javascriptFiles = files.filter((file) => extname(file) === ".js");
 
 if (javascriptFiles.length === 0) {
   throw new Error("The isolated production router artifact has no JavaScript.");
+}
+
+if (javascriptFiles.some((file) => /^setup-[\w-]+\.js$/.test(basename(file)))) {
+  throw new Error("Review setup chunk leaked into production output.");
 }
 
 for (const file of javascriptFiles) {

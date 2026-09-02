@@ -189,10 +189,14 @@ export function ReviewSetupRoute({ port }: ReviewSetupRouteProps) {
         <h1 id="challenge-heading" ref={headingRef} tabIndex={-1}>
           Escolha o desafio para a orientação
         </h1>
-        <section aria-label="Desafios disponíveis para orientação">
+        <section
+          aria-label="Desafios disponíveis para orientação"
+          className="challenge-selection"
+        >
           {fixture.challenges.map((challenge) => (
             <button
               aria-pressed={selectedChallengeId === challenge.id}
+              className="setup-action"
               key={challenge.id}
               type="button"
               onClick={() => setSelectedChallengeId(challenge.id)}
@@ -202,6 +206,7 @@ export function ReviewSetupRoute({ port }: ReviewSetupRouteProps) {
           ))}
         </section>
         <button
+          className="setup-action setup-action--primary"
           type="button"
           disabled={!selectedChallengeId}
           onClick={() => setHasStartedSetup(true)}
@@ -223,7 +228,11 @@ export function ReviewSetupRoute({ port }: ReviewSetupRouteProps) {
           A preparação orienta a captura. A captura completa e o resultado ainda
           não estão ativos.
         </p>
-        <button type="button" onClick={() => navigate("/")}>
+        <button
+          className="setup-action setup-action--primary"
+          type="button"
+          onClick={() => navigate("/")}
+        >
           Voltar para Início
         </button>
       </main>

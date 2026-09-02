@@ -36,9 +36,12 @@ function isOutputChunk(value: unknown): value is OutputChunk {
   );
 }
 
-describe("production router review-route isolation", () => {
-  it("removes the review setup module from the DEV:false/MODE:production router graph", async () => {
-    const buildResult = await build({
+async function buildWithProductionEnvironment() {
+  const previousNodeEnvironment = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+
+  try {
+    return await build({
       root: webDirectory,
       mode: "production",
       logLevel: "silent",
@@ -47,6 +50,18 @@ describe("production router review-route isolation", () => {
         write: false,
       },
     });
+  } finally {
+    if (previousNodeEnvironment === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = previousNodeEnvironment;
+    }
+  }
+}
+
+describe("production router review-route isolation", () => {
+  it("removes the review setup module from the DEV:false/MODE:production router graph", async () => {
+    const buildResult = await buildWithProductionEnvironment();
     const outputGroups = (
       Array.isArray(buildResult) ? buildResult : [buildResult]
     ).map((output) => {

@@ -73,14 +73,19 @@ describe("review calibration setup", () => {
         level: 1,
       }),
     ).toBeVisible();
-    expect(
-      screen.getByRole("button", { name: "Continuar para orientação" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByRole("button", {
-        name: "Selecionar Passe na parede — futsal",
-      }),
-    ).toBeVisible();
+    const continueToGuidance = screen.getByRole("button", {
+      name: "Continuar para orientação",
+    });
+    const selectWallPass = screen.getByRole("button", {
+      name: "Selecionar Passe na parede — futsal",
+    });
+    expect(continueToGuidance).toBeDisabled();
+    expect(continueToGuidance).toHaveClass(
+      "setup-action",
+      "setup-action--primary",
+    );
+    expect(selectWallPass).toBeVisible();
+    expect(selectWallPass).toHaveClass("setup-action");
     await chooseWallPass(user);
     expect(screen.getByText("wall-pass-v1")).toBeVisible();
     expect(screen.getByText("Etapa 1 de 5 — Dispositivo")).toBeVisible();
@@ -332,9 +337,11 @@ describe("review calibration setup", () => {
     });
     expect(completionHeading).toHaveFocus();
 
-    await user.click(
-      screen.getByRole("button", { name: "Voltar para Início" }),
-    );
+    const returnHome = screen.getByRole("button", {
+      name: "Voltar para Início",
+    });
+    expect(returnHome).toHaveClass("setup-action", "setup-action--primary");
+    await user.click(returnHome);
     expect(window.location.pathname).toBe("/");
   });
 
