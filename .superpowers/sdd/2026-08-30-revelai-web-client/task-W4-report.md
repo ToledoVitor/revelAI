@@ -250,3 +250,60 @@ Não há preocupação bloqueadora conhecida. O progresso percentual é usado
 somente onde XHR pode observar bytes reais; o owner mantém um estado
 indeterminado acessível nos ambientes sem esse observador. Nenhum push foi
 feito.
+
+## Re-review round 3 — Sol (commit `acf82c466b747c33fa7226da4ce2ae230a441a79`)
+
+O terceiro re-review identificou dois estados ambíguos: uma câmera já liberada
+que ainda parecia pronta após Back, e uma resposta de upload perdida que era
+tratada como erro local apesar de o servidor poder ter recebido a mídia.
+
+### Correções funcionais
+
+- O adapter de câmera agora sabe se possuía um stream físico ao encerrar o
+  preview. Somente nesse caso o cleanup publica `pending`; streams são parados
+  antes da atualização. Assim, Continue desmonta a prévia sem leak e Back
+  bloqueia novamente o gate, oferece `Ativar câmera` e vídeo existente e só
+  reabilita Continue após preview real novo. O fallback de vídeo existente
+  permanece válido ao voltar porque não possui stream para liberar.
+- O owner distingue `RevelApiError` (uma resposta HTTP pública e comprovada)
+  de falha sem resposta. Abort, duplicidade e qualquer erro não-RouteError
+  (incluindo TypeError/XHR error/status 0) consultam o Attempt autoritativo
+  usando as mesmas gerações de fluxo e upload. A transição pura existente
+  continua decidindo awaiting-upload, uploaded/processing, terminal e
+  mismatch. Erro HTTP seguro, como `media_empty`, não dispara GET.
+- Se a consulta autoritativa falhar ou ainda indicar `awaiting-upload`, o
+  owner preserva arquivo e Attempt na captura para retry. Uma reconciliação
+  antiga não altera um upload aceito posterior. O adapter XHR é provado como
+  erro de transporte quando não há resposta, sem inventar RouteError.
+
+### RED → GREEN deste round
+
+1. O teste público activate → Continue → Back parou o track uma vez, mas
+   encontrava Continue habilitado e não encontrava ativação/fallback. O RED
+   confirmou o falso-ready; o cleanup condicionado ao stream tornou o gate,
+   foco no H1 e controles GREEN.
+2. O teste de upload que rejeita com TypeError pós-commit não encontrava
+   `Processando tentativa`: o owner retornava diretamente à captura. Depois da
+   classificação de erro sem resposta e GET autoritativo, `processing` limpa a
+   mídia e inicia polling GREEN.
+3. A matriz adicional cobre GET falho, GET `awaiting-upload`, retry no mesmo
+   Attempt, resposta antiga após novo upload, abort já normalizado, duplicado
+   e o RouteError HTTP `422 media_empty` sem reconciliação. O seam C2 inclui
+   XHR `onerror`/status 0 como TypeError.
+4. O browser do artifact de produção cobre a ida e volta do gate com fallback
+   sem tráfego `/v1`; a prova unitária mantém a variante de câmera física,
+   stream tardio e cleanup.
+
+### Provas e gates do round
+
+| Comando | Resultado |
+| --- | --- |
+| `rtk pnpm --dir apps/web exec vitest run src/lib/api/client.test.ts src/verified/production-setup-camera.test.tsx src/verified/production-capture.test.tsx src/verified/upload-reconciliation.test.ts src/verified/tracer.test.tsx src/verified/setup.test.tsx src/verified/capture.test.tsx src/app.test.tsx src/production-router-harness.test.ts --config vitest.config.ts` | 9 arquivos, 157 testes verdes |
+| `rtk pnpm --dir apps/web run test:production-router` | 6 cenários browser de produção verdes, incluindo Back |
+| `rtk pnpm check` | exit 0: format, lint, typecheck, testes e build de todos os pacotes; web Vitest 20 arquivos/193 testes verdes; visual estrutural 24 passados e 8 skips previstos |
+| `rtk git diff --check` e `rtk git diff --cached --check` | verdes antes do commit funcional |
+
+Os dez findings anteriores continuam cobertos: owner único `/verified`,
+isolamento de review, C2/progresso, cleanup de capture, geração de poll/upload,
+leaderboard concorrente e verdade competitiva não foram alterados. Não há
+preocupação bloqueadora conhecida e nenhum push foi feito.
