@@ -74,6 +74,8 @@ const migrationStartupTestTimeoutMs =
   migrationStartupVerificationGraceMs;
 const migrationChildStartupTimeoutError = "Database child startup timed out";
 const migrationChildReadyMarker = "REVELAI_CHILD_DATABASE_READY";
+// Signal escalation is asserted on POSIX; Windows does not provide SIGKILL semantics.
+const itOnPosix = process.platform === "win32" ? it.skip : it;
 
 class TestClock implements Clock {
   public current = "2030-01-15T12:00:00.000Z";
@@ -560,68 +562,100 @@ async function durableStartupStateForTest(filename: string): Promise<
 }
 
 type DatabaseChildStartupOptions = Readonly<{
+  exitBeforeReady?: boolean;
   forceHang?: boolean;
-  onReady?: () => void;
   timeoutMs?: number;
 }>;
+
+type DatabaseChildStartup = Promise<
+  Readonly<{ userVersion: unknown; migrationCount: unknown }>
+> &
+  Readonly<{ ready?: Promise<void> }>;
 
 function openDatabaseInChild(
   filename: string,
   options: DatabaseChildStartupOptions = {},
-): Promise<Readonly<{ userVersion: unknown; migrationCount: unknown }>> {
-  return new Promise((resolve, reject) => {
+): DatabaseChildStartup {
+  let resolveReadiness!: () => void;
+  let rejectReadiness!: (error: unknown) => void;
+  let readinessSettled = false;
+  const readiness =
+    options.forceHang === true
+      ? new Promise<void>((resolve, reject) => {
+          resolveReadiness = resolve;
+          rejectReadiness = reject;
+        })
+      : undefined;
+  const resolveReady = () => {
+    if (readinessSettled || readiness === undefined) return;
+    readinessSettled = true;
+    resolveReadiness();
+  };
+  const rejectReady = (error: unknown) => {
+    if (readinessSettled || readiness === undefined) return;
+    readinessSettled = true;
+    rejectReadiness(error);
+  };
+
+  const startup = new Promise<
+    Readonly<{ userVersion: unknown; migrationCount: unknown }>
+  >((resolve, reject) => {
     const timeoutMs = options.timeoutMs ?? migrationChildStartupTimeoutMs;
     const child = spawn(
       process.execPath,
       [
         "-e",
         `
-          const fs = require("node:fs");
-          const Module = require("node:module");
-          const ts = require("typescript");
           if (process.env.REVELAI_CHILD_FORCE_HANG === "1") {
-            process.on("SIGTERM", () => undefined);
-            process.stdout.write("REVELAI_CHILD_DATABASE_READY\\n");
-            setInterval(() => undefined, 1_000);
-          } else {
-          const originalResolveFilename = Module._resolveFilename;
-          Module._resolveFilename = function (request, parent, isMain, options) {
-            if (request === "@revelai/contracts") return process.env.REVELAI_CHILD_CONTRACTS_MODULE;
-            if (request === "@revelai/domain") return process.env.REVELAI_CHILD_DOMAIN_MODULE;
-            try {
-              return originalResolveFilename.call(this, request, parent, isMain, options);
-            } catch (error) {
-              if (typeof request === "string" && request.startsWith(".") && request.endsWith(".js")) {
-                return originalResolveFilename.call(this, request.slice(0, -3) + ".ts", parent, isMain, options);
-              }
-              throw error;
+            if (process.env.REVELAI_CHILD_EXIT_BEFORE_READY === "1") {
+              process.exitCode = 1;
+            } else {
+              process.on("SIGTERM", () => undefined);
+              process.stdout.write("REVELAI_CHILD_DATABASE_READY\\n");
+              setInterval(() => undefined, 1_000);
             }
-          };
-          require.extensions[".ts"] = function (module, moduleFilename) {
-            const output = ts.transpileModule(fs.readFileSync(moduleFilename, "utf8"), {
-              compilerOptions: {
-                target: ts.ScriptTarget.ES2022,
-                module: ts.ModuleKind.CommonJS,
-                moduleResolution: ts.ModuleResolutionKind.NodeNext,
-                esModuleInterop: true,
-              },
-              fileName: moduleFilename,
-            }).outputText;
-            module._compile(output, moduleFilename);
-          };
-          try {
-            const { openSqliteDatabase } = require(process.env.REVELAI_CHILD_DATABASE_MODULE);
-            const database = openSqliteDatabase(process.env.REVELAI_CHILD_FILENAME);
-            const result = {
-              userVersion: database.raw.pragma("user_version", { simple: true }),
-              migrationCount: database.raw.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
+          } else {
+            const fs = require("node:fs");
+            const Module = require("node:module");
+            const ts = require("typescript");
+            const originalResolveFilename = Module._resolveFilename;
+            Module._resolveFilename = function (request, parent, isMain, options) {
+              if (request === "@revelai/contracts") return process.env.REVELAI_CHILD_CONTRACTS_MODULE;
+              if (request === "@revelai/domain") return process.env.REVELAI_CHILD_DOMAIN_MODULE;
+              try {
+                return originalResolveFilename.call(this, request, parent, isMain, options);
+              } catch (error) {
+                if (typeof request === "string" && request.startsWith(".") && request.endsWith(".js")) {
+                  return originalResolveFilename.call(this, request.slice(0, -3) + ".ts", parent, isMain, options);
+                }
+                throw error;
+              }
             };
-            database.close();
-            process.stdout.write(JSON.stringify(result));
-          } catch (error) {
-            process.stderr.write(error instanceof Error ? error.stack ?? error.message : String(error));
-            process.exitCode = 1;
-          }
+            require.extensions[".ts"] = function (module, moduleFilename) {
+              const output = ts.transpileModule(fs.readFileSync(moduleFilename, "utf8"), {
+                compilerOptions: {
+                  target: ts.ScriptTarget.ES2022,
+                  module: ts.ModuleKind.CommonJS,
+                  moduleResolution: ts.ModuleResolutionKind.NodeNext,
+                  esModuleInterop: true,
+                },
+                fileName: moduleFilename,
+              }).outputText;
+              module._compile(output, moduleFilename);
+            };
+            try {
+              const { openSqliteDatabase } = require(process.env.REVELAI_CHILD_DATABASE_MODULE);
+              const database = openSqliteDatabase(process.env.REVELAI_CHILD_FILENAME);
+              const result = {
+                userVersion: database.raw.pragma("user_version", { simple: true }),
+                migrationCount: database.raw.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
+              };
+              database.close();
+              process.stdout.write(JSON.stringify(result));
+            } catch (error) {
+              process.stderr.write(error instanceof Error ? error.stack ?? error.message : String(error));
+              process.exitCode = 1;
+            }
           }
         `,
       ],
@@ -644,6 +678,9 @@ function openDatabaseInChild(
           ...(options.forceHang === true
             ? { REVELAI_CHILD_FORCE_HANG: "1" }
             : {}),
+          ...(options.exitBeforeReady === true
+            ? { REVELAI_CHILD_EXIT_BEFORE_READY: "1" }
+            : {}),
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -652,9 +689,7 @@ function openDatabaseInChild(
     const stderr: Buffer[] = [];
     let settled = false;
     let timedOut = false;
-    let ready = false;
     let readinessOutput = "";
-    let timeout: ReturnType<typeof setTimeout> | undefined;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const settle = (callback: () => void) => {
       if (settled) return;
@@ -674,16 +709,18 @@ function openDatabaseInChild(
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdout.push(chunk);
-      if (ready || options.onReady === undefined) return;
+      if (readinessSettled || readiness === undefined) return;
       readinessOutput += chunk.toString("utf8");
       if (!readinessOutput.includes(migrationChildReadyMarker)) return;
-      ready = true;
-      options.onReady();
+      resolveReady();
     });
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.once("error", (error) => {
       if (timedOut) rejectTimeout();
-      else settle(() => reject(error));
+      else {
+        rejectReady(error);
+        settle(() => reject(error));
+      }
     });
     child.once("close", (exitCode, signal) => {
       if (timedOut) {
@@ -691,13 +728,17 @@ function openDatabaseInChild(
         return;
       }
       if (exitCode !== 0) {
-        settle(() =>
-          reject(
-            new Error(
-              `Database child exited ${exitCode}: ${Buffer.concat(stderr).toString("utf8")}`,
-            ),
-          ),
+        const error = new Error(
+          `Database child exited ${exitCode}: ${Buffer.concat(stderr).toString("utf8")}`,
         );
+        rejectReady(error);
+        settle(() => reject(error));
+        return;
+      }
+      if (readiness !== undefined && readinessSettled === false) {
+        const error = new Error("Database child closed before readiness");
+        rejectReady(error);
+        settle(() => reject(error));
         return;
       }
       try {
@@ -713,7 +754,7 @@ function openDatabaseInChild(
         settle(() => reject(error));
       }
     });
-    timeout = setTimeout(() => {
+    const timeout = setTimeout(() => {
       timedOut = true;
       try {
         child.kill("SIGTERM");
@@ -731,6 +772,10 @@ function openDatabaseInChild(
       }, migrationChildTerminationGraceMs);
     }, timeoutMs);
   });
+
+  if (readiness === undefined) return startup;
+  void startup.catch(rejectReady);
+  return Object.assign(startup, { ready: readiness });
 }
 
 function rankedOutcome(
@@ -4692,24 +4737,53 @@ describe("SQLiteAttemptRepository", () => {
     expect(await durableStartupStateForTest(filename)).toEqual(before);
   });
 
-  it("terminates a stalled migration child startup", async () => {
+  itOnPosix("terminates a stalled migration child startup", async () => {
     const filename = join(fixture.directory, "migration-child-timeout.sqlite");
-    let resolveReady!: () => void;
-    const ready = new Promise<void>((resolve) => {
-      resolveReady = resolve;
-    });
     const startup = openDatabaseInChild(filename, {
       forceHang: true,
-      onReady: resolveReady,
       timeoutMs: 250,
     });
-    void startup.catch(() => undefined);
+    const ready = startup.ready;
+    if (ready === undefined) throw new Error("Expected child readiness.");
 
     await expect(ready).resolves.toBeUndefined();
     await expect(startup).rejects.toMatchObject({
       message: migrationChildStartupTimeoutError,
       signal: "SIGKILL",
     });
+  });
+
+  it("rejects readiness when a migration child closes before its marker", async () => {
+    const startup = openDatabaseInChild(
+      join(fixture.directory, "migration-child-early-close.sqlite"),
+      { exitBeforeReady: true, forceHang: true },
+    );
+    const ready = startup.ready;
+    if (ready === undefined) throw new Error("Expected child readiness.");
+
+    await expect(ready).rejects.toThrow("Database child exited 1");
+    await expect(startup).rejects.toThrow("Database child exited 1");
+  });
+
+  itOnPosix("settles concurrent stalled migration child startups", async () => {
+    const startups = Array.from({ length: 8 }, (_, index) =>
+      openDatabaseInChild(
+        join(fixture.directory, `migration-child-timeout-${index}.sqlite`),
+        { forceHang: true, timeoutMs: 250 },
+      ),
+    );
+
+    await Promise.all(
+      startups.map(async (startup) => {
+        const ready = startup.ready;
+        if (ready === undefined) throw new Error("Expected child readiness.");
+        await expect(ready).resolves.toBeUndefined();
+        await expect(startup).rejects.toMatchObject({
+          message: migrationChildStartupTimeoutError,
+          signal: "SIGKILL",
+        });
+      }),
+    );
   });
 
   // This covers six rounds of four child Node/TypeScript migration startups.
