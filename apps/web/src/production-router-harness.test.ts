@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "vite";
+import { waitFor } from "@testing-library/react";
 import {
   afterAll,
   beforeAll,
@@ -57,6 +58,9 @@ let harness: ProductionHarness;
 let outputDirectory: string;
 let restoreDomGlobals: (() => void) | undefined;
 let activeUnmount: (() => void) | undefined;
+let activeHost: HTMLElement | undefined;
+
+const routerRenderTimeoutMs = 1_000;
 
 function installDomGlobals(window: Window) {
   const keys = [
@@ -119,8 +123,11 @@ function isEntrypointChunk(value: unknown): value is EntrypointChunk {
   );
 }
 
-async function settleRender() {
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+async function waitForHarnessRender(host: HTMLElement, assertion: () => void) {
+  await waitFor(assertion, {
+    container: host,
+    timeout: routerRenderTimeoutMs,
+  });
 }
 
 async function buildWithProductionEnvironment() {
@@ -167,13 +174,21 @@ async function mountAt(path: string, port: ReviewSetupPort) {
   dom.window.history.replaceState({}, "", path);
   const host = dom.window.document.createElement("div");
   dom.window.document.body.replaceChildren(host);
+  activeHost = host;
   activeUnmount = harness.mountProductionApp(host, port);
-  await settleRender();
   return host;
 }
 
+async function waitForHomeRoute(host: HTMLElement) {
+  await waitForHarnessRender(host, () => {
+    expect(host.querySelector("h1#home-heading")).toHaveTextContent(
+      "Treine. Grave. Evolua.",
+    );
+  });
+}
+
 function expectUnavailableBoundary(
-  host: Element,
+  host: HTMLElement,
   port: ReturnType<typeof fakeReviewPort>,
 ) {
   expect(host.textContent).toContain("Indisponível");
@@ -190,6 +205,15 @@ function expectUnavailableBoundary(
       }
     ).__revelaiReviewSetupModuleEvaluations,
   ).toBeUndefined();
+}
+
+async function waitForUnavailableBoundary(
+  host: HTMLElement,
+  port: ReturnType<typeof fakeReviewPort>,
+) {
+  await waitForHarnessRender(host, () => {
+    expectUnavailableBoundary(host, port);
+  });
 }
 
 describe("transformed production router harness", () => {
@@ -231,6 +255,7 @@ describe("transformed production router harness", () => {
   beforeEach(() => {
     activeUnmount?.();
     activeUnmount = undefined;
+    activeHost = undefined;
     fetchSpy.mockReset();
     vi.stubGlobal("fetch", fetchSpy);
     Reflect.deleteProperty(dom.window, "__revelaiReviewSetupModuleEvaluations");
@@ -238,7 +263,11 @@ describe("transformed production router harness", () => {
 
   afterAll(async () => {
     activeUnmount?.();
-    await settleRender();
+    if (activeHost) {
+      await waitForHarnessRender(activeHost, () => {
+        expect(activeHost).toBeEmptyDOMElement();
+      });
+    }
     vi.unstubAllGlobals();
     restoreDomGlobals?.();
     dom.window.close();
@@ -253,7 +282,7 @@ describe("transformed production router harness", () => {
       const port = fakeReviewPort();
       const host = await mountAt(path, port);
 
-      expectUnavailableBoundary(host, port);
+      await waitForUnavailableBoundary(host, port);
       expect(fetchSpy).not.toHaveBeenCalled();
     },
   );
@@ -263,12 +292,12 @@ describe("transformed production router harness", () => {
     async (path) => {
       const port = fakeReviewPort();
       const host = await mountAt("/", port);
+      await waitForHomeRoute(host);
 
       dom.window.history.pushState({}, "", path);
       dom.window.dispatchEvent(new dom.window.PopStateEvent("popstate"));
-      await settleRender();
 
-      expectUnavailableBoundary(host, port);
+      await waitForUnavailableBoundary(host, port);
       expect(fetchSpy).not.toHaveBeenCalled();
     },
   );
