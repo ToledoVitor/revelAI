@@ -260,3 +260,48 @@ Required fidelity surfaces inspected across those comparisons: Bebas/Arimo typog
 I reviewed the staged functional diff, preserved every W0 home budget, and used no screenshot/runtime artwork, invented visual assets, or non-Phosphor icons. Owner ordering remains unchanged: selecting a challenge has no calibration/attempt side effect until `Preparar desafio` mounts the next owner. Free/demo/ranked truth boundaries are retained.
 
 Concerns are limited and explicit: this macOS host lacks FFmpeg, so it cannot produce a local normal-runtime green result; CI provisioning is present but its hosted run is pending. Canonical comparison remains Linux/x64-only and is intentionally unchanged. Final independent Sol acceptance is pending. Deferred reviewer P3 cleanup (duplicate/superseded CSS/tracer seams and historical report-table style cleanup) was not changed in this round.
+
+## Round-2 reviewer remediation — 2026-09-02
+
+Review base: `c63dada1d066a572f76d1c803dc3b7ecd0140438`. Functional/test work is committed separately as `726ffc6`, before this evidence update. This is not an acceptance verdict: it corrects the record so V02–V06 and every P0/P1/P2 disposition remain pending independent Sol acceptance.
+
+### Implemented fixes
+
+- V02 now has the mobile verified header treatment, visible back control, selected wall-pass composition, and tightened heading/card/CTA rhythm. The selected-card requirements retain the real `3 metros` value and Phosphor icon; upcoming rows remain native disabled buttons.
+- V03 keeps the real five-gate calibration state but now has a source-relative compact one-line heading, full-width approved runtime hero crop, correction rows, truthful blocker, and four real controls inside `390×844` at `scrollY=0`.
+- V04 keeps the actual camera when available and the approved runtime hero only as fallback; its compact rail, heading, preview and accessible record/file actions match the selected hierarchy. The native file input is `tabIndex={-1}` and `aria-hidden="true"`; it is opened only by the visible named button, and the next Tab reaches the visible requirements disclosure.
+- The static W6 policy adds source-relative landmark rectangles for V02 heading/card/CTA, V03 heading/visual/actions, and V04 heading/preview/actions. W0 masks and budgets are unchanged. The stale node-harness wording now correctly says non-home budgets are enforced.
+- Desktop navigation is preserved. The verified navigation is only visually suppressed at the mobile reference breakpoint; the named back control supplies the V02 mobile return affordance.
+
+### Fresh artifact evidence and measured bounds
+
+The final `CI=1` approved-reference matrix regenerated and I inspected the normalized reference, candidate, 50% overlay, and complete diff for home plus V02–V06. Each verified comparison is full-screen and unmasked.
+
+| State | Artifact stem | Measured mismatch / stored cap | Key source-relative bounds at 390×844 |
+| --- | --- | ---: | --- |
+| V02 | `verified-challenge-default--390x844--dpr-2--verified--challenge-choice` | **21.153% / 25.0%** | heading `27.30–129.12 × 114.19–359.15`; card `27.30–362.70 × 462.39–581.22`; CTA `27.30–362.70 × 755.94–807.13` |
+| V03 | `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` | **29.236% / 40.0%** | heading `27.30–282.19 × 125.17–173.05`; visual `0–390 × 236.75–454.34`; actions `27.30–362.69 × 741.08–816.25` |
+| V04 | `verified-record-default--390x844--dpr-2--verified--recording-capture` | **33.437% / 36.0%** | heading `27.30–295.61 × 137.52–261.42`; preview `27.30–362.69 × 317.42–565.42`; actions `27.30–362.69 × 625.42–727.02` |
+| V05 | `verified-processing-demo--390x844--dpr-2--verified--processing-pending` | **24.992% / 30.0%** | manual refresh, truthful foreground copy, and semantic timeline visible; no notification promise/control |
+| V06 | `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report` | **16.670% / 20.0%** | persistent exact ranking truth, isolated ranked scorecard/metrics; demo and experimental arms omit rank fields structurally |
+
+The stored limits are independently specified source policy, not candidate-derived tolerances. `visual-harness.test.ts` proves both a position mutation (V02 heading below the allowed top) and a size mutation (V02 card right edge too narrow) fail `assertReferenceVisualLandmarkGeometry`; the existing missing/cropped/over-budget negative proofs remain in place.
+
+### Round-2 RED/GREEN commands
+
+| Phase | Exact command / output |
+| --- | --- |
+| RED | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts src/verified/production-capture.test.tsx --reporter=dot` initially failed: no `referenceGeometry` policy and focus landed on the clipped file input. |
+| RED | `rtk env CI=1 pnpm --filter @revelai/web exec playwright test src/visual/approved-reference.visual.spec.ts --project=mobile-home --reporter=line` — **1 failed, 1 passed** while each V02–V04 source-relative landmark correction was deliberately out of range. |
+| GREEN | `rtk pnpm --filter @revelai/web exec vitest run src/app.test.tsx src/visual/visual-harness.test.ts src/verified/production-capture.test.tsx --reporter=dot` — **3 files, 19 passed**. |
+| GREEN | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts src/verified/production-capture.test.tsx src/verified/tracer.test.tsx --reporter=dot` — **3 files, 60 passed**. |
+| GREEN | `rtk env CI=1 pnpm --filter @revelai/web exec playwright test src/visual/approved-reference.visual.spec.ts --reporter=line` — **2 passed, 2 skipped**. |
+| GREEN | `rtk env CI=1 pnpm --filter @revelai/web run test:visual:structural -- --reporter=line` — **26 passed, 14 skipped**; `rtk env CI=1 pnpm --filter @revelai/web run test:visual:darwin -- --reporter=line` — **30 passed, 10 skipped**. |
+| GREEN | `rtk pnpm check` — exit **0**: format; **7/7** lint; **12/12** typecheck; **12/12** test tasks; **7/7** build. |
+| GREEN | `rtk git diff --check` — exit **0** before `726ffc6`. |
+
+### Current acceptance and codec limit
+
+The browser assertions cover named controls, Tab/Enter/Space, visible focus, disabled/enabled/loading states, reduced motion, responsive bounds, and console/page errors at `390×844`; this is observed browser evidence, not a full WCAG certification. No screenshot, copied court art, invented asset, custom SVG art, or non-Phosphor icon was added.
+
+This machine still lacks FFmpeg, so the normal codec-backed C10 demo acceptance cannot produce a local green. The check-fact smoke remains separate and is not substituted. The codec-provisioned hosted CI normal-runtime run is **pending hosted green after controller push**. Canonical visual pixels remain Linux/x64-only. Final result remains pending independent Sol acceptance.
