@@ -49,15 +49,19 @@ export function createOwnedChildStop(
       child.on("error", ignoreChildError);
       child.once("close", closeChild);
 
-      if (child.exitCode !== null) return;
+      if (hasExited(child)) return;
       child.kill("SIGTERM");
-      if (closed || child.exitCode !== null) return;
+      if (closed || hasExited(child)) return;
 
       forceKill = schedule(() => {
-        if (!closed && child.exitCode === null) child.kill("SIGKILL");
+        if (!closed && !hasExited(child)) child.kill("SIGKILL");
       }, graceMilliseconds);
       forceKill?.unref?.();
     });
     return stopPromise;
   };
+}
+
+function hasExited(child) {
+  return child.exitCode !== null || child.signalCode != null;
 }

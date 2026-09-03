@@ -53,6 +53,28 @@ test("shares one concurrent teardown promise until owned resources settle", asyn
   await firstStop;
 });
 
+test("waits for close without KILL after TERM exits the owned child", async () => {
+  const child = new TermExitedOwnedChild();
+  const scheduled = [];
+  const stopChild = createOwnedChildStop(child, {
+    graceMilliseconds: 1,
+    schedule(callback) {
+      scheduled.push(callback);
+      return { unref() {} };
+    },
+    clear() {},
+  });
+
+  const stop = stopChild();
+  assert.deepEqual(child.signals, ["SIGTERM"]);
+
+  scheduled.shift()?.();
+  assert.deepEqual(child.signals, ["SIGTERM"]);
+
+  child.emit("close", null, "SIGTERM");
+  await stop;
+});
+
 class SimulatedOwnedChild extends EventEmitter {
   exitCode = null;
   signals = [];
@@ -65,6 +87,21 @@ class SimulatedOwnedChild extends EventEmitter {
     if (signal === "SIGKILL") {
       this.exitCode = 1;
       this.emit("close", 1);
+    }
+    return true;
+  }
+}
+
+class TermExitedOwnedChild extends EventEmitter {
+  exitCode = null;
+  signalCode = null;
+  signals = [];
+
+  kill(signal) {
+    this.signals.push(signal);
+    if (signal === "SIGTERM") {
+      this.signalCode = "SIGTERM";
+      this.emit("exit", null, "SIGTERM");
     }
     return true;
   }

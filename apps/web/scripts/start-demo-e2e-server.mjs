@@ -44,6 +44,12 @@ let stopOwnedApiProcess;
 let server;
 let scratch;
 const stop = createSharedStop(stopOwnedResources);
+let shutdownRequested = false;
+let signalExitScheduled = false;
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, requestShutdown);
+}
 
 try {
   await access(join(staticRoot, "index.html"));
@@ -60,17 +66,32 @@ try {
   });
 } catch {
   await stop();
-  console.error("RevelAI demo E2E server failed to start.");
-  process.exitCode = 1;
+  if (!shutdownRequested) {
+    removeShutdownHandlers();
+    console.error("RevelAI demo E2E server failed to start.");
+    process.exitCode = 1;
+  }
 }
 
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.once(signal, () => {
-    void stop().then(
-      () => process.exit(0),
-      () => process.exit(1),
-    );
-  });
+function requestShutdown() {
+  shutdownRequested = true;
+  void stop().then(
+    () => exitAfterShutdown(0),
+    () => exitAfterShutdown(1),
+  );
+}
+
+function exitAfterShutdown(exitCode) {
+  if (signalExitScheduled) return;
+  signalExitScheduled = true;
+  removeShutdownHandlers();
+  process.exit(exitCode);
+}
+
+function removeShutdownHandlers() {
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.off(signal, requestShutdown);
+  }
 }
 
 function startDemoApi(root) {

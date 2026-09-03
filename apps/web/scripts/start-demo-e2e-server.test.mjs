@@ -20,6 +20,10 @@ const pretryFailureChild = resolve(
   webRoot,
   "scripts/fixtures/demo-e2e-pretry-failure-child.mjs",
 );
+const delayedReadyChild = resolve(
+  webRoot,
+  "scripts/fixtures/demo-e2e-delayed-ready-child.mjs",
+);
 
 test(
   "rejects a foreign health response instead of treating it as the spawned API",
@@ -121,6 +125,55 @@ test("force-stops only its owned resistant child before returning demo ports", a
   }
 });
 
+test("keeps a startup SIGTERM inside owned teardown until both ports release", async () => {
+  await assertPortAvailable(apiPort);
+  await assertPortAvailable(webPort);
+  const wrapper = launchWrapper({
+    environment: { NODE_ENV: "test" },
+    testApiEntry: delayedReadyChild,
+  });
+  try {
+    await waitForApiHealth(wrapper);
+    assert.equal(await isWebHealthReady(), false);
+    wrapper.kill("SIGTERM");
+    const exitCode = await waitForClose(
+      wrapper,
+      ownedShutdownTimeoutMilliseconds,
+    );
+
+    assert.equal(exitCode, 0);
+    await assertPortAvailable(apiPort);
+    await assertPortAvailable(webPort);
+  } finally {
+    await stopOwnedWrapperGroup(wrapper);
+  }
+});
+
+test("shares repeated SIGTERM during child grace before returning demo ports", async () => {
+  await assertPortAvailable(apiPort);
+  await assertPortAvailable(webPort);
+  const wrapper = launchWrapper({
+    environment: { NODE_ENV: "test" },
+    testApiEntry: resistantChild,
+  });
+  try {
+    await waitForWrapperHealth(wrapper);
+    wrapper.kill("SIGTERM");
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 50));
+    wrapper.kill("SIGTERM");
+    const exitCode = await waitForClose(
+      wrapper,
+      ownedShutdownTimeoutMilliseconds,
+    );
+
+    assert.equal(exitCode, 0);
+    await assertPortAvailable(apiPort);
+    await assertPortAvailable(webPort);
+  } finally {
+    await stopOwnedWrapperGroup(wrapper);
+  }
+});
+
 async function withApiPortBlocker(kind, callback) {
   const blocker = createServer((_request, response) => {
     if (kind === "health") {
@@ -207,6 +260,35 @@ async function waitForWrapperHealth(child) {
     await new Promise((resolveTimer) => setTimeout(resolveTimer, 25));
   }
   throw new Error("Demo wrapper did not become ready within its test budget.");
+}
+
+async function isWebHealthReady() {
+  try {
+    const response = await fetch("http://127.0.0.1:4175/health", {
+      signal: AbortSignal.timeout(100),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForApiHealth(child) {
+  const deadline = Date.now() + wrapperTimeoutMilliseconds;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null)
+      throw new Error("Demo wrapper exited before its API became ready.");
+    try {
+      const response = await fetch("http://127.0.0.1:4174/health", {
+        signal: AbortSignal.timeout(100),
+      });
+      if (response.ok) return;
+    } catch {
+      // The owned API has not bound its port yet.
+    }
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 25));
+  }
+  throw new Error("Demo wrapper API did not bind within its test budget.");
 }
 
 async function stopWrapper(child) {
