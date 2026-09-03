@@ -9,8 +9,6 @@ let closing = false;
 if (!readyPath || !closedPath || !fixtureName)
   throw new Error("Test codec requires owned lifecycle marker paths.");
 
-await appendFile(readyPath, `${fixtureName}\n`);
-
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
     if (closing) return;
@@ -21,5 +19,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
     }, 300);
   });
 }
+
+await appendFile(readyPath, `${fixtureName}:handlers-ready\n`);
 
 setInterval(() => undefined, 1_000);

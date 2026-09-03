@@ -184,12 +184,16 @@ test("shares repeated SIGTERM during child grace before returning demo ports", a
   }
 });
 
-test("waits for cancelled fixture codecs before leaving startup", async () => {
+test("waits for handlers-armed fixture codecs before cancelling startup", async () => {
   const markers = await mkdtemp(join(tmpdir(), "revelai-demo-codec-test-"));
   const codecReady = join(markers, "codec-ready");
   const codecClosed = join(markers, "codec-closed");
   const apiStarted = join(markers, "api-started");
   const expectedCodecNames = new Set([
+    "free-portrait.mp4:handlers-ready",
+    "verified-landscape.mp4:handlers-ready",
+  ]);
+  const expectedClosedCodecNames = new Set([
     "free-portrait.mp4",
     "verified-landscape.mp4",
   ]);
@@ -226,7 +230,7 @@ test("waits for cancelled fixture codecs before leaving startup", async () => {
     assert.equal(closed.length, 2);
     assert.deepEqual(
       new Set(closed.map((entry) => entry.name)),
-      expectedCodecNames,
+      expectedClosedCodecNames,
     );
     assert.ok(closed.every((entry) => Number.isFinite(entry.time)));
     assert.ok(closed.every((entry) => entry.time <= closure.closedAt));
