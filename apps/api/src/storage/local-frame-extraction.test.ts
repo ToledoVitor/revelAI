@@ -42,9 +42,11 @@ const verifiedProbe: MediaProbe = {
   codec: "h264",
   sourceRotationDegrees: 90,
 };
-const portableFfmpegIntegrationTimeoutMilliseconds = 15_000;
 // Match the production runner's bounded TERM-to-KILL grace; cleanup awaits close.
 const testProcessTerminationGraceMilliseconds = 1_000;
+// C5's default process budget. The smoke's own deadline drains tracked children
+// before it completes; Vitest's non-cancelling timeout is disabled for that test.
+const portableFfmpegProcessDeadlineMilliseconds = 30_000;
 
 type TrackedProcess = Readonly<{
   terminate: () => Promise<void>;
@@ -317,6 +319,34 @@ describe("LocalFrameExtraction", () => {
     await expect(
       rm(root, { recursive: true, force: true }),
     ).resolves.toBeUndefined();
+  });
+
+  it("drains a deadline-expired smoke child before root cleanup", async () => {
+    const root = await setupRoot(roots);
+    const tracker = createProcessTracker();
+    const child = new ControlledChildProcess();
+    const deadline = runWithinTrackedProcessDeadline(
+      () => runProcess("controlled-child", [], tracker, () => child),
+      tracker,
+      1,
+    );
+
+    await child.waitForSignal("SIGTERM");
+    expect(child.receivedSignals).toEqual(["SIGTERM"]);
+    expect(tracker.size()).toBe(1);
+    const removal = deadline
+      .catch((error: unknown) => {
+        expect(error).toMatchObject({
+          message: "portable FFmpeg smoke exceeded the owned process deadline",
+        });
+      })
+      .then(async () => {
+        expect(tracker.size()).toBe(0);
+        await rm(root, { recursive: true, force: true });
+      });
+
+    child.emitClose(1);
+    await removal;
   });
 
   it("does not spawn a continuation successor while its test generation is closing", async () => {
@@ -763,87 +793,135 @@ describe("LocalFrameExtraction", () => {
 
   it(
     "smokes the owned argv against an explicit portable FFmpeg extraction capability",
-    async (context) => {
-      if (
-        !(await ffmpegHasPortableExtractionCapability(
-          "ffmpeg",
-          testGenerationTracker,
-        ))
-      )
-        return context.skip();
-      const root = await setupRoot(roots);
-      const staged = join(root, "temporary", `${mediaId}.uploading`);
-      const generated = await runProcess(
-        "ffmpeg",
-        [
-          "-nostdin",
-          "-y",
-          "-f",
-          "lavfi",
-          "-i",
-          "color=c=black:s=1280x720:r=10:d=64",
-          "-c:v",
-          "mpeg4",
-          "-pix_fmt",
-          "yuv420p",
-          "-f",
-          "mp4",
-          staged,
-        ],
-        testGenerationTracker,
-      );
-      expect(generated.exitCode).toBe(0);
-      const generatedSourceSha256 = createHash("sha256")
-        .update(await readFile(staged))
-        .digest("hex");
-      const extractor = createLocalFrameExtraction({
-        root,
-        ids: { next: () => batchId },
-        runner: {
-          run: async (command) => {
-            const result = await runProcess(
-              command.executable,
-              command.arguments,
+    async (context) =>
+      runWithinTrackedProcessDeadline(
+        async () => {
+          if (
+            !(await ffmpegHasPortableExtractionCapability(
+              "ffmpeg",
               testGenerationTracker,
-            );
-            return {
-              exitCode: result.exitCode,
-              termination: "completed" as const,
-              stdout: result.stdout,
-              stderr: result.stderr,
-            };
-          },
-        },
-        retention: { schedule: async () => ({ kind: "created" as const }) },
-      });
+            ))
+          )
+            return context.skip();
+          const root = await setupRoot(roots);
+          const staged = join(root, "temporary", `${mediaId}.uploading`);
+          const generated = await runProcess(
+            "ffmpeg",
+            [
+              "-nostdin",
+              "-y",
+              "-f",
+              "lavfi",
+              "-i",
+              "color=c=black:s=480x480:r=12:d=4.05",
+              "-c:v",
+              "mpeg4",
+              "-pix_fmt",
+              "yuv420p",
+              "-f",
+              "mp4",
+              staged,
+            ],
+            testGenerationTracker,
+          );
+          expect(generated.exitCode).toBe(0);
+          const generatedSourceSha256 = createHash("sha256")
+            .update(await readFile(staged))
+            .digest("hex");
+          const extractor = createLocalFrameExtraction({
+            root,
+            ids: { next: () => batchId },
+            runner: {
+              run: async (command) => {
+                expect(command.timeoutMilliseconds).toBe(
+                  portableFfmpegProcessDeadlineMilliseconds,
+                );
+                const filter = command.arguments.indexOf("-filter_complex");
+                expect(command.arguments.slice(filter, filter + 10)).toEqual([
+                  "-filter_complex",
+                  "[0:v]fps=10,split=2[decoded][active];[decoded]showinfo[frames];[active]select='gte(t,4)*lt(t,64)*gte(scene,0)',metadata=print:file=-[scene]",
+                  "-map",
+                  "[frames]",
+                  "-vsync",
+                  "0",
+                  "-start_number",
+                  "0",
+                  "-y",
+                  "-c:v",
+                ]);
+                const output = join(
+                  command.outputDirectory,
+                  "decoded-%06d.jpg",
+                );
+                const outputIndex = command.arguments.indexOf(output);
+                expect(
+                  command.arguments.slice(outputIndex - 5, outputIndex),
+                ).toEqual([
+                  "-c:v",
+                  "mjpeg",
+                  "-pix_fmt",
+                  "yuvj420p",
+                  "-bitexact",
+                ]);
+                expect(command.arguments.slice(outputIndex + 1)).toEqual([
+                  "-map",
+                  "[scene]",
+                  "-f",
+                  "null",
+                  "-",
+                ]);
+                const result = await runProcess(
+                  command.executable,
+                  command.arguments,
+                  testGenerationTracker,
+                );
+                return {
+                  exitCode: result.exitCode,
+                  termination: "completed" as const,
+                  stdout: result.stdout,
+                  stderr: result.stderr,
+                };
+              },
+            },
+            retention: {
+              schedule: async () => ({ kind: "created" as const }),
+            },
+          });
 
-      await expect(
-        extractor.extract({
-          mode: "verified",
-          attemptId,
-          generation: 1,
-          mediaId,
-          mediaSha256: generatedSourceSha256,
-          probe: { ...verifiedProbe, sourceRotationDegrees: 0 },
-          uploadedAt: "2030-01-15T12:00:00.000Z",
-          source: "staged",
-          authority: verifiedFrameAuthority,
-        }),
-      ).resolves.toMatchObject({
-        frames: { count: 640 },
-        preRoll: { count: 40 },
-        active: { count: 600 },
-      });
-      expect(
-        (await readFile(join(root, "frames", batchId, "frame-0000.jpg")))
-          .length,
-      ).toBeGreaterThan(0);
-      expect(
-        (await readFile(join(root, "frames", batchId, "frame-0639.jpg")))
-          .length,
-      ).toBeGreaterThan(0);
-    },
-    portableFfmpegIntegrationTimeoutMilliseconds,
+          await expect(
+            extractor.extract({
+              mode: "free",
+              attemptId,
+              generation: 1,
+              mediaId,
+              mediaSha256: generatedSourceSha256,
+              probe: {
+                ...verifiedProbe,
+                durationSeconds: 4.05,
+                displayWidth: 480,
+                displayHeight: 480,
+                nominalFps: 12,
+                codec: "mpeg4",
+                sourceRotationDegrees: 0,
+              },
+              uploadedAt: "2030-01-15T12:00:00.000Z",
+              source: "staged",
+              authority: frameAuthority,
+            }),
+          ).resolves.toMatchObject({ frames: { count: 12 } });
+          expect(
+            (await readFile(join(root, "frames", batchId, "frame-0000.jpg")))
+              .length,
+          ).toBeGreaterThan(0);
+          expect(
+            (await readFile(join(root, "frames", batchId, "frame-0011.jpg")))
+              .length,
+          ).toBeGreaterThan(0);
+        },
+        testGenerationTracker,
+        portableFfmpegProcessDeadlineMilliseconds,
+      ),
+    0,
   );
 });
 
@@ -1183,6 +1261,30 @@ class ControlledChildProcess extends EventEmitter {
     this.emit("close", exitCode);
     this.stdout.end();
     this.stderr.end();
+  }
+}
+
+async function runWithinTrackedProcessDeadline<T>(
+  operation: () => Promise<T>,
+  tracker: ProcessTracker,
+  timeoutMilliseconds: number,
+): Promise<T> {
+  let deadlineExceeded = false;
+  const deadline = setTimeout(() => {
+    deadlineExceeded = true;
+    void tracker.closeAndDrain();
+  }, timeoutMilliseconds);
+  deadline.unref();
+  try {
+    const result = await operation();
+    if (deadlineExceeded)
+      throw new Error(
+        "portable FFmpeg smoke exceeded the owned process deadline",
+      );
+    return result;
+  } finally {
+    clearTimeout(deadline);
+    await tracker.closeAndDrain();
   }
 }
 
