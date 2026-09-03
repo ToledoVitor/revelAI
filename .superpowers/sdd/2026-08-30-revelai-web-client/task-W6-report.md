@@ -519,3 +519,27 @@ The prior report's statement that the owned-child grace waited safely for close 
 The smoke still proves local lifecycle ownership and browser ordering, not normal codec-backed C10 terminal acceptance. Native Linux/x64 codec/canonical gates and independent Sol acceptance remain pending.
 
 final result: pending independent Sol acceptance.
+
+## Sol round-5 fixture admission and cancellation correction — 2026-09-03
+
+Functional/test commit: `c2816a6` (`fix(web): own demo fixture startup lifecycle`). This changes no visible state, approved asset, W0 budget, reference artifact, or acceptance threshold.
+
+### Corrected startup ownership
+
+The prior lifecycle report did not include normal C10 fixture generation in its owned shutdown boundary. A signal while FFmpeg was active could settle the wrapper's old stop promise before the codec child and fixture continuation were accounted for. Fixture generation now owns an `AbortController`, passes its signal through each FFmpeg/FFprobe invocation, and uses the same owned TERM→KILL/close lifecycle as the API child. Shutdown first closes startup admission, aborts all active codecs, awaits the aggregate fixture generation, then removes media and scratch state.
+
+Fixture generation now uses `Promise.allSettled`, not a short-circuiting `Promise.all`: an initial codec failure is held until every already-admitted codec has closed. Every startup await is followed by an admission guard before API/Web creation; a scratch directory produced after shutdown is explicitly removed rather than admitted. The test-only codec seam remains restricted to `NODE_ENV=test` and the owned fixture directory.
+
+### RED/GREEN evidence
+
+| Phase | Exact command / observed result                                                                                                                                                                                                                                                                                                                                            |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| RED   | `rtk node --test apps/web/scripts/demo-media-fixtures.test.mjs` — **1 failed, 1 passed** before signal propagation: the injected owned codec received no abort signal. A second focused run — **1 failed** — showed `Promise.all` surfaced one fixture failure before the other admitted codec finished.                                                                   |
+| RED   | `rtk node --test --test-name-pattern='waits for cancelled fixture codecs' apps/web/scripts/start-demo-e2e-server.test.mjs` — **1 failed** before fixture admission/codec ownership: the wrapper exited before the controlled codec began.                                                                                                                                  |
+| GREEN | `rtk node --test apps/web/scripts/demo-media-fixtures.test.mjs apps/web/scripts/owned-child-lifecycle.test.mjs apps/web/scripts/start-demo-e2e-server.test.mjs` — **15/15 passed**. The controlled normal-runtime fixture signal records two codec closes before wrapper close, records no API-start marker, removes the media directory, and permits 4174/4175 rebinding. |
+| GREEN | `rtk pnpm --filter @revelai/web run test:demo:e2e:smoke` — build, Node suite **15/15**, browser traces **2/2**.                                                                                                                                                                                                                                                            |
+| GREEN | `rtk pnpm --filter @revelai/web run lint`; `rtk pnpm --filter @revelai/web run typecheck`; focused Prettier check; and `rtk git diff --check` — all exit **0**.                                                                                                                                                                                                            |
+
+The controlled codec test is lifecycle evidence only; it neither substitutes test codec data for C10 acceptance nor changes the hosted normal-codec/Linux-x64 gate. Independent Sol acceptance remains pending.
+
+final result: pending independent Sol acceptance.

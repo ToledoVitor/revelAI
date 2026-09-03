@@ -289,3 +289,9 @@ final result: pending independent Sol acceptance.
 Functional commit `259fd4e` changes no visual artifact or accepted visual policy. The wrapper installs persistent SIGINT/SIGTERM handlers before startup awaits, so a signal before API readiness and a repeated SIGTERM during the owned child's TERM grace share the same cleanup and leave 4174/4175 rebindable after wrapper close. The child lifecycle also recognizes a non-null `signalCode` while awaiting `close`, so an already TERM-exited child never receives an unnecessary SIGKILL. The lifecycle/wrapper suite passes **11/11** and browser smoke **2/2**. Hosted normal-codec and canonical evidence remain pending.
 
 final result: pending independent Sol acceptance.
+
+## Sol round-5 fixture lifecycle correction — 2026-09-03
+
+Functional commit `c2816a6` changes no visual artifact or visual gate. Normal fixture generation is now an owned cancellable startup resource: a signal closes admission, waits for every already-admitted codec to close, prevents API/Web continuation, and removes fixture media. The controlled integration records both codec closes before wrapper close, no API-start marker, absent temporary media directory, and rebindable 4174/4175; the Node suite passes **15/15** and browser smoke **2/2**. Normal hosted codec and canonical evidence remain pending.
+
+final result: pending independent Sol acceptance.
