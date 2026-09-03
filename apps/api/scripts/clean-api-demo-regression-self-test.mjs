@@ -6,9 +6,11 @@ const script = fileURLToPath(
 );
 const MAX_OUTPUT_BYTES = 32 * 1024;
 const DEFAULT_MODE_TIMEOUT_MS = 120_000;
-const TERMINATION_GRACE_MS = 750;
+const CLEANUP_DEADLINE_MS = 10_000;
+const CLOSE_AFTER_CLEANUP_MS = 1_000;
 const FAILURE = "Clean API executable self-test failed.";
 const readinessPrefix = "REVELAI_EXECUTABLE_READY ";
+const cleanupCompletePrefix = "REVELAI_EXECUTABLE_CLEANUP_COMPLETE ";
 const sessionArgumentPrefix = "--revelai-clean-api-session=";
 const session = parseSession(process.argv.slice(2));
 const modeTimeoutMs = configuredTimeoutMs(
@@ -88,7 +90,10 @@ function run(mode) {
       settled: false,
       timedOut: false,
       timeout: undefined,
+      cleanupAcknowledged: false,
       killTimer: undefined,
+      cleanupDeadline: undefined,
+      terminating: false,
       resolveClosed: undefined,
     };
     record.closed = new Promise((resolveClosed) => {
@@ -102,6 +107,7 @@ function run(mode) {
       activeChildren.delete(record);
       clearTimeout(record.timeout);
       clearTimeout(record.killTimer);
+      clearTimeout(record.cleanupDeadline);
       record.resolveClosed();
       callback();
     };
@@ -119,6 +125,10 @@ function run(mode) {
         if (newline === -1) break;
         const line = readinessOutput.slice(0, newline);
         readinessOutput = readinessOutput.slice(newline + 1);
+        if (line === `${cleanupCompletePrefix}${child.pid}`) {
+          acknowledgeCleanup(record);
+          continue;
+        }
         if (/^REVELAI_EXECUTABLE_READY [^ ]+ [1-9][0-9]*$/.test(line)) {
           console.log(line);
         }
@@ -178,11 +188,23 @@ function assertCanStart() {
 }
 
 function terminate(record) {
-  if (record.settled || record.killTimer !== undefined) return;
+  if (record.settled || record.terminating) return;
+  record.terminating = true;
   sendSignal(record.child, "SIGTERM");
+  record.cleanupDeadline = setTimeout(() => {
+    if (record.settled === false) sendSignal(record.child, "SIGKILL");
+  }, CLEANUP_DEADLINE_MS);
+}
+
+function acknowledgeCleanup(record) {
+  if (record.settled || !record.terminating || record.cleanupAcknowledged) {
+    return;
+  }
+  record.cleanupAcknowledged = true;
+  clearTimeout(record.cleanupDeadline);
   record.killTimer = setTimeout(() => {
     if (record.settled === false) sendSignal(record.child, "SIGKILL");
-  }, TERMINATION_GRACE_MS);
+  }, CLOSE_AFTER_CLEANUP_MS);
 }
 
 function sendSignal(child, signal) {

@@ -52,6 +52,16 @@ for (const scenario of scenariosFor(probeScenario)) {
 console.log("Clean API executable cancellation probe passed.");
 
 function scenariosFor(value) {
+  if (value === "timeout") {
+    return [
+      {
+        name: value,
+        readiness: "inner:before-case:demo",
+        environment: { CLEAN_API_EXECUTABLE_SELF_TEST_TIMEOUT_MS: "5000" },
+      },
+    ];
+  }
+
   if (value === "outer-before-main") {
     return [
       {
@@ -670,6 +680,7 @@ function configuredProbeScenario(value) {
     ![
       "outer-before-main",
       "collector-after-inner-ready",
+      "timeout",
       "uncooperative-close-false",
     ].includes(value)
   ) {

@@ -63,6 +63,7 @@ const foreign = spawn(process.execPath, foreignArguments, {
 const foreignClose = observeClose(foreign);
 
 try {
+  await assertTimeoutScenarioCleansItsFixture();
   await assertOrderedCleanupFault({
     scenario: "collector-after-inner-ready",
     marker: "REVELAI_EXECUTABLE_PROBE_READY collector-after-inner-ready",
@@ -132,6 +133,24 @@ async function assertOrderedCleanupFault({ scenario, marker }) {
   await assertNoSessionProcesses(session);
   assertActive(foreign.pid);
   await assertExists(foreignFixture);
+}
+
+async function assertTimeoutScenarioCleansItsFixture() {
+  const session = sessionToken();
+  const result = await runProbe({
+    CLEAN_API_EXECUTABLE_TEST_PROBE_SCENARIO: "timeout",
+    CLEAN_API_EXECUTABLE_TEST_SESSION: session,
+  });
+
+  if (
+    result.kind !== "close" ||
+    result.exitCode !== 0 ||
+    !result.output.includes("Clean API executable cancellation probe passed.")
+  ) {
+    throw new Error(failure);
+  }
+  await assertNoSessionFixtures(session);
+  await assertNoSessionProcesses(session);
 }
 
 async function assertProcessTableKillReceipt(session) {

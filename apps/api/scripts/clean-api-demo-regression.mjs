@@ -10,6 +10,7 @@ const TERMINATION_GRACE_MS = 250;
 const MAX_CAPTURED_OUTPUT_BYTES = 32 * 1024;
 const COMMAND_FAILURE = "Clean API executable regression command failed.";
 const readinessPrefix = "REVELAI_EXECUTABLE_READY ";
+const cleanupCompletePrefix = "REVELAI_EXECUTABLE_CLEANUP_COMPLETE ";
 const sessionArgumentPrefix = "--revelai-clean-api-session=";
 const invocation = parseInvocation(process.argv.slice(2));
 const fixturePrefix =
@@ -33,6 +34,7 @@ const boundaryRelease = new Promise((resolve) => {
 let mainOperation;
 let shutdown;
 let shuttingDown = false;
+let fixtureCleanupFailed = false;
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
@@ -156,6 +158,9 @@ async function runCleanCase(executableCase, options = {}) {
   } finally {
     try {
       await rm(fixture, { recursive: true, force: true });
+    } catch (error) {
+      fixtureCleanupFailed = true;
+      throw error;
     } finally {
       activeFixtures.delete(fixture);
     }
@@ -259,6 +264,9 @@ async function stopForSignal() {
     for (const record of records) terminate(record);
     await Promise.all(records.map((record) => record.closed));
     await mainOperation.catch(() => undefined);
+    if (!fixtureCleanupFailed && activeFixtures.size === 0) {
+      announceCleanupComplete();
+    }
     process.exitCode = 1;
   })();
   return shutdown;
@@ -280,6 +288,11 @@ async function pauseAtBoundary(name) {
 function announceReadiness(name) {
   if (process.env.CLEAN_API_EXECUTABLE_HANDSHAKE !== "1") return;
   console.log(`${readinessPrefix}${name} ${process.pid}`);
+}
+
+function announceCleanupComplete() {
+  if (process.env.CLEAN_API_EXECUTABLE_HANDSHAKE !== "1") return;
+  console.log(`${cleanupCompletePrefix}${process.pid}`);
 }
 
 function assertCanStart() {
