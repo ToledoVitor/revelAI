@@ -302,7 +302,7 @@ final result: pending independent Sol acceptance.
 
 ## Final W6 acceptance — 2026-09-03
 
-**Passed by independent Sol review.** Hosted workflow [33712809662](https://github.com/ToledoVitor/revelAI/actions/runs/33712809662) at `12318cb43a9669f67caa9eb462cbfd1f48a69f3d` passed `pnpm check`, production-router, the real-FFmpeg/C10 demo terminal, canonical Linux/x64 visual comparison, OpenAPI, and operability probes. The reported durations are **12m14s** for quality and **2m54s** for probes.
+**Status: DONE. Result: passed by independent Sol review.** Hosted workflow [33712809662](https://github.com/ToledoVitor/revelAI/actions/runs/33712809662) at `12318cb43a9669f67caa9eb462cbfd1f48a69f3d` passed every gate with exit 0: production-router **23/23**; real-FFmpeg/C10 demo E2E Node **18/18** plus browser **2/2**; canonical Linux/x64 visual **30 passed, 10 skipped**; focused API **23/23**; and operability **18/18**. The complete quality job took **12m14s** (with `pnpm check` at about **7m31s**); the complete clean-executable/operability job took **2m54s**.
 
 The approved truth rulings remain part of the accepted UI: V05 retains foreground/manual refresh and no closed-app notification promise; V06 retains the isolated ranked fixture and exact `Resultado validado — vale para ranking`, while Free/demo/experimental paths structurally omit rank fields. The documented approved-runtime hero/crop variance remains accepted evidence; no reference screenshot, invented asset, or false competitive claim was introduced.
 

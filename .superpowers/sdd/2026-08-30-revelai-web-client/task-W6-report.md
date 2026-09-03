@@ -2,9 +2,9 @@
 
 ## Status
 
-`DONE_WITH_CONCERNS`
+`DONE`
 
-The required browser/HTTP, contract-fixture, capture, structural, and CI wiring are implemented and verified. This was the initial record before pre-review remediation; the five historical P0 visual findings below are superseded by the closed remediation record appended on 2026-09-02. Final visual acceptance remains deliberately pending independent Sol review.
+The required browser/HTTP, contract-fixture, capture, structural, and CI wiring are implemented and verified. Independent Sol acceptance and every hosted gate are green; the final result is passed. The dated sections below preserve contemporaneous evidence: every `DONE_WITH_CONCERNS`, `pending`, or self-review statement is historical and superseded by this current status.
 
 ## Baseline and commits
 
@@ -25,7 +25,7 @@ The required browser/HTTP, contract-fixture, capture, structural, and CI wiring 
 | `apps/web/src/visual/ranked-policy-fixture.ts` and `.test.ts`       | Isolated schema-parsed competitive fixture for the positive ranked rendering capture; it performs no policy or ranking calculation.                                                               |
 | `apps/web/src/visual/approved-reference.visual.spec.ts`             | Deterministically drives and records the six mobile approved-reference states through the extended W0 artifact pipeline.                                                                          |
 | `apps/web/src/visual/visual-harness.ts`, `.node.ts`, and `.test.ts` | Registers route/state/reference metadata and writes normalized reference, candidate, 50% overlay, unmasked diff, and metadata for each W6 state. Existing W0 home budgets/masks remain unchanged. |
-| `apps/web/design-qa.md`                                             | Preserves W0 history and records the complete W6 inspection, findings, truth rulings, risks, and pending independent acceptance.                                                                  |
+| `apps/web/design-qa.md`                                             | Preserves W0 history and records the complete W6 inspection, findings, truth rulings, historical risks, and final independent acceptance.                                                         |
 
 ## Test-first evidence
 
@@ -94,17 +94,17 @@ At this initial capture, `apps/web/design-qa.md` deliberately ended with `final 
 - `rtk pnpm --filter @revelai/web run test:visual:canonical` exits **1** by design with `Canonical visual pixels require linux/x64.` No local canonical acceptance was manufactured.
 - The unchanged pinned CI canonical command uses `mcr.microsoft.com/playwright@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e`, `--platform linux/amd64`, and `--network none`, selecting `playwright-1.62.1-noble-linux-amd64`. The workflow now runs `pnpm --filter @revelai/web run test:demo:e2e` before it. Hosted CI owns final canonical pixels.
 
-## Self-review
+## Initial self-review — historical
 
 I manually reviewed the full W6 diff against the brief and repository conventions after the required `code-review` workflow was found to require subagents; the W6 brief explicitly prohibits subagents. The review found and fixed the only regression: demo-only specs were being collected by the normal visual suite. No destructive Git operation, broad staging, push, unapproved visual asset, API mock in a real-demo trace, altered W0 budget, or production review route was introduced.
 
-Remaining concerns are the five real P0 visual gaps, required independent Sol acceptance, hosted Linux/x64 canonical pixels, and the host's absent FFmpeg executable for a true codec-backed C10 media run.
+At this point, remaining concerns were the five real P0 visual gaps, required independent Sol acceptance, hosted Linux/x64 canonical pixels, and the host's absent FFmpeg executable for a true codec-backed C10 media run. The final hosted acceptance supersedes them.
 
 ## Remediation after pre-review — 2026-09-02
 
-### Status
+### Historical status
 
-`DONE_WITH_CONCERNS` — all pre-review actionable W6 P0/P1/P2 findings are remediated in the production Web owner. Independent Sol acceptance and hosted Linux/x64 canonical pixels remain intentionally pending. Remaining P3 evidence is limited to the approved runtime hero/crop and the required truthful removal of the source's closed-app notification promise.
+`DONE_WITH_CONCERNS` at this checkpoint — all pre-review actionable W6 P0/P1/P2 findings were remediated in the production Web owner. Independent Sol acceptance and hosted Linux/x64 canonical pixels were then pending. Remaining P3 evidence was limited to the approved runtime hero/crop and the required truthful removal of the source's closed-app notification promise.
 
 ### Additional commit
 
@@ -156,17 +156,17 @@ Fidelity surfaces reviewed in every row: Bebas/Arimo typography and wrapping; sp
 - `rtk pnpm check` — exit **0**: format, 7 lint tasks, 12 typecheck tasks, 12 test tasks, 7 build tasks successful; Web suite **27 files / 283 tests** passed, structural browser run **25 passed / 13 skipped**.
 - `rtk git diff --check` — exit 0 before functional commit.
 
-### Self-review and concerns
+### Historical self-review and concerns
 
-Manual review confirms that the new choice screen has no request-producing effect; the calibration session starts only after all true gates and the existing next owner boundary. Capture displays a real stream when available, falls back only to the approved asset, and retains accessible source/video controls. Pending makes no notification promise. Ranked presentation comes only from the existing isolated policy-approved fixture; demo and experimental DOM never contain ranking snapshot or top-percent fields.
+At this checkpoint, manual review confirmed that the new choice screen had no request-producing effect; the calibration session started only after all true gates and the existing next owner boundary. Capture displayed a real stream when available, fell back only to the approved asset, and retained accessible source/video controls. Pending made no notification promise. Ranked presentation came only from the existing isolated policy-approved fixture; demo and experimental DOM never contained ranking snapshot or top-percent fields.
 
-Do not mark `apps/web/design-qa.md` as passed: its final line remains `final result: pending independent Sol acceptance.` Concerns: final Sol review, hosted Linux/x64 canonical pixel gate, and the pre-existing lack of a host FFmpeg codec run remain external acceptance work; no functional P0/P1/P2 remains.
+At this checkpoint, `apps/web/design-qa.md` was not marked passed: its final line remained `final result: pending independent Sol acceptance.` Concerns were final Sol review, the hosted Linux/x64 canonical pixel gate, and the pre-existing lack of a host FFmpeg codec run; no functional P0/P1/P2 remained.
 
 ## Round-1 reviewer remediation — 2026-09-02
 
-### Status
+### Historical status
 
-`DONE_WITH_CONCERNS`. The code/test fixes for every round-1 Critical/Important finding are committed. The implementation is intentionally not self-accepted: hosted codec-backed browser acceptance, the unchanged Linux/x64 canonical visual gate, and independent Sol review remain pending.
+`DONE_WITH_CONCERNS` at this checkpoint. The code/test fixes for every round-1 Critical/Important finding were committed. The implementation was intentionally not self-accepted: hosted codec-backed browser acceptance, the unchanged Linux/x64 canonical visual gate, and independent Sol review were then pending.
 
 This section supersedes earlier statements that the local `test:demo:e2e` check-fact runtime was a real-media acceptance. It is now strictly a separate smoke path.
 
@@ -255,11 +255,11 @@ Required fidelity surfaces inspected across those comparisons: Bebas/Arimo typog
 | GREEN                   | Final `rtk pnpm check` — exit **0**: format; **7/7 lint**, **12/12 typecheck**, **12/12 test tasks**, **7/7 build**. Web recorded **12 Node checks**, **27 Vitest files / 286 tests**, and structural **26 passed / 14 skipped**. |
 | GREEN                   | `rtk git diff --check` — exit **0** before functional commit.                                                                                                                                                                     |
 
-### Self-review and concerns
+### Historical self-review and concerns
 
-I reviewed the staged functional diff, preserved every W0 home budget, and used no screenshot/runtime artwork, invented visual assets, or non-Phosphor icons. Owner ordering remains unchanged: selecting a challenge has no calibration/attempt side effect until `Preparar desafio` mounts the next owner. Free/demo/ranked truth boundaries are retained.
+At this checkpoint, I reviewed the staged functional diff, preserved every W0 home budget, and used no screenshot/runtime artwork, invented visual assets, or non-Phosphor icons. Owner ordering remained unchanged: selecting a challenge had no calibration/attempt side effect until `Preparar desafio` mounted the next owner. Free/demo/ranked truth boundaries were retained.
 
-Concerns are limited and explicit: this macOS host lacks FFmpeg, so it cannot produce a local normal-runtime green result; CI provisioning is present but its hosted run is pending. Canonical comparison remains Linux/x64-only and is intentionally unchanged. Final independent Sol acceptance is pending. Deferred reviewer P3 cleanup (duplicate/superseded CSS/tracer seams and historical report-table style cleanup) was not changed in this round.
+Concerns were limited and explicit: this macOS host lacks FFmpeg, so it could not produce a local normal-runtime green result; CI provisioning was present but its hosted run was pending. Canonical comparison remained Linux/x64-only and intentionally unchanged. Final independent Sol acceptance was pending. Deferred reviewer P3 cleanup (duplicate/superseded CSS/tracer seams and historical report-table style cleanup) was not changed in that round.
 
 ## Round-2 reviewer remediation — 2026-09-02
 
@@ -308,9 +308,9 @@ This machine still lacks FFmpeg, so the normal codec-backed C10 demo acceptance 
 
 ## Round-3 reviewer remediation — 2026-09-02
 
-### Status and commit ledger
+### Historical status and commit ledger
 
-`DONE_WITH_CONCERNS`. Review base: `168f16a`. Functional/test remediation is committed separately as `62f1072` (`fix(web): tighten W6 mobile visual gates`); this report/evidence update follows in its own documentation commit. No push was made.
+`DONE_WITH_CONCERNS` at this checkpoint. Review base: `168f16a`. Functional/test remediation was committed separately as `62f1072` (`fix(web): tighten W6 mobile visual gates`); this report/evidence update followed in its own documentation commit. No push was made.
 
 | Path                                                    | Change and reason                                                                                                                                                                    |
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -356,7 +356,7 @@ The only remaining visible deltas are named P3 candidates: approved runtime hero
 
 The V03/V04 policy is stored before candidate evaluation and is not derived from a candidate artifact. V03 accepts heading height `64–74`, bottom `195–207`, and heading→visual gap `28–38`; V04 accepts heading height `166–180`, bottom `303–317`, and heading→preview gap `10–22`. The added negative proofs make current-style underscaling, wrong bottom, or excessive gap fail. Full-screen caps, required semantic landmarks, scroll reset, viewport overflow checks, and W0 budgets remain in force.
 
-Concerns remain external: FFmpeg is unavailable locally, so normal codec-backed C10 demo acceptance is pending CI after controller push; canonical pixels are Linux/x64-only; final independent Sol acceptance remains pending. `apps/web/design-qa.md` intentionally ends with `final result: pending independent Sol acceptance.`
+At that checkpoint, concerns remained external: FFmpeg was unavailable locally, so normal codec-backed C10 demo acceptance was pending CI after controller push; canonical pixels were Linux/x64-only; final independent Sol acceptance remained pending. `apps/web/design-qa.md` then intentionally ended with `final result: pending independent Sol acceptance.`
 
 ## CI fix round 4 — asynchronous capture-heading focus evidence — 2026-09-02
 
@@ -565,7 +565,17 @@ final result: pending independent Sol acceptance.
 
 ## Final hosted W6 acceptance — 2026-09-03
 
-**Status: PASSED.** Independent Sol acceptance is approved. Hosted workflow [33712809662](https://github.com/ToledoVitor/revelAI/actions/runs/33712809662), at head `12318cb43a9669f67caa9eb462cbfd1f48a69f3d`, completed every W6 acceptance gate green: `pnpm check` (**12m14s**), production router, real-FFmpeg/C10 demo E2E terminal, canonical Linux visual comparison, OpenAPI, and operability probes (**2m54s**).
+**Status: DONE. Result: passed.** Independent Sol acceptance is approved. Hosted workflow [33712809662](https://github.com/ToledoVitor/revelAI/actions/runs/33712809662), at head `12318cb43a9669f67caa9eb462cbfd1f48a69f3d`, completed every W6 acceptance gate green. `Demo-only quality checks` is the complete **12m14s** job; its `pnpm check` step took about **7m31s**. `Demo-only clean executable and operability probes` is the complete **2m54s** job, not an individual probe-step duration.
+
+| Hosted gate                | Observed result                                              |
+| -------------------------- | ------------------------------------------------------------ |
+| `pnpm check`               | exit 0; about 7m31s within the quality job.                  |
+| Production router          | exit 0; **23/23**.                                           |
+| Real-FFmpeg/C10 demo E2E   | exit 0; Node **18/18** and browser **2/2** through terminal. |
+| Canonical Linux/x64 visual | exit 0; **30 passed, 10 skipped**.                           |
+| OpenAPI                    | exit 0.                                                      |
+| Focused API                | exit 0; **23/23**.                                           |
+| Operability                | exit 0; **18/18**.                                           |
 
 The hosted terminal proof uses the normal codec-backed path rather than `--serve-check`; it creates and probes real C10 media, reaches terminal state, and the Verified trace observes the truthful pending owner/manual refresh before that outcome. Linux/x64 canonical visual acceptance completes the platform-specific evidence that this local Darwin host could not provide.
 
