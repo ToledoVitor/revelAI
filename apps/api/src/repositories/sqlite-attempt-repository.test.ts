@@ -587,6 +587,160 @@ function startMigrationHistoryInvalidator(
   });
 }
 
+type SynchronizedDeleteModeStartupResult = Readonly<{
+  lockingMode: unknown;
+  migrationCount: unknown;
+  sawExclusiveBegin: boolean;
+  userVersion: unknown;
+}>;
+
+function startSynchronizedDeleteModeStartupWorker(
+  input: Readonly<{
+    filename: string;
+    state: SharedArrayBuffer;
+  }>,
+): Readonly<{
+  result: Promise<SynchronizedDeleteModeStartupResult>;
+  terminate(): void;
+}> {
+  let resolveResult!: (value: SynchronizedDeleteModeStartupResult) => void;
+  let rejectResult!: (error: Error) => void;
+  const result = new Promise<SynchronizedDeleteModeStartupResult>(
+    (resolve, reject) => {
+      resolveResult = resolve;
+      rejectResult = reject;
+    },
+  );
+  const worker = new Worker(
+    `
+      const fs = require("node:fs");
+      const Module = require("node:module");
+      const ts = require("typescript");
+      const Database = require("better-sqlite3");
+      const { parentPort, workerData } = require("node:worker_threads");
+      const state = new Int32Array(workerData.state);
+      const originalResolveFilename = Module._resolveFilename;
+      Module._resolveFilename = function (request, parent, isMain, options) {
+        if (request === "@revelai/contracts") return workerData.contractsModule;
+        if (request === "@revelai/domain") return workerData.domainModule;
+        try {
+          return originalResolveFilename.call(this, request, parent, isMain, options);
+        } catch (error) {
+          if (typeof request === "string" && request.startsWith(".") && request.endsWith(".js")) {
+            return originalResolveFilename.call(this, request.slice(0, -3) + ".ts", parent, isMain, options);
+          }
+          throw error;
+        }
+      };
+      require.extensions[".ts"] = function (module, moduleFilename) {
+        const output = ts.transpileModule(fs.readFileSync(moduleFilename, "utf8"), {
+          compilerOptions: {
+            target: ts.ScriptTarget.ES2022,
+            module: ts.ModuleKind.CommonJS,
+            moduleResolution: ts.ModuleResolutionKind.NodeNext,
+            esModuleInterop: true,
+          },
+          fileName: moduleFilename,
+        }).outputText;
+        module._compile(output, moduleFilename);
+      };
+      let sawExclusiveBegin = false;
+      const synchronize = (arrivalIndex, releaseIndex) => {
+        const arrivals = Atomics.add(state, arrivalIndex, 1) + 1;
+        if (arrivals === 2) {
+          Atomics.store(state, releaseIndex, 1);
+          Atomics.notify(state, releaseIndex, 2);
+        }
+        if (Atomics.wait(state, releaseIndex, 0, 1_000) === "timed-out")
+          throw new Error("DELETE-mode startup workers did not align before WAL.");
+      };
+      const originalExec = Database.prototype.exec;
+      Database.prototype.exec = function (source) {
+        if (source === "BEGIN EXCLUSIVE") {
+          sawExclusiveBegin = true;
+          synchronize(0, 1);
+        }
+        return originalExec.call(this, source);
+      };
+      const originalPragma = Database.prototype.pragma;
+      Database.prototype.pragma = function (source, options) {
+        if (source === "locking_mode = EXCLUSIVE" && !sawExclusiveBegin)
+          synchronize(2, 3);
+        // Without an exclusive transaction, both starters arrive here holding
+        // SHARED locks and SQLite must choose an immediate upgrade loser.
+        if (source === "journal_mode = WAL" && !sawExclusiveBegin)
+          synchronize(4, 5);
+        return originalPragma.call(this, source, options);
+      };
+      let database;
+      try {
+        const { openSqliteDatabase } = require(workerData.databaseModule);
+        database = openSqliteDatabase(workerData.filename);
+        const result = {
+          type: "success",
+          lockingMode: database.raw.pragma("locking_mode", { simple: true }),
+          migrationCount: database.raw
+            .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+            .get().count,
+          sawExclusiveBegin,
+          userVersion: database.raw.pragma("user_version", { simple: true }),
+        };
+        database.close();
+        database = undefined;
+        parentPort.postMessage(result);
+      } catch (error) {
+        try { database?.close(); } catch {}
+        parentPort.postMessage({ type: "error", message: String(error) });
+      }
+    `,
+    {
+      eval: true,
+      workerData: {
+        ...input,
+        contractsModule: join(
+          process.cwd(),
+          "../../packages/contracts/src/index.ts",
+        ),
+        databaseModule: join(process.cwd(), "src/database/sqlite-database.ts"),
+        domainModule: join(process.cwd(), "../../packages/domain/src/index.ts"),
+      },
+    },
+  );
+  worker.on("message", (message: unknown) => {
+    const value = message as {
+      lockingMode?: unknown;
+      migrationCount?: unknown;
+      message?: string;
+      sawExclusiveBegin?: boolean;
+      type?: string;
+      userVersion?: unknown;
+    };
+    if (value.type === "success") {
+      resolveResult({
+        lockingMode: value.lockingMode,
+        migrationCount: value.migrationCount,
+        sawExclusiveBegin: value.sawExclusiveBegin === true,
+        userVersion: value.userVersion,
+      });
+      void worker.terminate();
+    }
+    if (value.type === "error") {
+      rejectResult(new Error(value.message ?? "SQLite startup worker failed"));
+      void worker.terminate();
+    }
+  });
+  worker.on("error", (error) => {
+    rejectResult(error);
+    void worker.terminate();
+  });
+  return Object.freeze({
+    result,
+    terminate: () => {
+      void worker.terminate();
+    },
+  });
+}
+
 function freeOutcome(
   attemptId: string,
   completedAt: string,
@@ -5205,6 +5359,46 @@ describe("SQLiteAttemptRepository", () => {
     migrationStartupTestTimeoutMs,
   );
 
+  it("serializes two aligned DELETE-mode starters before WAL", async () => {
+    const filename = join(
+      fixture.directory,
+      "migration-concurrent-delete-mode.sqlite",
+    );
+    const current = openSqliteDatabase(filename);
+    current.raw.pragma("journal_mode = DELETE");
+    current.close();
+
+    const state = new Int32Array(
+      new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 6),
+    );
+    const startups = Array.from({ length: 2 }, () =>
+      startSynchronizedDeleteModeStartupWorker({
+        filename,
+        state: state.buffer,
+      }),
+    );
+    try {
+      await expect(
+        Promise.all(startups.map((startup) => startup.result)),
+      ).resolves.toEqual([
+        {
+          lockingMode: "normal",
+          migrationCount: 23,
+          sawExclusiveBegin: true,
+          userVersion: 23,
+        },
+        {
+          lockingMode: "normal",
+          migrationCount: 23,
+          sawExclusiveBegin: true,
+          userVersion: 23,
+        },
+      ]);
+    } finally {
+      startups.forEach((startup) => startup.terminate());
+    }
+  });
+
   it("enables WAL before releasing the migration startup writer", async () => {
     const filename = join(
       fixture.directory,
@@ -5217,6 +5411,7 @@ describe("SQLiteAttemptRepository", () => {
     const barrier = startPostMigrationCommitLockBarrier({ filename });
     const originalExec = Database.prototype.exec;
     const originalPragma = Database.prototype.pragma;
+    const migrationWriters = new WeakSet<Database.Database>();
     let interceptedMigrationCommit = false;
     let reopened: SqliteDatabase | undefined;
     try {
@@ -5230,9 +5425,17 @@ describe("SQLiteAttemptRepository", () => {
           options,
         );
       };
-      Database.prototype.exec = function (source: string): Database.Database {
+      Database.prototype.exec = function (
+        this: Database.Database,
+        source: string,
+      ): Database.Database {
         const result = originalExec.call(this, source);
-        if (!interceptedMigrationCommit && source === "COMMIT") {
+        if (source === "BEGIN IMMEDIATE") migrationWriters.add(this);
+        if (
+          !interceptedMigrationCommit &&
+          source === "COMMIT" &&
+          migrationWriters.delete(this)
+        ) {
           interceptedMigrationCommit = true;
           barrier.triggerAndWaitForLock();
         }

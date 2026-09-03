@@ -890,8 +890,26 @@ function openSqliteDatabaseInternal(
       // exclusive-mode connection keeps another process from changing the
       // validated history before WAL is durable; closing it releases that
       // mode before the regular repository connection is exposed.
-      raw.pragma("locking_mode = EXCLUSIVE");
-      readValidatedMigrationStartup(raw, targetMigrationVersion);
+      let bootstrapTransaction = false;
+      try {
+        // Acquire before selecting the persistent connection policy. Selecting
+        // exclusive mode first can leave two DELETE-mode starters with SHARED
+        // locks, making their simultaneous exclusive upgrades deadlock.
+        raw.exec("BEGIN EXCLUSIVE");
+        bootstrapTransaction = true;
+        raw.pragma("locking_mode = EXCLUSIVE");
+        readValidatedMigrationStartup(raw, targetMigrationVersion);
+        raw.exec("COMMIT");
+        bootstrapTransaction = false;
+      } catch (error) {
+        if (bootstrapTransaction)
+          try {
+            raw.exec("ROLLBACK");
+          } catch {
+            // Preserve the original validation or acquisition failure.
+          }
+        throw error;
+      }
       raw.pragma("journal_mode = WAL");
       raw.close();
       raw = openSqliteRawConnection(filename);
