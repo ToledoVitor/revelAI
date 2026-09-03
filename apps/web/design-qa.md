@@ -2,7 +2,7 @@
 
 ## W6 document authority
 
-Only [Final W6 acceptance](#final-w6-acceptance--2026-09-03) is the current W6 authority. Every earlier W6 `pending`, `current authority`, `authoritative`, `current disposition`, reviewer disposition, and `final result` statement is a dated historical checkpoint retained as evidence; it is superseded by the independent Sol-approved hosted result at the end of this document.
+Only [Hosted revalidation pending](#hosted-revalidation-pending--2026-09-03) is the current W6 authority. Every earlier W6 `pending`, `current authority`, `authoritative`, reviewer disposition, `DONE`, `passed`, and `final result` statement is a dated historical checkpoint retained as evidence; it is superseded by the revalidation record at the end of this document.
 
 ## Audit record
 
@@ -306,10 +306,20 @@ Functional commit `c2816a6` changes no visual artifact or visual gate. Normal fi
 
 final result: pending independent Sol acceptance.
 
-## Final W6 acceptance — 2026-09-03
+## Hosted W6 acceptance checkpoint — historical, 2026-09-03
 
-**Status: DONE. Result: passed by independent Sol review.** Hosted workflow [33712809662](https://github.com/ToledoVitor/revelAI/actions/runs/33712809662) at `12318cb43a9669f67caa9eb462cbfd1f48a69f3d` passed every gate with exit 0: production-router **23/23**; real-FFmpeg/C10 demo E2E Node **18/18** plus browser **2/2**; canonical Linux/x64 visual **30 passed, 10 skipped**; focused API **23/23**; and operability **18/18**. The complete quality job took **12m14s** (with `pnpm check` at about **7m31s**); the complete clean-executable/operability job took **2m54s**.
+**Historical status: DONE; historical result: passed by independent Sol review.** Hosted workflow [33712809662](https://github.com/ToledoVitor/revelAI/actions/runs/33712809662) at `12318cb43a9669f67caa9eb462cbfd1f48a69f3d` passed every gate with exit 0 at this checkpoint: production-router **23/23**; real-FFmpeg/C10 demo E2E Node **18/18** plus browser **2/2**; canonical Linux/x64 visual **30 passed, 10 skipped**; focused API **23/23**; and operability **18/18**. The complete quality job took **12m14s** (with `pnpm check` at about **7m31s**); the complete clean-executable/operability job took **2m54s**.
 
-The approved truth rulings remain part of the accepted UI: V05 retains foreground/manual refresh and no closed-app notification promise; V06 retains the isolated ranked fixture and exact `Resultado validado — vale para ranking`, while Free/demo/experimental paths structurally omit rank fields. The documented approved-runtime hero/crop variance remains accepted evidence; no reference screenshot, invented asset, or false competitive claim was introduced. This is the sole current W6 authority in this document; every earlier checkpoint is historical and superseded.
+The approved truth rulings remained part of the accepted UI: V05 retained foreground/manual refresh and no closed-app notification promise; V06 retained the isolated ranked fixture and exact `Resultado validado — vale para ranking`, while Free/demo/experimental paths structurally omitted rank fields. The documented approved-runtime hero/crop variance remained accepted evidence; no reference screenshot, invented asset, or false competitive claim was introduced.
 
-final result: passed
+historical result: passed
+
+## Hosted revalidation pending — 2026-09-03
+
+**Status: PENDING_HOSTED_REVALIDATION.** Hosted run `33714558200` failed only the Node lifecycle regression `waits for cancelled fixture codecs before leaving startup`: tests 1–17 passed, then a generic first-codec marker allowed SIGTERM before the second codec had started, yielding one close instead of the required two. This is a test-synchronization flake, not a visual or product-truth regression.
+
+Commit `2e04bee` requires distinct ready markers for `free-portrait.mp4` and `verified-landscape.mp4` before SIGTERM, then requires those same two close markers before wrapper completion. It preserves the exact two-close expectation, no API start, media cleanup, and 4174/4175 ownership proof; it adds neither sleep nor retry. Locally, the focused test passed in eight fresh processes; Node lifecycle/media/wrapper checks passed **18/18**, smoke browser **2/2**, and lint/typecheck/Prettier/diff checks were green.
+
+V05's foreground/manual-refresh truth and V06's isolated ranked-only fixture remain binding. Independent Sol review and a new native hosted green are required before W6 can return to accepted status.
+
+final result: pending independent Sol acceptance.

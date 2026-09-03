@@ -2,9 +2,9 @@
 
 ## Status
 
-`DONE`
+`PENDING_HOSTED_REVALIDATION`
 
-The required browser/HTTP, contract-fixture, capture, structural, and CI wiring are implemented and verified. Independent Sol acceptance and every hosted gate are green; the final result is passed. The dated sections below preserve contemporaneous evidence: every `DONE_WITH_CONCERNS`, `pending`, or self-review statement is historical and superseded by this current status.
+The required browser/HTTP, contract-fixture, capture, structural, and CI wiring are implemented and verified. Hosted run `33714558200` exposed a deterministic test-admission gap after the prior green; the corrected test now awaits both owned codecs, and final acceptance is pending the next hosted green. The dated sections below preserve contemporaneous evidence: every `DONE_WITH_CONCERNS`, `DONE`, `passed`, `pending`, or self-review statement is historical unless superseded by the final revalidation record.
 
 ## Baseline and commits
 
@@ -563,9 +563,9 @@ The test-only child seam is deterministic lifecycle evidence; it does not replac
 
 final result: pending independent Sol acceptance.
 
-## Final hosted W6 acceptance — 2026-09-03
+## Hosted W6 acceptance checkpoint — historical, 2026-09-03
 
-**Status: DONE. Result: passed.** Independent Sol acceptance is approved. Hosted workflow [33712809662](https://github.com/ToledoVitor/revelAI/actions/runs/33712809662), at head `12318cb43a9669f67caa9eb462cbfd1f48a69f3d`, completed every W6 acceptance gate green. `Demo-only quality checks` is the complete **12m14s** job; its `pnpm check` step took about **7m31s**. `Demo-only clean executable and operability probes` is the complete **2m54s** job, not an individual probe-step duration.
+**Historical status: DONE; historical result: passed.** Independent Sol accepted hosted workflow [33712809662](https://github.com/ToledoVitor/revelAI/actions/runs/33712809662), at head `12318cb43a9669f67caa9eb462cbfd1f48a69f3d`, at this checkpoint. `Demo-only quality checks` is the complete **12m14s** job; its `pnpm check` step took about **7m31s**. `Demo-only clean executable and operability probes` is the complete **2m54s** job, not an individual probe-step duration.
 
 | Hosted gate                | Observed result                                              |
 | -------------------------- | ------------------------------------------------------------ |
@@ -577,8 +577,20 @@ final result: pending independent Sol acceptance.
 | Focused API                | exit 0; **23/23**.                                           |
 | Operability                | exit 0; **18/18**.                                           |
 
-The hosted terminal proof uses the normal codec-backed path rather than `--serve-check`; it creates and probes real C10 media, reaches terminal state, and the Verified trace observes the truthful pending owner/manual refresh before that outcome. Linux/x64 canonical visual acceptance completes the platform-specific evidence that this local Darwin host could not provide.
+The hosted terminal proof used the normal codec-backed path rather than `--serve-check`; it created and probed real C10 media, reached terminal state, and the Verified trace observed the truthful pending owner/manual refresh before that outcome. Linux/x64 canonical visual acceptance completed the platform-specific evidence that this local Darwin host could not provide.
 
-The accepted truth rulings remain unchanged: V05 makes no closed-app notification promise and keeps foreground/manual refresh; V06 is an isolated policy-approved ranked fixture with persistent `Resultado validado — vale para ranking`, while Free/demo/experimental paths remain structurally noncompetitive. Approved runtime hero/crop variance remains documented evidence, not a copied screenshot or invented runtime asset. No W6 acceptance concern remains.
+The accepted truth rulings remained unchanged: V05 made no closed-app notification promise and kept foreground/manual refresh; V06 was an isolated policy-approved ranked fixture with persistent `Resultado validado — vale para ranking`, while Free/demo/experimental paths remained structurally noncompetitive. Approved runtime hero/crop variance remained documented evidence, not a copied screenshot or invented runtime asset.
 
-final result: passed
+historical result: passed
+
+## Hosted revalidation pending — 2026-09-03
+
+**Status: PENDING_HOSTED_REVALIDATION.** Hosted workflow `33714558200` failed only `apps/web/scripts/start-demo-e2e-server.test.mjs`'s `waits for cancelled fixture codecs before leaving startup`: tests 1–17 were green, but this test observed one delayed-codec close where two were expected after **643ms**. The prior test waited for one generic `started` marker, so SIGTERM could occur after the first child admitted but before the second child had started; the expectation of two owned closes was correct, but the synchronization was not.
+
+Functional commit `2e04bee` makes the test-only codec fixture publish its target filename at start and close. The wrapper regression now waits for both distinct `free-portrait.mp4` and `verified-landscape.mp4` start markers before SIGTERM, then requires those same two distinct close markers, wrapper close after both timestamps, no API start, deleted fixture media, and free 4174/4175. It neither weakens the expected two closes nor introduces a sleep/retry.
+
+RED: the focused test with the two-marker barrier and the prior generic fixture failed deterministically after the 3s bounded readiness budget. GREEN: the focused test passed; eight fresh processes passed the same focused test; combined media/lifecycle/wrapper checks passed **18/18**; demo smoke passed Node **18/18** and browser **2/2**; lint, typecheck, Prettier, and diff checks exited 0. No visual surface, W0 budget, or truth ruling changed.
+
+Current concern: independent Sol review and native hosted revalidation remain required after `2e04bee`; the historical pass at `12318cb` is not the current acceptance result.
+
+final result: pending independent Sol acceptance.
