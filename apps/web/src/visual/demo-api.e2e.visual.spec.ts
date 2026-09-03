@@ -159,6 +159,13 @@ test("production build drives the verified demo trace without a ranking claim", 
   await expect(
     page.getByRole("progressbar", { name: "Envio do vídeo verificado" }),
   ).toBeVisible();
+  const pending = page.getByRole("main", {
+    name: "Processando tentativa",
+  });
+  await expect(pending).toBeVisible({ timeout: verifiedResultTimeoutMs });
+  await expect(
+    pending.getByRole("button", { name: "Atualizar agora" }),
+  ).toBeVisible();
   const report = page.getByRole("main", {
     name: "Resultado do desafio verificado",
   });

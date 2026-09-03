@@ -22,12 +22,18 @@ const apiPort = 4174;
 const webPort = 4175;
 const apiOrigin = `http://127.0.0.1:${apiPort}`;
 const serveCheck = process.argv.includes("--serve-check");
+const apiReadyTimeoutMilliseconds = 60_000;
+const apiReadyMessages = new Set([
+  "RevelAI local demo is listening on its configured local host.",
+  "RevelAI local demo check API is listening on its configured local host.",
+]);
 // This is kept only for the explicit --serve-check smoke server. Required
 // demo-browser acceptance uses the codec-generated C10 fixtures instead.
 const c10CheckMedia = Buffer.from([
   0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 1, 2, 3, 4,
 ]);
 let apiProcess;
+let apiReadiness;
 let server;
 let scratch;
 let stopping = false;
@@ -38,15 +44,16 @@ try {
   await createMediaFixtures();
   scratch = await mkdtemp(join(tmpdir(), "revelai-web-demo-e2e-"));
   apiProcess = startDemoApi(scratch);
+  apiReadiness = observeApiReadiness(apiProcess);
   await waitForApi();
   server = createServer(handleRequest);
   await new Promise((resolveServer, rejectServer) => {
     server.once("error", rejectServer);
     server.listen(webPort, "127.0.0.1", resolveServer);
   });
-} catch (error) {
+} catch {
   await stop();
-  console.error(error);
+  console.error("RevelAI demo E2E server failed to start.");
   process.exitCode = 1;
 }
 
@@ -68,7 +75,7 @@ function startDemoApi(root) {
         dataDirectory: join(root, "data"),
         mediaDirectory: join(root, "media"),
       }),
-      stdio: "inherit",
+      stdio: ["ignore", "pipe", "pipe"],
     },
   );
 }
@@ -85,22 +92,102 @@ async function createMediaFixtures() {
 }
 
 async function waitForApi() {
-  const deadline = Date.now() + 60_000;
-  let lastError;
-  while (Date.now() < deadline) {
-    if (apiProcess?.exitCode !== null) {
-      throw new Error("The local demo API exited before it became ready.");
-    }
-    try {
-      const response = await fetch(`${apiOrigin}/health`);
-      if (response.ok) return;
-      lastError = new Error(`Demo API health returned ${response.status}.`);
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolveTimer) => setTimeout(resolveTimer, 100));
+  if (!apiProcess || !apiReadiness)
+    throw new Error("The spawned local demo API was not created.");
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    apiReadyTimeoutMilliseconds,
+  );
+  timeout.unref();
+  try {
+    await raceOwnedApi(apiReadiness, controller.signal);
+    const response = await raceOwnedApi(
+      fetch(`${apiOrigin}/health`, { signal: controller.signal }),
+      controller.signal,
+    );
+    if (!response.ok)
+      throw new Error(
+        `The spawned local demo API health returned ${response.status}.`,
+      );
+  } catch (error) {
+    if (controller.signal.aborted)
+      throw new Error("Timed out waiting for the spawned local demo API.");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
   }
-  throw lastError ?? new Error("Timed out waiting for the local demo API.");
+}
+
+function observeApiReadiness(child) {
+  return new Promise((resolveReady, rejectReady) => {
+    let settled = false;
+    let remaining = "";
+    const settle = (callback) => {
+      if (settled) return;
+      settled = true;
+      child.off("error", rejectForChildExit);
+      child.off("exit", rejectForChildExit);
+      callback();
+    };
+    const rejectForChildExit = () =>
+      settle(() =>
+        rejectReady(
+          new Error("The spawned local demo API exited before readiness."),
+        ),
+      );
+    const receiveStdout = (chunk) => {
+      process.stdout.write(chunk);
+      const lines = `${remaining}${chunk.toString("utf8")}`.split(/\r?\n/);
+      remaining = lines.pop() ?? "";
+      if (lines.some((line) => apiReadyMessages.has(line)))
+        settle(resolveReady);
+    };
+    const receiveStderr = (chunk) => process.stderr.write(chunk);
+
+    child.stdout.on("data", receiveStdout);
+    child.stderr.on("data", receiveStderr);
+    child.once("error", rejectForChildExit);
+    child.once("exit", rejectForChildExit);
+    if (child.exitCode !== null) rejectForChildExit();
+  });
+}
+
+function raceOwnedApi(operation, signal) {
+  return new Promise((resolveOperation, rejectOperation) => {
+    let settled = false;
+    const settle = (callback) => {
+      if (settled) return;
+      settled = true;
+      apiProcess?.off("error", rejectForChildExit);
+      apiProcess?.off("exit", rejectForChildExit);
+      signal.removeEventListener("abort", rejectForTimeout);
+      callback();
+    };
+    const rejectForChildExit = () =>
+      settle(() =>
+        rejectOperation(
+          new Error("The spawned local demo API exited before readiness."),
+        ),
+      );
+    const rejectForTimeout = () =>
+      settle(() =>
+        rejectOperation(new Error("The local demo API readiness timed out.")),
+      );
+
+    if (!apiProcess || apiProcess.exitCode !== null) {
+      rejectForChildExit();
+      return;
+    }
+    apiProcess.once("error", rejectForChildExit);
+    apiProcess.once("exit", rejectForChildExit);
+    signal.addEventListener("abort", rejectForTimeout, { once: true });
+    operation.then(
+      (value) => settle(() => resolveOperation(value)),
+      (error) => settle(() => rejectOperation(error)),
+    );
+  });
 }
 
 function handleRequest(request, response) {
