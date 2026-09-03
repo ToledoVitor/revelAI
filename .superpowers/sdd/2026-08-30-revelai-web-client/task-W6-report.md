@@ -2,9 +2,9 @@
 
 ## Status
 
-`PENDING_HOSTED_REVALIDATION`
+`DONE_WITH_CONCERNS`
 
-The required browser/HTTP, contract-fixture, capture, structural, and CI wiring are implemented and verified. Hosted run `33714558200` exposed a deterministic test-admission gap after the prior green; the corrected test now awaits both owned codecs, and final acceptance is pending the next hosted green. The dated sections below preserve contemporaneous evidence: every `DONE_WITH_CONCERNS`, `DONE`, `passed`, `pending`, or self-review statement is historical unless superseded by the final revalidation record.
+The required browser/HTTP, contract-fixture, capture, structural, and CI wiring are implemented and verified. Hosted run `33714558200` exposed a deterministic test-admission gap after the prior green; the corrected test now awaits two handlers-armed owned codecs, and final acceptance is pending the next hosted green. The current concern is hosted revalidation; the dated sections below preserve contemporaneous evidence: every prior `DONE_WITH_CONCERNS`, `DONE`, `passed`, `pending`, or self-review statement is historical unless superseded by the final revalidation record.
 
 ## Baseline and commits
 
@@ -585,12 +585,12 @@ historical result: passed
 
 ## Hosted revalidation pending — 2026-09-03
 
-**Status: PENDING_HOSTED_REVALIDATION.** Hosted workflow `33714558200` failed only `apps/web/scripts/start-demo-e2e-server.test.mjs`'s `waits for cancelled fixture codecs before leaving startup`: tests 1–17 were green, but this test observed one delayed-codec close where two were expected after **643ms**. The prior test waited for one generic `started` marker, so SIGTERM could occur after the first child admitted but before the second child had started; the expectation of two owned closes was correct, but the synchronization was not.
+**Hosted revalidation is pending.** Hosted workflow `33714558200` failed only `apps/web/scripts/start-demo-e2e-server.test.mjs`'s `waits for cancelled fixture codecs before leaving startup`: tests 1–17 were green, but this test observed one delayed-codec close where two were expected after **643ms**. The prior test waited for one generic `started` marker, so SIGTERM could occur after the first child admitted but before the second child had started; the expectation of two owned closes was correct, but the synchronization was not.
 
-Functional commit `2e04bee` makes the test-only codec fixture publish its target filename at start and close. The wrapper regression now waits for both distinct `free-portrait.mp4` and `verified-landscape.mp4` start markers before SIGTERM, then requires those same two distinct close markers, wrapper close after both timestamps, no API start, deleted fixture media, and free 4174/4175. It neither weakens the expected two closes nor introduces a sleep/retry.
+Functional commit `2e04bee` makes the test-only codec fixture publish its target filename at start and close. Follow-up commit `acf1faa` installs both SIGINT/SIGTERM handlers before publishing each `:handlers-ready` marker. The wrapper regression waits for both distinct `free-portrait.mp4:handlers-ready` and `verified-landscape.mp4:handlers-ready` markers before SIGTERM, then requires the two distinct close markers, wrapper close after both timestamps, no API start, deleted fixture media, and free 4174/4175. It neither weakens the expected two closes nor introduces a sleep/retry.
 
-RED: the focused test with the two-marker barrier and the prior generic fixture failed deterministically after the 3s bounded readiness budget. GREEN: the focused test passed; eight fresh processes passed the same focused test; combined media/lifecycle/wrapper checks passed **18/18**; demo smoke passed Node **18/18** and browser **2/2**; lint, typecheck, Prettier, and diff checks exited 0. No visual surface, W0 budget, or truth ruling changed.
+RED: the focused test with the two-marker barrier and the prior generic fixture failed deterministically after the 3s bounded readiness budget. GREEN: the handlers-armed focused test passed; **16** fresh processes passed the same focused test; combined media/lifecycle/wrapper checks passed **18/18**; demo smoke passed Node **18/18** and browser **2/2**; lint, typecheck, Prettier, and diff checks exited 0. No visual surface, W0 budget, or truth ruling changed.
 
-Current concern: independent Sol review and native hosted revalidation remain required after `2e04bee`; the historical pass at `12318cb` is not the current acceptance result.
+Current concern: independent Sol review and native hosted revalidation remain required after `acf1faa`; the historical pass at `12318cb` is not the current acceptance result.
 
 final result: pending independent Sol acceptance.
