@@ -2,12 +2,15 @@
 
 ## Status
 
-`IMPLEMENTED_WITH_UNRELATED_STATIC_GATE_BLOCKER`
+`IMPLEMENTED_AND_LOCALLY_VERIFIED`
 
 Initial functional commit: `2c169d91023d23523cafbe13056cc3fd5d77353a`
 (`fix(api): close SQLite WAL startup race`).
 
 TOCTOU correction: `69d5d00` (`fix(api): make SQLite WAL startup atomic`).
+
+DELETE-mode concurrent-start correction: `f9fde08`
+(`fix(api): serialize SQLite DELETE-mode WAL startup`).
 No push was made.
 
 ## Incident and root cause
@@ -56,12 +59,14 @@ Restoring the old production ordering—moving `journal_mode = WAL` back below
 ## Fix and migration safety
 
 For a non-WAL database, `openSqliteDatabaseInternal` now uses a temporary,
-private bootstrap connection. It switches that connection to
-`locking_mode = EXCLUSIVE`, completes the existing read-only migration
-validation, performs the durable WAL transition, closes the bootstrap handle,
-and only then opens the regular repository connection. The regular connection
-runs `applyMigrations`, which revalidates under its migration writer as
-before. An already-WAL database skips the bootstrap transition.
+private bootstrap connection. It first acquires `BEGIN EXCLUSIVE`, then sets
+`locking_mode = EXCLUSIVE` inside that transaction, completes the existing
+read-only migration validation, commits while the connection retains its
+exclusive locking policy, performs the durable WAL transition, closes the
+bootstrap handle, and only then opens the regular repository connection. The
+regular connection runs `applyMigrations`, which revalidates under its
+migration writer as before. An already-WAL database skips the bootstrap
+transition.
 
 The exclusive bootstrap closes the review-identified TOCTOU interval: another
 starter cannot alter the validated history before WAL is durable. It also does
@@ -78,6 +83,24 @@ the durable mutation instead.
 The prior invalid-predecessor gate continues to prove that a malformed history
 fails without changing the predecessor's journal mode or durable bytes. The
 change neither retries migration failures nor relaxes corruption handling.
+
+## Deterministic DELETE-mode concurrent-start regression
+
+`locking_mode = EXCLUSIVE` selects a policy but is not a safe startup-lock
+acquisition primitive. Two real worker starters are aligned at the durable WAL
+path with `SharedArrayBuffer`. Before `f9fde08`, both run the mode pragma and
+read validation, retain SHARED locks, then synchronize their WAL upgrade; one
+open deterministically fails with `SqliteError: database is locked` (271 ms).
+
+The correction aligns both workers immediately before their real
+`BEGIN EXCLUSIVE`. SQLite serializes those acquisitions while neither worker
+holds the competing SHARED read lock. Both opens complete at version 23 with
+23 ledger rows, and each publicly exposed regular connection reports
+`locking_mode = normal`; the temporary exclusive policy cannot leak. An
+isolated real-SQLite probe also established why the operation order matters:
+setting exclusive mode before the concurrent `BEGIN EXCLUSIVE` produces the
+same immediate upgrade loser, whereas begin-then-mode lets both starters
+complete.
 
 ## Deterministic TOCTOU regressions
 
@@ -102,24 +125,23 @@ startup mutation.
 - TOCTOU RED: before `69d5d00`, the boundary writer changed history between
   preflight and WAL; the protection test observed `invalidated` rather than
   `blocked`, and a post-handoff invalidation let startup succeed unexpectedly.
-- GREEN: the five focused migration cases passed: invalid predecessor bytes,
-  four-child fresh/v20 startup, the original WAL-window lock, no-interleaving
-  history write, and post-bootstrap invalidation preservation.
-- The original four-child fresh/v20 contention test passed five more
-  consecutive isolated runs after the TOCTOU correction.
+- DELETE-mode RED: synchronized real starters under the prior bootstrap fail
+  with the exact `database is locked` error; a mode-before-begin probe also
+  reproduces it.
+- GREEN: six focused migration cases passed: invalid predecessor bytes,
+  four-child fresh/v20 startup, two aligned DELETE starters, the original
+  WAL-window lock, no-interleaving history write, and post-bootstrap
+  invalidation preservation.
+- The original four-child fresh/v20 and new aligned DELETE contention cases
+  passed five consecutive isolated runs.
 - `pnpm run lint` in `apps/api` passed.
 - Prettier write/check passed for `sqlite-database.ts` and
   `sqlite-attempt-repository.test.ts`.
-- `pnpm run test` in `apps/api` passed: 41 files, 502 passed, 1 expected
+- `pnpm run typecheck` in `apps/api` passed.
+- `pnpm run test` in `apps/api` passed: 41 files, 503 passed, 1 expected
   local FFmpeg skip.
 - `git diff --check` and `git diff --cached --check` passed before the
   functional commit.
-
-`pnpm run typecheck` currently exits 2 only because the concurrent,
-uncommitted FFmpeg work in `apps/api/src/storage/local-frame-extraction.test.ts`
-has a `ProcessChild` incompatibility at line 1261 and an implicit `any` at
-line 1282. This SQLite change does not modify that file; rerun the API static
-gates after that work is corrected.
 
 ## Remaining concern
 
