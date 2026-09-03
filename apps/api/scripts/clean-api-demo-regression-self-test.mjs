@@ -1,5 +1,10 @@
-import { spawn } from "node:child_process";
+import { fork } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import {
+  cleanupAcknowledgementRequest,
+  createCleanupAcknowledgementGate,
+} from "./clean-api-demo-regression-cleanup-protocol.mjs";
 
 const script = fileURLToPath(
   new URL("./clean-api-demo-regression.mjs", import.meta.url),
@@ -10,7 +15,6 @@ const CLEANUP_DEADLINE_MS = 10_000;
 const CLOSE_AFTER_CLEANUP_MS = 1_000;
 const FAILURE = "Clean API executable self-test failed.";
 const readinessPrefix = "REVELAI_EXECUTABLE_READY ";
-const cleanupCompletePrefix = "REVELAI_EXECUTABLE_CLEANUP_COMPLETE ";
 const sessionArgumentPrefix = "--revelai-clean-api-session=";
 const session = parseSession(process.argv.slice(2));
 const modeTimeoutMs = configuredTimeoutMs(
@@ -73,29 +77,53 @@ function run(mode) {
   return new Promise((resolve, reject) => {
     let output = Buffer.alloc(0);
     let readinessOutput = "";
-    const child = spawn(
-      process.execPath,
-      [
-        script,
-        mode,
-        ...(session === undefined ? [] : [sessionArgument(session)]),
-      ],
+    const invocationNonce = randomNonce();
+    const terminationNonce = randomNonce();
+    const child = fork(
+      script,
+      [mode, ...(session === undefined ? [] : [sessionArgument(session)])],
       {
         detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          CLEAN_API_EXECUTABLE_CLEANUP_NONCE: invocationNonce,
+        },
+        silent: true,
       },
     );
+    if (
+      child.pid === undefined ||
+      child.stdout === null ||
+      child.stderr === null
+    ) {
+      sendSignal(child, "SIGKILL");
+      reject(new Error(FAILURE));
+      return;
+    }
     const record = {
       child,
       settled: false,
       timedOut: false,
       timeout: undefined,
-      cleanupAcknowledged: false,
-      killTimer: undefined,
-      cleanupDeadline: undefined,
       terminating: false,
       resolveClosed: undefined,
+      cleanupRequest: cleanupAcknowledgementRequest({
+        invocationNonce,
+        terminationNonce,
+      }),
+      cleanupGate: undefined,
     };
+    record.cleanupGate = createCleanupAcknowledgementGate({
+      expectedPid: child.pid,
+      invocationNonce,
+      terminationNonce,
+      cleanupDeadlineMs: CLEANUP_DEADLINE_MS,
+      closeAfterCleanupMs: CLOSE_AFTER_CLEANUP_MS,
+      schedule: setTimeout,
+      clear: clearTimeout,
+      onDeadline: () => sendSignal(child, "SIGKILL"),
+      onCloseAfterAcknowledgement: () => sendSignal(child, "SIGKILL"),
+    });
     record.closed = new Promise((resolveClosed) => {
       record.resolveClosed = resolveClosed;
     });
@@ -106,12 +134,11 @@ function run(mode) {
       record.settled = true;
       activeChildren.delete(record);
       clearTimeout(record.timeout);
-      clearTimeout(record.killTimer);
-      clearTimeout(record.cleanupDeadline);
+      record.cleanupGate.settle();
       record.resolveClosed();
       callback();
     };
-    const append = (chunk) => {
+    const capture = (chunk) => {
       const remaining = MAX_OUTPUT_BYTES - output.length;
       if (remaining > 0) {
         output = Buffer.concat([
@@ -119,16 +146,15 @@ function run(mode) {
           Buffer.from(chunk).subarray(0, remaining),
         ]);
       }
+    };
+    const appendStdout = (chunk) => {
+      capture(chunk);
       readinessOutput += Buffer.from(chunk).toString("utf8");
       while (true) {
         const newline = readinessOutput.indexOf("\n");
         if (newline === -1) break;
         const line = readinessOutput.slice(0, newline);
         readinessOutput = readinessOutput.slice(newline + 1);
-        if (line === `${cleanupCompletePrefix}${child.pid}`) {
-          acknowledgeCleanup(record);
-          continue;
-        }
         if (/^REVELAI_EXECUTABLE_READY [^ ]+ [1-9][0-9]*$/.test(line)) {
           console.log(line);
         }
@@ -138,8 +164,11 @@ function run(mode) {
       }
     };
 
-    child.stdout.on("data", append);
-    child.stderr.on("data", append);
+    child.stdout.on("data", appendStdout);
+    child.stderr.on("data", capture);
+    child.on("message", (message) => {
+      record.cleanupGate.accept(message);
+    });
     child.once("error", () => settle(() => reject(new Error(FAILURE))));
     child.once("close", (exitCode) => {
       if (exitCode === 0 && record.timedOut === false) {
@@ -190,21 +219,9 @@ function assertCanStart() {
 function terminate(record) {
   if (record.settled || record.terminating) return;
   record.terminating = true;
+  record.cleanupGate.beginTermination();
   sendSignal(record.child, "SIGTERM");
-  record.cleanupDeadline = setTimeout(() => {
-    if (record.settled === false) sendSignal(record.child, "SIGKILL");
-  }, CLEANUP_DEADLINE_MS);
-}
-
-function acknowledgeCleanup(record) {
-  if (record.settled || !record.terminating || record.cleanupAcknowledged) {
-    return;
-  }
-  record.cleanupAcknowledged = true;
-  clearTimeout(record.cleanupDeadline);
-  record.killTimer = setTimeout(() => {
-    if (record.settled === false) sendSignal(record.child, "SIGKILL");
-  }, CLOSE_AFTER_CLEANUP_MS);
+  requestCleanupAcknowledgement(record.child, record.cleanupRequest);
 }
 
 function sendSignal(child, signal) {
@@ -213,6 +230,15 @@ function sendSignal(child, signal) {
     process.kill(-child.pid, signal);
   } catch {
     child.kill(signal);
+  }
+}
+
+function requestCleanupAcknowledgement(child, request) {
+  if (child.connected !== true) return;
+  try {
+    child.send(request, () => undefined);
+  } catch {
+    // A closed IPC channel deliberately leaves the hard cleanup deadline armed.
   }
 }
 
@@ -241,4 +267,8 @@ function parseSession(arguments_) {
 
 function sessionArgument(value) {
   return `${sessionArgumentPrefix}${value}`;
+}
+
+function randomNonce() {
+  return randomUUID().replaceAll("-", "");
 }

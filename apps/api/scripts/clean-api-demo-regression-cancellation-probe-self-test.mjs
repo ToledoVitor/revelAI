@@ -13,6 +13,10 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  cleanupCompleteMessage,
+  createCleanupAcknowledgementGate,
+} from "./clean-api-demo-regression-cleanup-protocol.mjs";
+import {
   assertArgumentsWithinConservativeLinuxLimit,
   conservativeLinuxArgumentMaxBytes,
   createStreamingTokenSearch,
@@ -63,6 +67,7 @@ const foreign = spawn(process.execPath, foreignArguments, {
 const foreignClose = observeClose(foreign);
 
 try {
+  assertCleanupAcknowledgementProtocol();
   await assertTimeoutScenarioCleansItsFixture();
   await assertOrderedCleanupFault({
     scenario: "collector-after-inner-ready",
@@ -151,6 +156,119 @@ async function assertTimeoutScenarioCleansItsFixture() {
   }
   await assertNoSessionFixtures(session);
   await assertNoSessionProcesses(session);
+}
+
+function assertCleanupAcknowledgementProtocol() {
+  const expectedPid = 12_345;
+  const invocationNonce = "a".repeat(32);
+  const terminationNonce = "b".repeat(32);
+  const validAcknowledgement = cleanupCompleteMessage({
+    pid: expectedPid,
+    invocationNonce,
+    terminationNonce,
+  });
+  const slowTimers = manualTimers();
+  const slowSignals = [];
+  const slowGate = createCleanupAcknowledgementGate({
+    expectedPid,
+    invocationNonce,
+    terminationNonce,
+    cleanupDeadlineMs: 10_000,
+    closeAfterCleanupMs: 1_000,
+    schedule: slowTimers.schedule,
+    clear: slowTimers.clear,
+    onDeadline: () => slowSignals.push("SIGKILL:cleanup-deadline"),
+    onCloseAfterAcknowledgement: () => slowSignals.push("SIGKILL:after-ack"),
+  });
+
+  if (slowGate.accept(validAcknowledgement) !== false) throw new Error(failure);
+  slowGate.beginTermination();
+  if (
+    slowGate.accept("REVELAI_EXECUTABLE_CLEANUP_COMPLETE ") !== false ||
+    slowGate.accept(Buffer.from(String(expectedPid))) !== false ||
+    slowGate.accept({ ...validAcknowledgement, pid: expectedPid + 1 }) !==
+      false ||
+    slowGate.accept({
+      ...validAcknowledgement,
+      invocationNonce: "d".repeat(32),
+    }) !== false ||
+    slowGate.accept({
+      ...validAcknowledgement,
+      terminationNonce: "c".repeat(32),
+    }) !== false ||
+    slowGate.accept({ ...validAcknowledgement, extra: "spoof" }) !== false
+  ) {
+    throw new Error(failure);
+  }
+  slowTimers.advance(9_999);
+  if (
+    slowSignals.length !== 0 ||
+    slowGate.accept(validAcknowledgement) !== true
+  ) {
+    throw new Error(failure);
+  }
+  if (slowGate.accept(validAcknowledgement) !== false) throw new Error(failure);
+  slowTimers.advance(999);
+  if (slowSignals.length !== 0) throw new Error(failure);
+  slowTimers.advance(1);
+  if (slowSignals.join(",") !== "SIGKILL:after-ack") throw new Error(failure);
+
+  const deadlineTimers = manualTimers();
+  const deadlineSignals = [];
+  const deadlineGate = createCleanupAcknowledgementGate({
+    expectedPid,
+    invocationNonce,
+    terminationNonce,
+    cleanupDeadlineMs: 10_000,
+    closeAfterCleanupMs: 1_000,
+    schedule: deadlineTimers.schedule,
+    clear: deadlineTimers.clear,
+    onDeadline: () => deadlineSignals.push("SIGKILL:cleanup-deadline"),
+    onCloseAfterAcknowledgement: () =>
+      deadlineSignals.push("SIGKILL:after-ack"),
+  });
+
+  deadlineGate.beginTermination();
+  if (
+    deadlineGate.accept({ ...validAcknowledgement, pid: expectedPid + 1 }) !==
+    false
+  ) {
+    throw new Error(failure);
+  }
+  deadlineTimers.advance(10_000);
+  if (deadlineSignals.join(",") !== "SIGKILL:cleanup-deadline") {
+    throw new Error(failure);
+  }
+}
+
+function manualTimers() {
+  let now = 0;
+  let nextId = 0;
+  const timers = new Map();
+
+  const schedule = (callback, delayMs) => {
+    const id = nextId;
+    nextId += 1;
+    timers.set(id, { callback, at: now + delayMs });
+    return id;
+  };
+  const clear = (id) => timers.delete(id);
+  const advance = (durationMs) => {
+    const deadline = now + durationMs;
+    while (true) {
+      const due = [...timers.entries()]
+        .filter(([, timer]) => timer.at <= deadline)
+        .sort(([, left], [, right]) => left.at - right.at)[0];
+      if (due === undefined) break;
+      const [id, timer] = due;
+      timers.delete(id);
+      now = timer.at;
+      timer.callback();
+    }
+    now = deadline;
+  };
+
+  return Object.freeze({ advance, clear, schedule });
 }
 
 async function assertProcessTableKillReceipt(session) {

@@ -3,6 +3,11 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  cleanupAcknowledgementTerminationNonce as parseCleanupAcknowledgementTerminationNonce,
+  cleanupCompleteMessage,
+  isNonce,
+} from "./clean-api-demo-regression-cleanup-protocol.mjs";
 
 const repository = fileURLToPath(new URL("../../../", import.meta.url));
 const COMMAND_TIMEOUT_MS = 120_000;
@@ -10,9 +15,11 @@ const TERMINATION_GRACE_MS = 250;
 const MAX_CAPTURED_OUTPUT_BYTES = 32 * 1024;
 const COMMAND_FAILURE = "Clean API executable regression command failed.";
 const readinessPrefix = "REVELAI_EXECUTABLE_READY ";
-const cleanupCompletePrefix = "REVELAI_EXECUTABLE_CLEANUP_COMPLETE ";
 const sessionArgumentPrefix = "--revelai-clean-api-session=";
 const invocation = parseInvocation(process.argv.slice(2));
+const cleanupInvocationNonce = configuredCleanupInvocationNonce(
+  process.env.CLEAN_API_EXECUTABLE_CLEANUP_NONCE,
+);
 const fixturePrefix =
   invocation.session === undefined
     ? "revelai-clean-api-demo-"
@@ -35,6 +42,30 @@ let mainOperation;
 let shutdown;
 let shuttingDown = false;
 let fixtureCleanupFailed = false;
+let cleanupTerminationNonce;
+let resolveCleanupTerminationNonce;
+const cleanupAcknowledgementTermination = new Promise((resolve) => {
+  resolveCleanupTerminationNonce = resolve;
+});
+
+if (cleanupInvocationNonce !== undefined) {
+  process.on("message", (message) => {
+    if (!shuttingDown) return;
+    const terminationNonce = parseCleanupAcknowledgementTerminationNonce(
+      message,
+      cleanupInvocationNonce,
+    );
+    if (
+      terminationNonce === undefined ||
+      cleanupTerminationNonce !== undefined
+    ) {
+      return;
+    }
+    cleanupTerminationNonce = terminationNonce;
+    resolveCleanupTerminationNonce(terminationNonce);
+  });
+  process.channel?.unref();
+}
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
@@ -265,7 +296,7 @@ async function stopForSignal() {
     await Promise.all(records.map((record) => record.closed));
     await mainOperation.catch(() => undefined);
     if (!fixtureCleanupFailed && activeFixtures.size === 0) {
-      announceCleanupComplete();
+      await announceCleanupComplete();
     }
     process.exitCode = 1;
   })();
@@ -290,9 +321,33 @@ function announceReadiness(name) {
   console.log(`${readinessPrefix}${name} ${process.pid}`);
 }
 
-function announceCleanupComplete() {
-  if (process.env.CLEAN_API_EXECUTABLE_HANDSHAKE !== "1") return;
-  console.log(`${cleanupCompletePrefix}${process.pid}`);
+async function announceCleanupComplete() {
+  if (
+    process.env.CLEAN_API_EXECUTABLE_HANDSHAKE !== "1" ||
+    cleanupInvocationNonce === undefined ||
+    typeof process.send !== "function" ||
+    process.connected !== true
+  ) {
+    return;
+  }
+  process.channel?.ref();
+  const terminationNonce = await cleanupAcknowledgementTermination;
+  const message = cleanupCompleteMessage({
+    pid: process.pid,
+    invocationNonce: cleanupInvocationNonce,
+    terminationNonce,
+  });
+  try {
+    await new Promise((resolve) => {
+      try {
+        process.send(message, () => resolve());
+      } catch {
+        resolve();
+      }
+    });
+  } finally {
+    process.channel?.unref();
+  }
 }
 
 function assertCanStart() {
@@ -336,6 +391,12 @@ function parseInvocation(arguments_) {
   }
 
   return Object.freeze({ mode, session });
+}
+
+function configuredCleanupInvocationNonce(value) {
+  if (value === undefined) return undefined;
+  if (!isNonce(value)) throw new Error(COMMAND_FAILURE);
+  return value;
 }
 
 function sessionArgument(value) {
