@@ -1,5 +1,7 @@
 export const cleanupAcknowledgementRequestType =
   "revelai-clean-api-cleanup-ack-request-v1";
+export const cleanupRequestRetainedType =
+  "revelai-clean-api-cleanup-request-retained-v1";
 export const cleanupCompleteType = "revelai-clean-api-cleanup-complete-v1";
 
 export function cleanupAcknowledgementRequest({
@@ -27,6 +29,24 @@ export function cleanupCompleteMessage({
   assertNonce(terminationNonce);
   return Object.freeze({
     type: cleanupCompleteType,
+    pid,
+    invocationNonce,
+    terminationNonce,
+  });
+}
+
+export function cleanupRequestRetainedMessage({
+  pid,
+  invocationNonce,
+  terminationNonce,
+}) {
+  if (!Number.isSafeInteger(pid) || pid < 1) {
+    throw new Error("Invalid clean API cleanup request receipt.");
+  }
+  assertNonce(invocationNonce);
+  assertNonce(terminationNonce);
+  return Object.freeze({
+    type: cleanupRequestRetainedType,
     pid,
     invocationNonce,
     terminationNonce,

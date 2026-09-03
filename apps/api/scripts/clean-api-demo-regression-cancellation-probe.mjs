@@ -5,6 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
+import {
+  createReadinessObserver,
+  readinessPlanFor,
+  waitForReadiness,
+} from "./clean-api-demo-regression-readiness.mjs";
 
 if (process.platform === "win32") {
   throw new Error("Clean API executable cancellation probe requires POSIX.");
@@ -14,9 +19,7 @@ const wrapper = fileURLToPath(
   new URL("./clean-api-demo-regression-self-test.mjs", import.meta.url),
 );
 const fixtureRoot = "revelai-clean-api-demo-";
-const readinessPrefix = "REVELAI_EXECUTABLE_READY ";
 const sessionArgumentPrefix = "--revelai-clean-api-session=";
-const readinessWaitMs = 45_000;
 const scenarioCloseMs = 30_000;
 const closeAfterCleanupMs = 5_000;
 const resourceSettleMs = 2_000;
@@ -56,7 +59,9 @@ function scenariosFor(value) {
     return [
       {
         name: value,
-        readiness: "inner:before-case:demo",
+        boundary: "inner:after-fixture:demo",
+        readiness: "inner:after-fixture:demo",
+        requiresFixture: true,
         environment: { CLEAN_API_EXECUTABLE_SELF_TEST_TIMEOUT_MS: "5000" },
       },
     ];
@@ -116,7 +121,9 @@ function scenariosFor(value) {
     },
     {
       name: "timeout",
-      readiness: "inner:before-case:demo",
+      boundary: "inner:after-fixture:demo",
+      readiness: "inner:after-fixture:demo",
+      requiresFixture: true,
       environment: { CLEAN_API_EXECUTABLE_SELF_TEST_TIMEOUT_MS: "5000" },
     },
   ];
@@ -137,7 +144,14 @@ async function runScenario(options) {
     stdio: ["ignore", "pipe", "ignore"],
   });
   const close = observeClose(child);
-  const readiness = observeReadiness(child.stdout);
+  const readiness = createReadinessObserver({
+    stdout: child.stdout,
+    close,
+    createError: ({ kind, name }) =>
+      new Error(
+        `${failure} readiness ${kind}${name === undefined ? "" : `: ${name}`}`,
+      ),
+  });
   const processGroups = new Set(
     typeof child.pid === "number" ? [child.pid] : [],
   );
@@ -158,10 +172,11 @@ async function runScenario(options) {
       : Promise.reject(new Error(failure)),
   );
   let passed = false;
+  let scenarioError;
 
   try {
     if (typeof child.pid !== "number") throw new Error(failure);
-    const ready = await readiness.waitFor(options.readiness);
+    const ready = await waitForReadiness(readiness, readinessPlanFor(options));
     await observeDetachedDescendant(child.pid, ready, processGroups);
     await recordDescendantProcessGroups(child.pid, processGroups);
     if (options.requiresFixture) {
@@ -191,6 +206,8 @@ async function runScenario(options) {
       throw new Error(failure);
     }
     passed = true;
+  } catch (error) {
+    scenarioError = error;
   } finally {
     observing = false;
     if (!passed) {
@@ -202,6 +219,12 @@ async function runScenario(options) {
         ownedFixtures,
         forceCloseFalseAfterKill: options.forceCloseFalseAfterKill,
       });
+      if (
+        scenarioError instanceof Error &&
+        scenarioError.message.startsWith(`${failure} readiness `)
+      ) {
+        console.error(scenarioError.message);
+      }
       throw new Error(failure);
     }
   }
@@ -342,51 +365,6 @@ async function recordDescendantProcessGroups(rootPid, processGroups) {
 
 function announceProbeReadiness(name) {
   console.log(`REVELAI_EXECUTABLE_PROBE_READY ${name}`);
-}
-
-function observeReadiness(stdout) {
-  let output = "";
-  const ready = new Map();
-  const waiters = new Map();
-
-  stdout.on("data", (chunk) => {
-    output += Buffer.from(chunk).toString("utf8");
-    while (true) {
-      const newline = output.indexOf("\n");
-      if (newline === -1) break;
-      const line = output.slice(0, newline);
-      output = output.slice(newline + 1);
-      const match = new RegExp(
-        `^${readinessPrefix}(?<name>[^ ]+) (?<pid>[1-9][0-9]*)$`,
-      ).exec(line);
-      if (match?.groups === undefined) continue;
-      const entry = Object.freeze({
-        name: match.groups.name,
-        pid: Number(match.groups.pid),
-      });
-      ready.set(entry.name, entry);
-      const waiter = waiters.get(entry.name);
-      if (waiter !== undefined) waiter(entry);
-    }
-  });
-
-  return Object.freeze({
-    async waitFor(name) {
-      const existing = ready.get(name);
-      if (existing !== undefined) return existing;
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          waiters.delete(name);
-          reject(new Error(failure));
-        }, readinessWaitMs);
-        waiters.set(name, (entry) => {
-          clearTimeout(timeout);
-          waiters.delete(name);
-          resolve(entry);
-        });
-      });
-    },
-  });
 }
 
 function observeClose(child) {

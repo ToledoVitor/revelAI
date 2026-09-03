@@ -11,11 +11,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
   cleanupAcknowledgementRequest,
   cleanupCompleteType,
   cleanupCompleteMessage,
+  cleanupRequestRetainedType,
   createCleanupAcknowledgementGate,
 } from "./clean-api-demo-regression-cleanup-protocol.mjs";
 import {
@@ -24,6 +26,12 @@ import {
   createStreamingTokenSearch,
   processTableContains,
 } from "./clean-api-demo-regression-process-audit.mjs";
+import {
+  cleanApiModeTimeoutMs,
+  createReadinessObserver,
+  readinessPlanFor,
+  waitForReadiness,
+} from "./clean-api-demo-regression-readiness.mjs";
 
 if (process.platform === "win32") {
   throw new Error(
@@ -46,7 +54,6 @@ const probeTimeoutMs = 90_000;
 const terminationGraceMs = 500;
 const closeAfterKillMs = 5_000;
 const cleanupAcknowledgementTimeoutMs = 2_000;
-const preSignalRequestSettleMs = 100;
 const cleanupBoundary = "inner:after-fixture:demo";
 const auditChildReadinessTimeoutMs = 1_000;
 const auditChildReadyMarker = "REVELAI_CLEAN_API_AUDIT_CHILD_READY";
@@ -76,6 +83,7 @@ const foreignClose = observeClose(foreign);
 
 try {
   await assertRealChildAcknowledgesAcrossDeliveryOrders();
+  await assertReadinessPlanBoundsAndClose();
   assertCleanupAcknowledgementProtocol();
   await assertTimeoutScenarioCleansItsFixture();
   await assertOrderedCleanupFault({
@@ -159,7 +167,10 @@ async function assertTimeoutScenarioCleansItsFixture() {
   if (
     result.kind !== "close" ||
     result.exitCode !== 0 ||
-    !result.output.includes("Clean API executable cancellation probe passed.")
+    !result.output.includes(
+      "Clean API executable cancellation probe passed.",
+    ) ||
+    !result.output.includes("REVELAI_EXECUTABLE_PROBE_READY timeout")
   ) {
     throw new Error(failure);
   }
@@ -176,6 +187,87 @@ async function assertRealChildAcknowledgesAcrossDeliveryOrders() {
   });
 }
 
+async function assertReadinessPlanBoundsAndClose() {
+  const plan = readinessPlanFor({
+    name: "between-case",
+    readiness: "inner:between-case:demo",
+  });
+  if (
+    plan.progress !== "inner:before-case:demo" ||
+    plan.targetTimeoutMs !== cleanApiModeTimeoutMs
+  ) {
+    throw new Error(failure);
+  }
+
+  const withinBound = readinessFixture();
+  const resolvesWithinBound = waitForReadiness(withinBound.observer, plan);
+  withinBound.stdout.write(
+    "REVELAI_EXECUTABLE_READY inner:before-case:demo 12345\n",
+  );
+  await Promise.resolve();
+  withinBound.timers.advance(cleanApiModeTimeoutMs - 1);
+  withinBound.stdout.write(
+    "REVELAI_EXECUTABLE_READY inner:between-case:demo 12345\n",
+  );
+  const ready = await resolvesWithinBound;
+  if (ready.name !== "inner:between-case:demo" || ready.pid !== 12_345) {
+    throw new Error(failure);
+  }
+
+  const expiresAtBound = readinessFixture();
+  const rejectsAtBound = waitForReadiness(expiresAtBound.observer, plan);
+  expiresAtBound.stdout.write(
+    "REVELAI_EXECUTABLE_READY inner:before-case:demo 12345\n",
+  );
+  await Promise.resolve();
+  expiresAtBound.timers.advance(cleanApiModeTimeoutMs);
+  await assertRejects(rejectsAtBound);
+  assertReadinessError(expiresAtBound, "timeout", plan.target);
+
+  const closesEarly = readinessFixture();
+  const rejectsOnClose = waitForReadiness(closesEarly.observer, plan);
+  closesEarly.stdout.write(
+    "REVELAI_EXECUTABLE_READY inner:before-case:demo 12345\n",
+  );
+  await Promise.resolve();
+  closesEarly.close.resolve({ kind: "close", exitCode: 1 });
+  await assertRejects(rejectsOnClose);
+  assertReadinessError(closesEarly, "child-close", plan.target);
+}
+
+function readinessFixture() {
+  const stdout = new PassThrough();
+  const close = deferred();
+  const timers = manualTimers();
+  const errors = [];
+  const observer = createReadinessObserver({
+    stdout,
+    close: Object.freeze({ closed: close.promise }),
+    createError: (details) => {
+      errors.push(details);
+      return new Error(failure);
+    },
+    schedule: timers.schedule,
+    clear: timers.clear,
+  });
+  return Object.freeze({ close, errors, observer, stdout, timers });
+}
+
+function assertReadinessError(fixture, kind, name) {
+  const error = fixture.errors.at(-1);
+  if (error?.kind !== kind || error.name !== name) throw new Error(failure);
+}
+
+async function assertRejects(promise) {
+  let rejected = false;
+  try {
+    await promise;
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) throw new Error(failure);
+}
+
 async function assertRealChildAcknowledgesCleanup({ requestBeforeSignal }) {
   const session = sessionToken();
   const invocationNonce = sessionToken();
@@ -190,6 +282,7 @@ async function assertRealChildAcknowledgesCleanup({ requestBeforeSignal }) {
         CLEAN_API_EXECUTABLE_BOUNDARY: cleanupBoundary,
         CLEAN_API_EXECUTABLE_CLEANUP_NONCE: invocationNonce,
         CLEAN_API_EXECUTABLE_HANDSHAKE: "1",
+        CLEAN_API_EXECUTABLE_TEST_REQUEST_RETAINED_RECEIPT: "1",
       },
       silent: true,
     },
@@ -217,8 +310,27 @@ async function assertRealChildAcknowledgesCleanup({ requestBeforeSignal }) {
 
     if (requestBeforeSignal) {
       await sendIpcMessage(child, request);
-      await wait(preSignalRequestSettleMs);
-      if (messages.length !== 0) throw new Error(failure);
+      await waitForRequestRetained({
+        child,
+        close,
+        messages,
+        pid: child.pid,
+        invocationNonce,
+        terminationNonce,
+        timeoutMs: cleanupAcknowledgementTimeoutMs,
+      });
+      if (
+        messages.some(({ message }) =>
+          isExpectedCleanupAcknowledgement({
+            message,
+            pid: child.pid,
+            invocationNonce,
+            terminationNonce,
+          }),
+        )
+      ) {
+        throw new Error(failure);
+      }
     }
 
     const shutdownStartedAt = Date.now();
@@ -257,6 +369,64 @@ async function assertRealChildAcknowledgesCleanup({ requestBeforeSignal }) {
     await assertNoSessionFixtures(session);
     await assertNoSessionProcesses(session);
   }
+}
+
+async function waitForRequestRetained({
+  child,
+  close,
+  messages,
+  pid,
+  invocationNonce,
+  terminationNonce,
+  timeoutMs,
+}) {
+  const deadline = Date.now() + timeoutMs;
+  let closeResult;
+  void close.closed.then((result) => {
+    closeResult = result;
+  });
+
+  while (Date.now() < deadline) {
+    if (
+      messages.some(({ message }) =>
+        isExpectedRequestRetained({
+          message,
+          pid,
+          invocationNonce,
+          terminationNonce,
+        }),
+      )
+    ) {
+      return;
+    }
+    if (closeResult !== undefined || child.connected !== true) {
+      throw new Error(failure);
+    }
+    await wait(10);
+  }
+  throw new Error(failure);
+}
+
+function isExpectedRequestRetained({
+  message,
+  pid,
+  invocationNonce,
+  terminationNonce,
+}) {
+  return (
+    message !== null &&
+    typeof message === "object" &&
+    Object.getPrototypeOf(message) === Object.prototype &&
+    Object.keys(message).length === 4 &&
+    Object.hasOwn(message, "type") &&
+    Object.hasOwn(message, "pid") &&
+    Object.hasOwn(message, "invocationNonce") &&
+    Object.hasOwn(message, "terminationNonce") &&
+    message.type === cleanupRequestRetainedType &&
+    message.pid === pid &&
+    message.invocationNonce === invocationNonce &&
+    message.terminationNonce === terminationNonce
+  );
 }
 
 async function waitForCleanupAcknowledgement({
@@ -840,4 +1010,12 @@ function sessionToken() {
 
 function sessionArgument(value) {
   return `--revelai-clean-api-session=${value}`;
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((resolveDeferred) => {
+    resolve = resolveDeferred;
+  });
+  return Object.freeze({ promise, resolve });
 }

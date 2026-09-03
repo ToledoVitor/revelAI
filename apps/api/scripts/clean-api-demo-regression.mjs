@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   cleanupAcknowledgementTerminationNonce as parseCleanupAcknowledgementTerminationNonce,
   cleanupCompleteMessage,
+  cleanupRequestRetainedMessage,
   isNonce,
 } from "./clean-api-demo-regression-cleanup-protocol.mjs";
 
@@ -26,6 +27,8 @@ const fixturePrefix =
     : `revelai-clean-api-demo-${invocation.session}-`;
 const startUncooperativeChild =
   process.env.CLEAN_API_EXECUTABLE_TEST_UNCOOPERATIVE_CHILD === "1";
+const requestRetainedReceiptEnabled =
+  process.env.CLEAN_API_EXECUTABLE_TEST_REQUEST_RETAINED_RECEIPT === "1";
 const executableCases = [
   { name: "demo", script: "demo:smoke" },
   { name: "operator", script: "operator:receipt-smoke" },
@@ -63,6 +66,7 @@ if (cleanupInvocationNonce !== undefined) {
     // stopForSignal emits only after signal-driven cleanup has settled.
     cleanupTerminationNonce = terminationNonce;
     resolveCleanupTerminationNonce(terminationNonce);
+    announceRequestRetained(terminationNonce);
   });
   process.channel?.unref();
 }
@@ -347,6 +351,29 @@ async function announceCleanupComplete() {
     });
   } finally {
     process.channel?.unref();
+  }
+}
+
+function announceRequestRetained(terminationNonce) {
+  if (
+    !requestRetainedReceiptEnabled ||
+    cleanupInvocationNonce === undefined ||
+    typeof process.send !== "function" ||
+    process.connected !== true
+  ) {
+    return;
+  }
+  try {
+    process.send(
+      cleanupRequestRetainedMessage({
+        pid: process.pid,
+        invocationNonce: cleanupInvocationNonce,
+        terminationNonce,
+      }),
+      () => undefined,
+    );
+  } catch {
+    // The test-only receipt cannot change cancellation or cleanup semantics.
   }
 }
 

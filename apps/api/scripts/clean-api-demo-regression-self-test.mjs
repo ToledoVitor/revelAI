@@ -5,12 +5,13 @@ import {
   cleanupAcknowledgementRequest,
   createCleanupAcknowledgementGate,
 } from "./clean-api-demo-regression-cleanup-protocol.mjs";
+import { cleanApiModeTimeoutMs } from "./clean-api-demo-regression-readiness.mjs";
 
 const script = fileURLToPath(
   new URL("./clean-api-demo-regression.mjs", import.meta.url),
 );
 const MAX_OUTPUT_BYTES = 32 * 1024;
-const DEFAULT_MODE_TIMEOUT_MS = 120_000;
+const DEFAULT_MODE_TIMEOUT_MS = cleanApiModeTimeoutMs;
 const CLEANUP_DEADLINE_MS = 10_000;
 const CLOSE_AFTER_CLEANUP_MS = 1_000;
 const FAILURE = "Clean API executable self-test failed.";
