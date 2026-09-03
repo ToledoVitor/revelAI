@@ -1,10 +1,10 @@
 # Design QA — RevelAI web home
 
-## Audit record
-
 ## W6 document authority
 
 Only [Final W6 acceptance](#final-w6-acceptance--2026-09-03) is the current W6 authority. Every earlier W6 `pending`, `current authority`, `authoritative`, `current disposition`, reviewer disposition, and `final result` statement is a dated historical checkpoint retained as evidence; it is superseded by the independent Sol-approved hosted result at the end of this document.
+
+## Audit record
 
 - Audited route/state: `/`, `ready` / `home-default`.
 - Source captures: `docs/design/references/desktop-home.png` (native `1487×1058`) and `docs/design/references/mobile-home.png` (native `853×1844`).
