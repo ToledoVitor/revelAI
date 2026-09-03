@@ -1,6 +1,13 @@
 import { ArrowRight, List } from "phosphor-react-native";
 import { useState } from "react";
-import { Image, Pressable, StyleSheet, Text, View } from "react-native";
+import {
+  Image,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { router } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import heroImage from "../../assets/futsal-hero.png";
@@ -29,7 +36,7 @@ const choices: readonly Choice[] = [
     detail:
       "Insights aproximados sobre seu desempenho para você evoluir no seu ritmo.",
     number: "01",
-    title: "Treino livre",
+    title: "Treino livre — análise aproximada",
   },
   {
     destination: "desafio-verificado",
@@ -50,7 +57,11 @@ export function HomeRoute() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <View style={styles.screen}>
+      <ScrollView
+        accessibilityLabel="Conteúdo inicial rolável"
+        contentContainerStyle={styles.scrollContent}
+        style={styles.screen}
+      >
         <View style={styles.header}>
           <Text
             accessibilityLabel="RevelAI"
@@ -191,7 +202,7 @@ export function HomeRoute() {
             />
           </Pressable>
         </View>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -389,5 +400,8 @@ const styles = StyleSheet.create({
   screen: {
     backgroundColor: theme.color.warmWhite,
     flex: 1,
+  },
+  scrollContent: {
+    flexGrow: 1,
   },
 });

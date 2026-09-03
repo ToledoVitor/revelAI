@@ -12,6 +12,8 @@
     "export:web": "expo export --platform web",
     "preexport:ios": "pnpm run prepare:runtime",
     "export:ios": "expo export --platform ios",
+    "pretest:web:hydration": "pnpm run export:web",
+    "test:web:hydration": "playwright test --config playwright.web-smoke.config.ts",
     "lint": "eslint app src",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "pretest": "pnpm run prepare:runtime",
@@ -49,13 +51,15 @@
   "devDependencies": {
     "@babel/core": "7.28.4",
     "@testing-library/react-native": "13.3.3",
+    "@playwright/test": "1.62.1",
     "@types/jest": "29.5.14",
     "@types/react": "~19.1.10",
     "expo-doctor": "1.20.4",
     "jest": "29.7.0",
     "jest-expo": "54.0.18",
     "react-test-renderer": "19.1.0",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "yaml": "2.9.0"
   },
   "jest": {
     "preset": "jest-expo",
@@ -65,7 +69,8 @@
     "moduleNameMapper": {
       "^@revelai/contracts$": "<rootDir>/../../packages/contracts/dist/index.js",
       "^@revelai/design-system$": "<rootDir>/../../packages/design-system/dist/index.js",
-      "^phosphor-react-native$": "<rootDir>/node_modules/phosphor-react-native/lib/commonjs/index.js"
+      "^phosphor-react-native$": "<rootDir>/node_modules/phosphor-react-native/lib/commonjs/index.js",
+      "^yaml$": "<rootDir>/node_modules/yaml/dist/index.js"
     }
   },
   "expo": {

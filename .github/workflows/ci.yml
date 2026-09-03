@@ -27,6 +27,7 @@ jobs:
       - name: Provision codec-backed C10 demo media acceptance
         run: sudo apt-get update && sudo apt-get install --yes ffmpeg
       - run: pnpm --filter @revelai/web exec playwright install --with-deps chromium
+      - run: pnpm --filter @revelai/mobile run test:web:hydration
       - run: pnpm check
       - run: pnpm --filter @revelai/web run test:production-router
       - run: pnpm --filter @revelai/web run test:demo:e2e

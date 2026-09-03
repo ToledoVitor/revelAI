@@ -67,4 +67,12 @@ describe("HomeRoute", () => {
     );
     expect(screen.getByText("Em breve")).toBeTruthy();
   });
+
+  it("keeps the required free-training truth label visible", () => {
+    render(<HomeRoute />);
+
+    expect(
+      screen.getByText("Treino livre — análise aproximada", { exact: true }),
+    ).toBeTruthy();
+  });
 });

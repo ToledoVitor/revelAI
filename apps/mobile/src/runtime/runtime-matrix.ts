@@ -1,5 +1,6 @@
 export const runtimeMatrix = {
   expo: "54.0.18",
+  expoMetroConfig: "54.0.7",
   jest: "29.7.0",
   jestExpo: "54.0.18",
   metro: "0.83.2",
@@ -11,4 +12,5 @@ export const runtimeMatrix = {
   reactNativeSvg: "15.12.1",
   reactNativeWeb: "0.21.0",
   secureStore: "~15.0.8",
+  secureStoreResolved: "15.0.8",
 } as const;
