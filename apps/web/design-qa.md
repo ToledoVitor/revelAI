@@ -269,3 +269,9 @@ final result: pending independent Sol acceptance.
 Functional commits `e6aa4fc` and `e858e51` alter no visual state or approved artifact. The earlier browser claim is narrowed to observed evidence: the Verified trace now requires upload progress, then the separate pending main named `Processando tentativa` and enabled visible `Atualizar agora`, before its terminal report assertion. A progressbar alone is not pending evidence. The real wrapper is also covered against a foreign health-200 owner, a hanging foreign socket, and a wrapper setup error carrying an absolute local path; all three fail safely without accepting foreign readiness or disclosing that path. Existing V02–V06 visual inspection remains applicable. Native Linux/x64 codec terminal evidence and independent Sol review are still required.
 
 final result: pending independent Sol acceptance.
+
+## CI child lifecycle correction — 2026-09-02
+
+Functional commit `e99733f` changes no visual state or accepted artifact. The verified browser trace has one 120-second post-upload budget shared by progress, pending, and terminal observations; it no longer permits independent 120-second pending and terminal waits. The browser harness consumes only its child’s exact readiness token and never emits child stdout/stderr. Regressions prove that a pre-setup child stack, local path, and sentinel secret do not reach wrapper output, and that successful and SIGTERM-resistant owned children release both 4174 and 4175 before their wrapper completes. Existing V02–V06 visual inspection remains applicable. Native Linux/x64 codec terminal evidence and independent Sol review are still required.
+
+final result: pending independent Sol acceptance.

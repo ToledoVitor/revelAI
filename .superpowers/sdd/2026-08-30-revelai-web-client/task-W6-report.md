@@ -428,7 +428,7 @@ Review base: `be9e864`. Functional/test corrections: `e6aa4fc` (`fix(web): harde
 
 - The Verified real-API browser trace now requires the ordered visible lifecycle: upload progressbar, then the pending main landmark named `Processando tentativa` and the enabled visible `Atualizar agora` control, then the terminal report within the unchanged named 120-second outcome budget. The local `--serve-check` Playwright command executes this exact browser spec; normal codec media still runs only in hosted acceptance.
 - `start-demo-e2e-server.mjs` no longer accepts a generic `GET /health` response as readiness. It pipes the exact post-listen marker from the API child it spawned, then probes only after that marker. Both marker and probe race the owned child exit and one abortable 60-second readiness budget; completion aborts the outstanding probe. This rejects both a foreign health-200 server and a foreign socket that accepts but never responds, rather than waiting for an unrelated fetch.
-- The wrapper forwards the owned API child's already-sanitized output, but its own setup/readiness catch now emits only `RevelAI demo E2E server failed to start.`. A real wrapper-process regression with a temporarily unavailable generated `dist/index.html` proves an absolute local path is absent from its terminal output.
+- The wrapper consumes child streams for its own readiness protocol but does not forward them. Its own setup/readiness catch emits only `RevelAI demo E2E server failed to start.`. A real wrapper-process regression with a temporarily unavailable generated `dist/index.html` proves an absolute local path is absent from its terminal output.
 
 ### RED/GREEN evidence
 
@@ -442,5 +442,30 @@ Review base: `be9e864`. Functional/test corrections: `e6aa4fc` (`fix(web): harde
 | GREEN | `rtk pnpm --filter @revelai/web run lint`; `rtk pnpm --filter @revelai/web run typecheck`; focused Prettier; and `rtk git diff --check` — all exit **0**. |
 
 The local codec-limited smoke is proof of the browser state ordering and owned startup boundary, not of native codec terminal throughput. The definitive normal C10 fixture terminal remains the controller-pushed Linux/x64 hosted gate. Independent Sol acceptance remains pending.
+
+final result: pending independent Sol acceptance.
+
+## CI fix round 7 — closed child protocol, teardown, and one outcome budget — 2026-09-02
+
+Review base: `0309dc0`. Functional/test correction: `e99733f` (`fix(web): bound demo E2E lifecycle`). This round changes no rendering, approved asset, visual threshold, or capture artifact. It tightens only the real demo acceptance harness and its evidence; no fresh visual artifact is claimed.
+
+### Reviewed corrections
+
+- The wrapper now drains both owned child streams without printing them. Its only accepted child protocol is one exact post-listen stdout token; all child failure text, including a pre-local-demo stack, absolute fixture path, and test secret sentinel, is discarded. The wrapper's sole external failure text remains `RevelAI demo E2E server failed to start.`. A `--test-api-entry` seam is accepted only under `NODE_ENV=test` and only from the wrapper-owned fixture directory; it cannot select an arbitrary production child.
+- Owned-child shutdown uses named `childTerminationGraceMilliseconds = 1_000`: TERM, wait for `close`, SIGKILL only if that owned child remains alive at the grace boundary, then await `close`. The listener is retained until `close`; a child observed between `exit` and `close` is still awaited. No port/PID discovery or kill targets a foreign owner.
+- The Verified trace starts one 120-second deadline immediately after the visible upload click. Upload progress, pending main/manual refresh, and terminal report each receive the same decreasing remainder; none receives a fresh 120 seconds. The 150-second Playwright test timeout is explicitly only teardown/reporting backstop room. The 120-second composition is unchanged: 30 s upload + 30 s C5 extraction + 30 s analysis + 5 s capped poll + 25 s CI margin.
+
+### RED/GREEN evidence
+
+| Phase | Exact command / observed result |
+| --- | --- |
+| RED | `rtk node --test --test-name-pattern='does not forward a child failure' apps/web/scripts/start-demo-e2e-server.test.mjs` with the temporary raw-stderr forwarding mutation — **1 failed**. Captured output contained the child fixture path, stack frames, and `w6-child-pretry-secret`; restoring the closed protocol removes all three. |
+| RED | `rtk node --test --test-name-pattern='force-stops only its owned resistant child' apps/web/scripts/start-demo-e2e-server.test.mjs` with the temporary former TERM-and-unbounded-exit mutation — **1 failed** after the finite 2 s test limit: `Owned demo wrapper did not close after shutdown.` The descendant was contained in the newly created test-owned process group for cleanup only. |
+| GREEN | `rtk pnpm --filter @revelai/web run test:demo:e2e:smoke` — API/Web build; real-wrapper regression suite **6/6 passed** (foreign health, hanging socket, setup path, pre-setup child path/stack/sentinel, normal port release, resistant-child port release); Playwright browser traces **2/2 passed**. The Verified trace runs the single post-upload deadline and observes progress → pending/enabled refresh → terminal. |
+| GREEN | `rtk pnpm --filter @revelai/api run demo:smoke` — terminal check and occupied-port regression passed. `rtk node --test apps/web/scripts/demo-e2e-environment.test.mjs` — **1/1 passed**. |
+| GREEN | `rtk env npm_execpath=/Users/vitortoledo/.nvm/versions/node/v22.19.0/lib/node_modules/corepack/dist/pnpm.js pnpm --filter @revelai/web exec vitest run src/visual/playwright-runner.test.ts --reporter=dot` — **1 file, 6/6 passed**, including cross-port ownership. |
+| GREEN | Web lint, typecheck, focused Prettier, and `rtk git diff --check` — all exit **0**. |
+
+The local smoke proves browser ordering, child-protocol safety, and bounded ownership cleanup; it is not native normal-codec terminal acceptance. The definitive C10 normal fixture terminal remains controller-pushed Linux/x64 hosted CI, and independent Sol acceptance remains pending.
 
 final result: pending independent Sol acceptance.
