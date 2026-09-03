@@ -189,6 +189,10 @@ test("waits for cancelled fixture codecs before leaving startup", async () => {
   const codecReady = join(markers, "codec-ready");
   const codecClosed = join(markers, "codec-closed");
   const apiStarted = join(markers, "api-started");
+  const expectedCodecNames = new Set([
+    "free-portrait.mp4",
+    "verified-landscape.mp4",
+  ]);
   await rm(mediaDirectory, { recursive: true, force: true });
   await assertPortAvailable(apiPort);
   await assertPortAvailable(webPort);
@@ -203,7 +207,7 @@ test("waits for cancelled fixture codecs before leaving startup", async () => {
     testCodecEntry: delayedStopCodec,
   });
   try {
-    await waitForFile(codecReady, wrapper);
+    await waitForCodecMarkers(codecReady, expectedCodecNames, wrapper);
     assert.equal(await isWebHealthReady(), false);
     wrapper.kill("SIGTERM");
     const closure = await waitForCloseAt(
@@ -212,13 +216,20 @@ test("waits for cancelled fixture codecs before leaving startup", async () => {
     );
 
     assert.equal(closure.exitCode, 0);
-    const closedAt = (await readFile(codecClosed, "utf8"))
+    const closed = (await readFile(codecClosed, "utf8"))
       .trim()
       .split("\n")
-      .map(Number);
-    assert.equal(closedAt.length, 2);
-    assert.ok(closedAt.every(Number.isFinite));
-    assert.ok(closedAt.every((time) => time <= closure.closedAt));
+      .map((line) => {
+        const [name, time] = line.split(":");
+        return { name, time: Number(time) };
+      });
+    assert.equal(closed.length, 2);
+    assert.deepEqual(
+      new Set(closed.map((entry) => entry.name)),
+      expectedCodecNames,
+    );
+    assert.ok(closed.every((entry) => Number.isFinite(entry.time)));
+    assert.ok(closed.every((entry) => entry.time <= closure.closedAt));
     await assert.rejects(access(apiStarted));
     await assert.rejects(access(mediaDirectory));
     await assertPortAvailable(apiPort);
@@ -390,20 +401,24 @@ function waitForCloseAt(child, timeoutMilliseconds) {
   });
 }
 
-async function waitForFile(path, child) {
+async function waitForCodecMarkers(path, expectedNames, child) {
   const deadline = Date.now() + wrapperTimeoutMilliseconds;
   while (Date.now() < deadline) {
     if (child.exitCode !== null)
       throw new Error("Demo wrapper exited before fixture codec began.");
     try {
-      await access(path);
-      return;
+      const observedNames = new Set(
+        (await readFile(path, "utf8")).trim().split("\n").filter(Boolean),
+      );
+      if ([...expectedNames].every((name) => observedNames.has(name))) return;
     } catch {
-      // The owned fixture codec has not recorded its start yet.
+      // The owned fixture codecs have not both recorded their starts yet.
     }
     await new Promise((resolveTimer) => setTimeout(resolveTimer, 25));
   }
-  throw new Error("Demo fixture codec did not begin within its test budget.");
+  throw new Error(
+    "Both owned fixture codecs did not begin within the test budget.",
+  );
 }
 
 async function stopOwnedWrapperGroup(wrapper) {
