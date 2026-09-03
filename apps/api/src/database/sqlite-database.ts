@@ -882,16 +882,23 @@ function openSqliteDatabaseInternal(
 ): SqliteDatabase {
   let raw: Database.Database | undefined;
   try {
-    raw = new Database(filename);
-    raw.pragma("foreign_keys = ON");
-    raw.pragma("busy_timeout = 5000");
-    const targetMigrationVersion = resolveMigrationTargetVersion(migrationVersion);
-    // WAL is a persistent change, so validate first to preserve invalid
-    // predecessors byte-for-byte. It must then happen before the migration
-    // writer commits, otherwise another starter can acquire that writer and
-    // make this connection's post-commit WAL transition fail with SQLITE_BUSY.
-    readValidatedMigrationStartup(raw, targetMigrationVersion);
-    raw.pragma("journal_mode = WAL");
+    raw = openSqliteRawConnection(filename);
+    const targetMigrationVersion =
+      resolveMigrationTargetVersion(migrationVersion);
+    if (readSqliteJournalMode(raw) !== "wal") {
+      // WAL is persistent and cannot change inside a transaction. A temporary
+      // exclusive-mode connection keeps another process from changing the
+      // validated history before WAL is durable; closing it releases that
+      // mode before the regular repository connection is exposed.
+      raw.pragma("locking_mode = EXCLUSIVE");
+      readValidatedMigrationStartup(raw, targetMigrationVersion);
+      raw.pragma("journal_mode = WAL");
+      raw.close();
+      raw = openSqliteRawConnection(filename);
+    }
+    // Revalidate on the regular connection: a write that begins only after
+    // exclusive startup is released must fail closed without another journal
+    // transition or any durable startup repair.
     applyMigrations(raw, targetMigrationVersion);
   } catch (error) {
     raw?.close();
@@ -909,6 +916,13 @@ function openSqliteDatabaseInternal(
   if (cleanupAuthority)
     c4AcceptedMediaCleanupAuthorities.set(database, cleanupAuthority);
   return database;
+}
+
+function openSqliteRawConnection(filename: string): Database.Database {
+  const raw = new Database(filename);
+  raw.pragma("foreign_keys = ON");
+  raw.pragma("busy_timeout = 5000");
+  return raw;
 }
 
 /**
@@ -1015,6 +1029,29 @@ function applyMigrations(
         // Preserve the original migration failure.
       }
     throw error;
+  }
+}
+
+type SqliteJournalMode =
+  | "delete"
+  | "truncate"
+  | "persist"
+  | "memory"
+  | "wal"
+  | "off";
+
+function readSqliteJournalMode(raw: Database.Database): SqliteJournalMode {
+  const journalMode = raw.pragma("journal_mode", { simple: true });
+  switch (journalMode) {
+    case "delete":
+    case "truncate":
+    case "persist":
+    case "memory":
+    case "wal":
+    case "off":
+      return journalMode;
+    default:
+      throw new Error("sqlite journal mode is invalid");
   }
 }
 

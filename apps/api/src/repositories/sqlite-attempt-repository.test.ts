@@ -392,10 +392,12 @@ function startSqliteLockBarrier(
   return Object.freeze({ locked, done });
 }
 
-function startPostMigrationCommitLockBarrier(input: Readonly<{
-  filename: string;
-  holdMilliseconds?: number;
-}>): Readonly<{ triggerAndWaitForLock(): void; done: Promise<void> }> {
+function startPostMigrationCommitLockBarrier(
+  input: Readonly<{
+    filename: string;
+    holdMilliseconds?: number;
+  }>,
+): Readonly<{ triggerAndWaitForLock(): void; done: Promise<void> }> {
   const state = new Int32Array(
     new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2),
   );
@@ -456,9 +458,132 @@ function startPostMigrationCommitLockBarrier(input: Readonly<{
       Atomics.notify(state, 0);
       Atomics.wait(state, 1, 0, 1_000);
       if (Atomics.load(state, 1) !== 1)
-        throw new Error("Database lock barrier did not acquire its write lock.");
+        throw new Error(
+          "Database lock barrier did not acquire its write lock.",
+        );
     },
     done,
+  });
+}
+
+type MigrationHistoryInvalidation =
+  | Readonly<{
+      kind: "blocked";
+      message: string;
+    }>
+  | Readonly<{
+      kind: "invalidated";
+      fileBytes: Uint8Array;
+      journalMode: unknown;
+      userVersion: unknown;
+    }>;
+
+function startMigrationHistoryInvalidator(
+  input: Readonly<{
+    busyTimeoutMilliseconds: number;
+    filename: string;
+    userVersion: number;
+  }>,
+): Readonly<{
+  attemptAndWait(): "blocked" | "invalidated";
+  result: Promise<MigrationHistoryInvalidation>;
+  terminate(): void;
+}> {
+  const state = new Int32Array(
+    new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2),
+  );
+  let resolveResult!: (value: MigrationHistoryInvalidation) => void;
+  let rejectResult!: (error: Error) => void;
+  const result = new Promise<MigrationHistoryInvalidation>(
+    (resolve, reject) => {
+      resolveResult = resolve;
+      rejectResult = reject;
+    },
+  );
+  const worker = new Worker(
+    `
+      const fs = require("node:fs");
+      const Database = require("better-sqlite3");
+      const { parentPort, workerData } = require("node:worker_threads");
+      const state = new Int32Array(workerData.state);
+      Atomics.wait(state, 0, 0);
+      let database;
+      try {
+        database = new Database(workerData.filename);
+        database.pragma("busy_timeout = " + workerData.busyTimeoutMilliseconds);
+        try {
+          database.pragma("user_version = " + workerData.userVersion);
+          const journalMode = database.pragma("journal_mode", { simple: true });
+          const userVersion = database.pragma("user_version", { simple: true });
+          database.close();
+          const result = {
+            type: "invalidated",
+            fileBytes: fs.readFileSync(workerData.filename),
+            journalMode,
+            userVersion,
+          };
+          Atomics.store(state, 1, 1);
+          Atomics.notify(state, 1);
+          parentPort.postMessage(result);
+        } catch (error) {
+          database.close();
+          Atomics.store(state, 1, 2);
+          Atomics.notify(state, 1);
+          parentPort.postMessage({ type: "blocked", message: String(error) });
+        }
+      } catch (error) {
+        try { database?.close(); } catch {}
+        Atomics.store(state, 1, -1);
+        Atomics.notify(state, 1);
+        parentPort.postMessage({ type: "error", message: String(error) });
+      }
+    `,
+    { eval: true, workerData: { ...input, state: state.buffer } },
+  );
+  worker.on("message", (message: unknown) => {
+    const value = message as {
+      type?: string;
+      message?: string;
+      fileBytes?: Uint8Array;
+      journalMode?: unknown;
+      userVersion?: unknown;
+    };
+    if (value.type === "invalidated" && value.fileBytes !== undefined) {
+      resolveResult({
+        kind: "invalidated",
+        fileBytes: value.fileBytes,
+        journalMode: value.journalMode,
+        userVersion: value.userVersion,
+      });
+      void worker.terminate();
+    }
+    if (value.type === "blocked") {
+      resolveResult({ kind: "blocked", message: value.message ?? "" });
+      void worker.terminate();
+    }
+    if (value.type === "error") {
+      rejectResult(new Error(value.message));
+      void worker.terminate();
+    }
+  });
+  worker.on("error", (error) => {
+    rejectResult(error);
+    void worker.terminate();
+  });
+  return Object.freeze({
+    attemptAndWait: () => {
+      Atomics.store(state, 0, 1);
+      Atomics.notify(state, 0);
+      Atomics.wait(state, 1, 0, 1_000);
+      const outcome = Atomics.load(state, 1);
+      if (outcome === 1) return "invalidated";
+      if (outcome === 2) return "blocked";
+      throw new Error("Migration history invalidator did not finish.");
+    },
+    result,
+    terminate: () => {
+      void worker.terminate();
+    },
   });
 }
 
@@ -5124,6 +5249,106 @@ describe("SQLiteAttemptRepository", () => {
       reopened?.close();
     }
     await barrier.done;
+  });
+
+  it("prevents history mutation from interleaving preflight and WAL", async () => {
+    const filename = join(
+      fixture.directory,
+      "migration-history-preflight-to-wal.sqlite",
+    );
+    const current = openSqliteDatabase(filename);
+    current.raw.pragma("journal_mode = DELETE");
+    current.close();
+
+    const invalidator = startMigrationHistoryInvalidator({
+      busyTimeoutMilliseconds: 0,
+      filename,
+      userVersion: 24,
+    });
+    const originalPragma = Database.prototype.pragma;
+    let invalidationOutcome: "blocked" | "invalidated" | undefined;
+    let attemptedInvalidation = false;
+    let opened: SqliteDatabase | undefined;
+    let startupError: unknown;
+    try {
+      Database.prototype.pragma = function (
+        source: string,
+        options?: Database.PragmaOptions,
+      ): unknown {
+        if (!attemptedInvalidation && source === "journal_mode = WAL") {
+          attemptedInvalidation = true;
+          invalidationOutcome = invalidator.attemptAndWait();
+        }
+        return originalPragma.call(this, source, options);
+      };
+      try {
+        opened = openSqliteDatabase(filename);
+      } catch (error) {
+        startupError = error;
+      }
+    } finally {
+      Database.prototype.pragma = originalPragma;
+      opened?.close();
+    }
+
+    const invalidation = await invalidator.result;
+    expect(invalidationOutcome).toBe("blocked");
+    expect(invalidation).toMatchObject({
+      kind: "blocked",
+      message: expect.stringContaining("database is locked"),
+    });
+    expect(startupError).toBeUndefined();
+  });
+
+  it("does not mutate an invalidated handoff after exclusive WAL startup", async () => {
+    const filename = join(
+      fixture.directory,
+      "migration-history-wal-handoff.sqlite",
+    );
+    const current = openSqliteDatabase(filename);
+    current.raw.pragma("journal_mode = DELETE");
+    current.close();
+
+    const invalidator = startMigrationHistoryInvalidator({
+      busyTimeoutMilliseconds: 0,
+      filename,
+      userVersion: 24,
+    });
+    const originalClose = Database.prototype.close;
+    let injected = false;
+    let startupError: unknown;
+    try {
+      Database.prototype.close = function (): Database.Database {
+        const result = originalClose.call(this);
+        if (!injected) {
+          injected = true;
+          invalidator.attemptAndWait();
+        }
+        return result;
+      };
+      try {
+        openSqliteDatabase(filename).close();
+      } catch (error) {
+        startupError = error;
+      }
+    } finally {
+      Database.prototype.close = originalClose;
+    }
+
+    if (!injected) {
+      invalidator.terminate();
+      throw new Error("Expected exclusive startup handoff to close once.");
+    }
+    const invalidation = await invalidator.result;
+    if (invalidation.kind !== "invalidated")
+      throw new Error("Expected migration history invalidation after handoff.");
+    expect(startupError).toMatchObject({
+      message: "sqlite migration history is invalid",
+    });
+    const durable = await durableStartupStateForTest(filename);
+    expect(durable.journalMode).toBe("wal");
+    expect(durable.userVersion).toBe(24);
+    expect(durable.fileBytes).toEqual(Buffer.from(invalidation.fileBytes));
   });
 
   it("backfills a live v17 delivery row with its exact durable frame batch once", () => {
