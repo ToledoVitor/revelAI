@@ -496,3 +496,26 @@ The Verified browser trace's 120-second post-upload deadline is now truly shared
 The local smoke remains evidence of ownership, state ordering, and finite timing only; it is not normal codec-backed C10 terminal acceptance. Native Linux/x64 codec completion and canonical pixels remain controller-hosted gates. Independent Sol acceptance remains required.
 
 final result: pending independent Sol acceptance.
+
+## Sol round-4 signal and exit-boundary correction — 2026-09-03
+
+Functional/test commit: `259fd4e` (`fix(web): retain demo E2E shutdown signals`). This correction has no visual, approved-asset, W0, or reference-capture change.
+
+### Corrected lifecycle boundary
+
+Shutdown handlers are now persistent `process.on` listeners installed before the first startup `await`. They stay installed while the shared cleanup promise settles; every SIGINT/SIGTERM calls the same `stop` promise, and only its fulfilled/rejected branch removes the listeners and calls `process.exit`. This prevents a signal during API readiness, or a repeated SIGTERM during the owned child's 1-second TERM grace, from falling through to Node's default signal action.
+
+The prior report's statement that the owned-child grace waited safely for close was incomplete: a native `ChildProcess` can have `exitCode === null` and `signalCode === "SIGTERM"` between `exit` and `close`. `createOwnedChildStop` now treats either non-null exit code or non-null signal code as exited, awaits `close`, and never emits a gratuitous SIGKILL in that interval.
+
+### RED/GREEN evidence
+
+| Phase | Exact command / observed result                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| RED   | `rtk node --test apps/web/scripts/owned-child-lifecycle.test.mjs apps/web/scripts/start-demo-e2e-server.test.mjs` before the correction — **3 failed, 8 passed**: a signal-exited child received SIGKILL; startup SIGTERM exited the wrapper before owned cleanup; repeated SIGTERM during grace default-exited the wrapper.                                                                                                             |
+| GREEN | The same command — **11/11 passed**. The unit child receives only SIGTERM after emitting `exit` with `signalCode=SIGTERM`, then is awaited to close. Integration starts an API whose exact readiness token is deliberately delayed, proves Web is not ready, sends SIGTERM, and rebinds 4174/4175 after wrapper close. A resistant owned child receives repeated SIGTERM during grace and releases both ports only after shared cleanup. |
+| GREEN | `rtk pnpm --filter @revelai/web run test:demo:e2e:smoke` — build, Node lifecycle/wrapper suite **11/11**, browser traces **2/2**.                                                                                                                                                                                                                                                                                                        |
+| GREEN | `rtk pnpm --filter @revelai/web run lint`; `rtk pnpm --filter @revelai/web run typecheck`; focused Prettier check; and `rtk git diff --check` — all exit **0**.                                                                                                                                                                                                                                                                          |
+
+The smoke still proves local lifecycle ownership and browser ordering, not normal codec-backed C10 terminal acceptance. Native Linux/x64 codec/canonical gates and independent Sol acceptance remain pending.
+
+final result: pending independent Sol acceptance.

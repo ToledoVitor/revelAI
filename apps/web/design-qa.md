@@ -283,3 +283,9 @@ Functional commit `27df4ce555eca77df74c86c95ab2035d6be55dd2` changes no captured
 The real Verified browser trace now gives the enabled `Atualizar agora` expectation the same decreasing 120-second post-upload remainder already used for progress, pending, and terminal report. This corrects the prior implicit 5-second default and preserves the 150-second outer teardown/reporting backstop. Focused Node lifecycle tests pass **2/2**, combined wrapper tests **8/8**, and the smoke browser run **2/2**; the normal codec-backed terminal and Linux/x64 canonical visual evidence remain hosted-controller work.
 
 final result: pending independent Sol acceptance.
+
+## Sol round-4 signal/exit correction — 2026-09-03
+
+Functional commit `259fd4e` changes no visual artifact or accepted visual policy. The wrapper installs persistent SIGINT/SIGTERM handlers before startup awaits, so a signal before API readiness and a repeated SIGTERM during the owned child's TERM grace share the same cleanup and leave 4174/4175 rebindable after wrapper close. The child lifecycle also recognizes a non-null `signalCode` while awaiting `close`, so an already TERM-exited child never receives an unnecessary SIGKILL. The lifecycle/wrapper suite passes **11/11** and browser smoke **2/2**. Hosted normal-codec and canonical evidence remain pending.
+
+final result: pending independent Sol acceptance.
