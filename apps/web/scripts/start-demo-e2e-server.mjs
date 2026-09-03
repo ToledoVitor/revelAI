@@ -13,6 +13,10 @@ import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDemoApiEnvironment } from "./demo-e2e-environment.mjs";
 import { createDemoMediaFixtures } from "./demo-media-fixtures.mjs";
+import {
+  createOwnedChildStop,
+  createSharedStop,
+} from "./owned-child-lifecycle.mjs";
 const webRoot = fileURLToPath(new URL("../", import.meta.url));
 const repositoryRoot = resolve(webRoot, "../..");
 const apiRoot = resolve(repositoryRoot, "apps/api");
@@ -36,10 +40,10 @@ const c10CheckMedia = Buffer.from([
 ]);
 let apiProcess;
 let apiReadiness;
-let apiProcessClosed = false;
+let stopOwnedApiProcess;
 let server;
 let scratch;
-let stopping = false;
+const stop = createSharedStop(stopOwnedResources);
 
 try {
   await access(join(staticRoot, "index.html"));
@@ -62,7 +66,10 @@ try {
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
-    void stop().finally(() => process.exit(0));
+    void stop().then(
+      () => process.exit(0),
+      () => process.exit(1),
+    );
   });
 }
 
@@ -81,8 +88,8 @@ function startDemoApi(root) {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
-  child.once("close", () => {
-    apiProcessClosed = true;
+  stopOwnedApiProcess = createOwnedChildStop(child, {
+    graceMilliseconds: childTerminationGraceMilliseconds,
   });
   return child;
 }
@@ -278,37 +285,13 @@ function contentType(path) {
   );
 }
 
-async function stop() {
-  if (stopping) return;
-  stopping = true;
+async function stopOwnedResources() {
   await Promise.all([
     new Promise(
       (resolveServer) => server?.close(resolveServer) ?? resolveServer(),
     ),
-    stopProcess(apiProcess),
+    stopOwnedApiProcess?.(),
   ]);
   await rm(mediaDirectory, { recursive: true, force: true });
   if (scratch) await rm(scratch, { recursive: true, force: true });
-}
-
-async function stopProcess(child) {
-  if (!child || apiProcessClosed) return;
-  await new Promise((resolveChild) => {
-    let forceKill;
-    const closeChild = () => {
-      if (forceKill) clearTimeout(forceKill);
-      child.off("error", ignoreChildError);
-      resolveChild();
-    };
-    const ignoreChildError = () => undefined;
-    child.once("close", closeChild);
-    child.once("error", ignoreChildError);
-    if (child.exitCode === null) {
-      child.kill("SIGTERM");
-      forceKill = setTimeout(() => {
-        if (child.exitCode === null) child.kill("SIGKILL");
-      }, childTerminationGraceMilliseconds);
-      forceKill.unref();
-    }
-  });
 }

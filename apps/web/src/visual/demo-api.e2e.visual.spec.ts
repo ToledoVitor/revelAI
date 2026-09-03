@@ -179,7 +179,9 @@ test("production build drives the verified demo trace without a ranking claim", 
   });
   await expect(
     pending.getByRole("button", { name: "Atualizar agora" }),
-  ).toBeEnabled();
+  ).toBeEnabled({
+    timeout: remainingVerifiedOutcomeTime(verifiedOutcomeDeadline),
+  });
   const report = page.getByRole("main", {
     name: "Resultado do desafio verificado",
   });
