@@ -383,8 +383,6 @@ The regression now stores the real capture heading returned by `findByRole` and 
 
 No visual capture was regenerated for this test-only synchronization: no visual surface or artifact-producing code changed. The normal codec-backed hosted acceptance and canonical Linux/x64 execution remain controller-hosted gates, and final independent Sol acceptance remains pending.
 
-final result: pending independent Sol acceptance.
-
 ## CI fix round 5 — normal demo E2E startup boundary — 2026-09-02
 
 Functional/test commit: `ef2ff28` (`fix(web): isolate demo e2e runtime boundary`). This round changes neither W0–W6 rendering nor an approved asset. No fresh reference/candidate/overlay/diff artifact is claimed: the browser evidence below concerns the normal demo runtime boundary and its real-media lifecycle. Existing visual evidence remains authoritative; final result remains pending independent Sol acceptance.
@@ -541,5 +539,28 @@ Fixture generation now uses `Promise.allSettled`, not a short-circuiting `Promis
 | GREEN | `rtk pnpm --filter @revelai/web run lint`; `rtk pnpm --filter @revelai/web run typecheck`; focused Prettier check; and `rtk git diff --check` — all exit **0**.                                                                                                                                                                                                            |
 
 The controlled codec test is lifecycle evidence only; it neither substitutes test codec data for C10 acceptance nor changes the hosted normal-codec/Linux-x64 gate. Independent Sol acceptance remains pending.
+
+final result: pending independent Sol acceptance.
+
+## Sol round-6 codec error/close lifecycle correction — 2026-09-03
+
+Functional/test commit: `0fd9d38` (`fix(web): await codec close after child error`). This correction changes no visual state, approved asset, W0 budget, reference artifact, or visual acceptance policy.
+
+### Corrected codec completion boundary
+
+`runCodec` now records the first child `error` but keeps that listener active until the exact owned child emits `close`; it does not settle early. At `close`, it rejects the captured child error first, otherwise rejects cancellation or a non-zero/signal exit, and resolves only for code 0. The abort path still invokes the owned TERM→KILL lifecycle but awaits the same `close` before reporting cancellation. A synchronous spawn throw remains the sole immediate rejection path because no child was admitted or can require cleanup.
+
+The fixture aggregate already uses `Promise.allSettled`, so this delayed codec settlement keeps media-root cleanup and startup continuation behind every admitted child close rather than only behind an `error` event.
+
+### RED/GREEN evidence
+
+| Phase | Exact command / observed result                                                                                                                                                                                                                                                                                                                                                           |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| RED   | `rtk node --test --test-name-pattern='holds a codec error open' apps/web/scripts/demo-media-fixtures.test.mjs` before the correction — **1 failed**: an emitted child `error` rejected the codec promise before its controlled `close`.                                                                                                                                                   |
+| GREEN | `rtk node --test apps/web/scripts/demo-media-fixtures.test.mjs apps/web/scripts/owned-child-lifecycle.test.mjs apps/web/scripts/start-demo-e2e-server.test.mjs` — **18/18 passed**. Deterministic fake-child coverage proves `error` leaves the promise pending until `close`, then rejects the first error; it also proves non-zero exit and abort/TERM each remain pending until close. |
+| GREEN | `rtk pnpm --filter @revelai/web run test:demo:e2e:smoke` — build, combined Node suite **18/18**, browser traces **2/2**.                                                                                                                                                                                                                                                                  |
+| GREEN | `rtk pnpm --filter @revelai/web run lint`; `rtk pnpm --filter @revelai/web run typecheck`; focused Prettier check; and `rtk git diff --check` — all exit **0**.                                                                                                                                                                                                                           |
+
+The test-only child seam is deterministic lifecycle evidence; it does not replace normal C10 codec proof, Linux/x64 hosted acceptance, canonical visual evidence, or independent Sol acceptance.
 
 final result: pending independent Sol acceptance.

@@ -112,6 +112,12 @@ The production fixes are present, but the P0, P1, and P2 acceptance disposition 
 
 final result: pending independent Sol acceptance.
 
+## Sol round-6 codec close boundary — 2026-09-03
+
+No visual surface or approved reference changed. The fixture codec lifecycle now reports child errors, non-zero exits, and cancellation only after the owned child closes; its deterministic coverage is **18/18** Node checks plus browser smoke **2/2**. It does not establish normal C10/Linux or independent Sol visual acceptance.
+
+final result: pending independent Sol acceptance.
+
 ## W6 round-3 remediation — 2026-09-02
 
 This is the current implementation evidence from review base `168f16a`. It closes the reported implementation drift but does not self-issue acceptance: V02–V06 and every P0/P1/P2 disposition remain pending independent Sol acceptance.
