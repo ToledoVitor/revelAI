@@ -2,6 +2,10 @@
 
 ## Audit record
 
+## W6 document authority
+
+Only [Final W6 acceptance](#final-w6-acceptance--2026-09-03) is the current W6 authority. Every earlier W6 `pending`, `current authority`, `authoritative`, `current disposition`, reviewer disposition, and `final result` statement is a dated historical checkpoint retained as evidence; it is superseded by the independent Sol-approved hosted result at the end of this document.
+
 - Audited route/state: `/`, `ready` / `home-default`.
 - Source captures: `docs/design/references/desktop-home.png` (native `1487×1058`) and `docs/design/references/mobile-home.png` (native `853×1844`).
 - Implementation captures: `apps/web/coverage/playwright/visual-artifacts/home-default--1440x1024--dpr-1--root--ready.png` and `apps/web/coverage/playwright/visual-artifacts/home-default--390x844--dpr-2--root--ready.png`.
@@ -64,7 +68,9 @@ The canonical CI step uses the immutable `mcr.microsoft.com/playwright@sha256:dc
 | P1 (fixed) | Desktop photo began at x=504 (35% width), invading the copy panel instead of the approved ~46% split.                                       | Hero width is 53.6%, moving the start to x=668; the desktop composition test accepts x=655–691.                         |
 | P2         | No remaining P2 visual issue after the final full and focused comparisons.                                                                  | Not applicable.                                                                                                         |
 
-## W6 acceptance record — pending independent review
+## W6 initial acceptance record — historical
+
+This was the initial, then-pending review checkpoint; its dispositions are historical and superseded by Final W6 acceptance.
 
 ### Capture matrix and inspection
 
@@ -94,7 +100,7 @@ All W6 captures were freshly generated on 2026-09-02, at `390×844`, DPR `2`, CS
 - Evidence limit: this host has no FFmpeg executable. The real host-codec demo start cannot run here, so the deterministic C10 check seam substitutes probe/extraction facts. The command remains secret-free; a codec-provisioned CI host must run the full host-media variant before final acceptance.
 - Open P3 backlog: none. The P0 findings above are not waived and require remediation before independent acceptance.
 
-### W6 remediation closeout — 2026-09-02
+### W6 remediation closeout — historical, 2026-09-02
 
 The rows above are the first, intentionally failing comparison pass. The following second pass records implementation remediation, not independent acceptance. No visual source was copied into the runtime: the only image used by the five remediated states is the approved `public/assets/futsal-hero.png`; every non-home comparison remains unmasked. The changed-pixel percentage is evidence for inspection, not a waiver or a candidate-derived visual budget.
 
@@ -108,17 +114,17 @@ The rows above are the first, intentionally failing comparison pass. The followi
 
 Focused comparison was needed for V02 (challenge choice/CTA), V03 (passed gate and active correction), V04 (fallback versus live camera boundary), V05 (truthful refresh action), and V06 (ranked-only fields). Browser coverage confirms named controls, keyboard/focus behavior, enabled/disabled state, reduced motion, and clean console/page state; it does not claim complete WCAG conformance.
 
-The production fixes are present, but the P0, P1, and P2 acceptance disposition for V02–V06 remains pending independent Sol review. Open P3 items are limited to the approved runtime hero or required truth replacement described above; neither is an implementation defect that can be corrected without violating the asset/truth constraints.
+At this historical checkpoint, the production fixes were present, but the P0, P1, and P2 acceptance disposition for V02–V06 remained pending independent Sol review. Open P3 items were limited to the approved runtime hero or required truth replacement described above; neither was an implementation defect that could be corrected without violating the asset/truth constraints.
 
-## Sol round-6 codec close boundary — 2026-09-03
+## Sol round-6 codec close boundary — historical, 2026-09-03
 
-No visual surface or approved reference changed. The fixture codec lifecycle now reports child errors, non-zero exits, and cancellation only after the owned child closes; its deterministic coverage is **18/18** Node checks plus browser smoke **2/2**. It does not establish normal C10/Linux or independent Sol visual acceptance.
+No visual surface or approved reference changed. The fixture codec lifecycle then reported child errors, non-zero exits, and cancellation only after the owned child closed; its deterministic coverage was **18/18** Node checks plus browser smoke **2/2**. It did not itself establish normal C10/Linux or independent Sol visual acceptance.
 
 final result: pending independent Sol acceptance.
 
-## W6 round-3 remediation — 2026-09-02
+## W6 round-3 remediation — historical, 2026-09-02
 
-This is the current implementation evidence from review base `168f16a`. It closes the reported implementation drift but does not self-issue acceptance: V02–V06 and every P0/P1/P2 disposition remain pending independent Sol acceptance.
+This was the then-current implementation evidence from review base `168f16a`. It closed the reported implementation drift but did not self-issue acceptance: V02–V06 and every P0/P1/P2 disposition were pending independent Sol acceptance.
 
 ### Findings, fixes, and fresh comparison evidence
 
@@ -134,7 +140,7 @@ All evidence below is a fresh `390×844`, DPR 2, CSS-scale capture. For every ve
 
 ### Enforceable geometry and negative evidence
 
-`referenceVisualGates` now stores independent V03/V04 headline height/bottom ranges plus sibling gaps before a candidate capture is evaluated. The selected current values are V03 height `64–74`, bottom `195–207`, heading→visual gap `28–38`; V04 height `166–180`, bottom `303–317`, heading→preview gap `10–22`. These DOM-box ranges are source-calibrated structural checks, not candidate-derived limits; they complement unmasked full-screen mismatch caps and required landmark bounds.
+`referenceVisualGates` then stored independent V03/V04 headline height/bottom ranges plus sibling gaps before a candidate capture was evaluated. The then-current values were V03 height `64–74`, bottom `195–207`, heading→visual gap `28–38`; V04 height `166–180`, bottom `303–317`, heading→preview gap `10–22`. These DOM-box ranges are source-calibrated structural checks, not candidate-derived limits; they complement unmasked full-screen mismatch caps and required landmark bounds.
 
 `visual-harness.test.ts` provides state-specific negative proofs: too-short V03/V04 headings, headings beyond their allowed bottom, and excessive heading→visual/preview gaps each throw. Existing over-budget, missing-landmark, and cropped-landmark negative tests remain intact. The capture spec passes `gate.referenceGaps` into this assertion, so browser captures enforce the policy rather than merely recording it.
 
@@ -142,13 +148,13 @@ All evidence below is a fresh `390×844`, DPR 2, CSS-scale capture. For every ve
 
 The approved-reference browser matrix reverified `scrollY=0`, no horizontal overflow, named semantics, Tab/Enter/Space, visible focus, disabled/enabled/loading states, reduced motion, and console/page-error handling at the exact viewport. This is observed evidence, not a full WCAG certification.
 
-The normal C10 media acceptance remains pending hosted CI after controller push: this machine has no FFmpeg. No `--serve-check` smoke result substitutes for normal codec-backed acceptance, and the immutable Linux/x64 canonical pixel gate remains hosted-only.
+The normal C10 media acceptance was pending hosted CI after controller push because this machine had no FFmpeg. No `--serve-check` smoke result substituted for normal codec-backed acceptance, and the immutable Linux/x64 canonical pixel gate was hosted-only.
 
 final result: pending independent Sol acceptance.
 
-## W6 round-2 acceptance correction — 2026-09-02
+## W6 round-2 acceptance correction — historical, 2026-09-02
 
-This is the current authority for W6. It supersedes every earlier `Closed`, `fixed`, or `no P0/P1/P2 remains actionable` disposition in this document: the implementation and executable evidence are ready for review, but **V02–V06 and every P0/P1/P2 acceptance disposition remain pending independent Sol acceptance**. No reviewer result is self-issued here.
+This was the then-current W6 authority. It superseded every earlier `Closed`, `fixed`, or `no P0/P1/P2 remains actionable` disposition in this document: the implementation and executable evidence were ready for review, but **V02–V06 and every P0/P1/P2 acceptance disposition remained pending independent Sol acceptance**. No reviewer result was self-issued there.
 
 ### Fresh complete-screen artifacts and inspection
 
@@ -190,7 +196,7 @@ final result: pending independent Sol acceptance.
 
 ## W6 round-1 reviewer remediation — 2026-09-02
 
-This is the authoritative after-record for reviewer findings V02–V06. It supersedes the older W6 closeout ratios and claims where they conflict. Fresh artifacts were emitted by the final `rtk pnpm check` structural run and then opened individually: reference-normalized PNG, capture PNG, 50% overlay, and complete pixel diff for home plus all five `/verified` states. No state-specific image region is masked.
+This was the then-authoritative after-record for reviewer findings V02–V06. It superseded the older W6 closeout ratios and claims where they conflicted. This historical record is itself superseded by Final W6 acceptance. Fresh artifacts were emitted by the final `rtk pnpm check` structural run and then opened individually: reference-normalized PNG, capture PNG, 50% overlay, and complete pixel diff for home plus all five `/verified` states. No state-specific image region is masked.
 
 ### Enforceable reference gates and bounds
 
@@ -246,19 +252,19 @@ The local host has no `ffmpeg`; `rtk pnpm --filter @revelai/web run test:demo:e2
 | Expected hosted-only limit | `rtk env CI=1 pnpm --filter @revelai/web run test:visual:canonical -- --reporter=line` — exit **1** on Darwin arm64: `Canonical visual pixels require linux/x64.` The immutable Linux/x64 CI gate remains unchanged.               |
 | GREEN                      | `rtk git diff --check` — exit **0** before functional commit.                                                                                                                                                                      |
 
-The executable visual, bounds, media, and browser evidence supports the implemented fixes, but all reviewer P0/P1/P2 acceptance dispositions remain pending independent Sol review. Hosted codec execution and the unchanged canonical Linux/x64 pixel gate also remain pending. Deferred P3 component/style seams and historical report-table cleanup remain intentionally outside this round.
+At this historical checkpoint, the executable visual, bounds, media, and browser evidence supported the implemented fixes, but all reviewer P0/P1/P2 acceptance dispositions remained pending independent Sol review. Hosted codec execution and the unchanged canonical Linux/x64 pixel gate also remained pending. Deferred P3 component/style seams and historical report-table cleanup remained intentionally outside that round.
 
 final result: pending independent Sol acceptance.
 
-## W6 round-2 current disposition — authoritative
+## W6 round-2 disposition — historical and superseded
 
-The earlier round-1 section is historical evidence only. The round-2 record above is the implementation record for the final fresh artifacts; **V02–V06 and all P0/P1/P2 acceptance dispositions are pending independent Sol acceptance**. Codec-backed normal-runtime acceptance is also **pending hosted green** after controller push. No earlier `Closed` wording is a current acceptance result.
+The earlier round-1 section was historical evidence only. The round-2 record above was the implementation record for the then-final fresh artifacts; **V02–V06 and all P0/P1/P2 acceptance dispositions were pending independent Sol acceptance**. Codec-backed normal-runtime acceptance was also **pending hosted green** after controller push. No earlier `Closed` wording was a current acceptance result.
 
 final result: pending independent Sol acceptance.
 
-## W6 round-3 current disposition — authoritative
+## W6 round-3 disposition — historical and superseded
 
-The round-3 remediation evidence above supersedes the historical round-2 geometry, ratios, and implementation disposition. V02–V06 have no actionable P0/P1/P2 implementation finding, but every acceptance disposition remains pending independent Sol acceptance; hosted codec and canonical Linux/x64 evidence remain controller work.
+The round-3 remediation evidence above superseded the historical round-2 geometry, ratios, and implementation disposition. V02–V06 had no actionable P0/P1/P2 implementation finding, but every acceptance disposition remained pending independent Sol acceptance; hosted codec and canonical Linux/x64 evidence remained controller work.
 
 final result: pending independent Sol acceptance.
 
@@ -304,6 +310,6 @@ final result: pending independent Sol acceptance.
 
 **Status: DONE. Result: passed by independent Sol review.** Hosted workflow [33712809662](https://github.com/ToledoVitor/revelAI/actions/runs/33712809662) at `12318cb43a9669f67caa9eb462cbfd1f48a69f3d` passed every gate with exit 0: production-router **23/23**; real-FFmpeg/C10 demo E2E Node **18/18** plus browser **2/2**; canonical Linux/x64 visual **30 passed, 10 skipped**; focused API **23/23**; and operability **18/18**. The complete quality job took **12m14s** (with `pnpm check` at about **7m31s**); the complete clean-executable/operability job took **2m54s**.
 
-The approved truth rulings remain part of the accepted UI: V05 retains foreground/manual refresh and no closed-app notification promise; V06 retains the isolated ranked fixture and exact `Resultado validado — vale para ranking`, while Free/demo/experimental paths structurally omit rank fields. The documented approved-runtime hero/crop variance remains accepted evidence; no reference screenshot, invented asset, or false competitive claim was introduced.
+The approved truth rulings remain part of the accepted UI: V05 retains foreground/manual refresh and no closed-app notification promise; V06 retains the isolated ranked fixture and exact `Resultado validado — vale para ranking`, while Free/demo/experimental paths structurally omit rank fields. The documented approved-runtime hero/crop variance remains accepted evidence; no reference screenshot, invented asset, or false competitive claim was introduced. This is the sole current W6 authority in this document; every earlier checkpoint is historical and superseded.
 
 final result: passed
