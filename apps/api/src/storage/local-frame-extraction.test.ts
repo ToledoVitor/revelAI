@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, type Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type MediaProbe } from "../media/probe.js";
 import { verifiedExtractionCapability } from "../media/extraction-manifest.js";
@@ -69,8 +69,8 @@ type ProcessResult = Readonly<{
 }>;
 
 type ProcessChild = {
-  stdout: Pick<PassThrough, "on">;
-  stderr: Pick<PassThrough, "on">;
+  stdout: Pick<Readable, "on">;
+  stderr: Pick<Readable, "on">;
   kill: (signal: NodeJS.Signals) => boolean;
   on(event: "error", listener: (error: Error) => void): unknown;
   once(event: "close", listener: (exitCode: number | null) => void): unknown;
@@ -1279,7 +1279,7 @@ function createProcessTracker(): ProcessTracker {
       });
       processes.add(reservation);
       return Object.freeze({
-        activate: (process) => {
+        activate: (process: TrackedProcess) => {
           if (!claimed) throw new Error("process reservation already settled");
           claimed = false;
           processes.delete(reservation);
