@@ -187,21 +187,44 @@ C5 must publish 12 Free samples with both `frame-0000.jpg` and
 images plus 640 publication copies with a bounded 41/12 proof; it does not
 relax an evidence, file-size, selection, or production timeout invariant.
 
-The smoke disables only Vitest's outer timeout and instead owns a 30,000-ms
-deadline that mirrors C5's actual runner timeout (the runner assertion makes
-that contract explicit). On expiry it closes the per-test tracker, and its
-`finally` awaits `closeAndDrain` before the smoke promise resolves, so hooks
-cannot remove a root while its body is still cleaning up. A controlled-child
-RED/GREEN regression waits for the deadline's SIGTERM, proves the tracker
-remains nonempty until actual close, and allows root removal only after the
-deadline promise observes tracker size zero. This is a scoped cancellation
-contract, not a sleep or global timeout increase.
+### Finite-backstop correction
+
+Review of `9d1875e` found two flaws in the scoped timeout design. First, the
+wrapper checked deadline expiry only after a normal resolution. A deadline that
+made the capability probe return false could then propagate Vitest's
+pending/skip rejection instead of a deadline failure. Second, disabling
+Vitest's outer timeout left no independent bound if the body or child close
+never settled.
+
+Commit `a3b5a23` keeps the C5-matching 30,000-ms inner deadline and adds only
+a finite, test-local 32,000-ms Vitest backstop: the C5 budget plus the owned
+1,000-ms TERM and 1,000-ms SIGKILL grace. The smoke captures its per-test
+tracker and a body-settlement promise before beginning work. Its root is
+private to the body, not in the suite root list. On a Vitest backstop,
+`afterEach` waits one owned grace for that captured tracker to drain and one
+owned grace for the body to settle. If either fails, it reports the teardown
+failure and preserves all roots rather than recursively removing a directory a
+continuation might still use. If they settle, the body itself has already
+drained its tracker and removed its private root. This is a finite failure
+contract, not a sleep, global timeout change, or production behavior change.
+
+The deadline wrapper now substitutes the owned deadline error for either a
+post-expiry resolution or rejection. A controlled-child RED/GREEN regression
+models a terminated capability command that returns false and then produces a
+`PendingError`-shaped skip; the result is the deadline failure. A separate
+regression deliberately withholds body settlement, proves teardown reports its
+one-grace failure, and proves the root remains readable. The raw FFmpeg smoke
+also now requires FFmpeg exit zero, exactly the decoded filenames
+`decoded-000000.jpg` through `decoded-000040.jpg` (and no index 41), and the
+single parsed scene timestamp `4` before it passes that raw result to C5. C5
+still publishes and validates exactly 12 Free frames, including readable first
+and last published JPEGs.
 
 Verification: FFmpeg is absent on the macOS host, so focused Vitest reports
-20 passed and one honest capability skip; three fresh focused processes passed
-under concurrent host load. API typecheck, lint, Prettier, and diff checks
-passed. An Ubuntu 24.04-based FFmpeg 7.1 container constrained to one CPU ran
-the compact exact filter/encoder/muxer proof 10/10 times; every run produced
-41 JPEGs including `decoded-000040.jpg` and emitted the required 4.0 scene
-record. A fresh hosted run remains required for the workflow-installed FFmpeg
+22 passed and one honest capability skip; three fresh sequential processes
+passed. API typecheck, lint, focused Prettier, and diff checks passed. A fresh
+Ubuntu 24.04-based FFmpeg 7.1 container constrained to one CPU completed the
+compact exact filter/encoder/muxer pipeline with 41 exact decoded indexes and
+the `4.0` scene boundary. The earlier 10/10 one-CPU replay remains recorded
+above. A fresh hosted run remains required for the workflow-installed FFmpeg
 6.1 path.
