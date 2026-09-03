@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDemoApiEnvironment } from "./demo-e2e-environment.mjs";
-import { createDemoMediaFixtures } from "./demo-media-fixtures.mjs";
+import { createDemoMediaFixtures, runCodec } from "./demo-media-fixtures.mjs";
 import {
   createOwnedChildStop,
   createSharedStop,
@@ -41,6 +41,8 @@ const c10CheckMedia = Buffer.from([
 let apiProcess;
 let apiReadiness;
 let stopOwnedApiProcess;
+let fixtureController;
+let fixtureGeneration;
 let server;
 let scratch;
 const stop = createSharedStop(stopOwnedResources);
@@ -53,17 +55,37 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 
 try {
   await access(join(staticRoot, "index.html"));
+  assertStartupOpen();
   await mkdir(mediaDirectory, { recursive: true });
+  assertStartupOpen();
   await createMediaFixtures();
-  scratch = await mkdtemp(join(tmpdir(), "revelai-web-demo-e2e-"));
+  assertStartupOpen();
+  const createdScratch = await mkdtemp(join(tmpdir(), "revelai-web-demo-e2e-"));
+  if (shutdownRequested) {
+    await rm(createdScratch, { recursive: true, force: true });
+    assertStartupOpen();
+  }
+  scratch = createdScratch;
+  assertStartupOpen();
   apiProcess = startDemoApi(scratch);
   apiReadiness = observeApiReadiness(apiProcess);
   await waitForApi();
+  assertStartupOpen();
   server = createServer(handleRequest);
+  assertStartupOpen();
   await new Promise((resolveServer, rejectServer) => {
     server.once("error", rejectServer);
-    server.listen(webPort, "127.0.0.1", resolveServer);
+    server.listen(webPort, "127.0.0.1", () => {
+      if (!shutdownRequested) {
+        resolveServer();
+        return;
+      }
+      server.close(() =>
+        rejectServer(new Error("Demo E2E startup was cancelled.")),
+      );
+    });
   });
+  assertStartupOpen();
 } catch {
   await stop();
   if (!shutdownRequested) {
@@ -94,6 +116,10 @@ function removeShutdownHandlers() {
   }
 }
 
+function assertStartupOpen() {
+  if (shutdownRequested) throw new Error("Demo E2E startup was cancelled.");
+}
+
 function startDemoApi(root) {
   const child = spawn(
     process.execPath,
@@ -116,13 +142,26 @@ function startDemoApi(root) {
 }
 
 function demoApiEntry() {
-  const argument = process.argv.find((value) =>
-    value.startsWith("--test-api-entry="),
-  );
-  if (!argument) return "scripts/start-local-demo.mjs";
+  return testFixtureEntry("--test-api-entry") ?? "scripts/start-local-demo.mjs";
+}
+
+function testCodecRunner() {
+  const entry = testFixtureEntry("--test-codec-entry");
+  if (!entry) return undefined;
+  return ({ executable, arguments: arguments_, signal }) =>
+    runCodec({
+      executable: process.execPath,
+      arguments: [entry, executable, ...arguments_],
+      signal,
+    });
+}
+
+function testFixtureEntry(option) {
+  const argument = process.argv.find((value) => value.startsWith(`${option}=`));
+  if (!argument) return undefined;
   if (process.env.NODE_ENV !== "test")
-    throw new Error("Test API entry is unavailable outside test mode.");
-  const entry = resolve(argument.slice("--test-api-entry=".length));
+    throw new Error("Test fixture entry is unavailable outside test mode.");
+  const entry = resolve(argument.slice(`${option}=`.length));
   if (!entry.startsWith(`${testFixtureRoot}${sep}`))
     throw new Error("Test API entry must be an owned fixture.");
   return entry;
@@ -130,7 +169,19 @@ function demoApiEntry() {
 
 async function createMediaFixtures() {
   if (!serveCheck) {
-    await createDemoMediaFixtures({ directory: mediaDirectory });
+    fixtureController = new AbortController();
+    const run = testCodecRunner();
+    fixtureGeneration = createDemoMediaFixtures({
+      directory: mediaDirectory,
+      ...(run ? { run } : {}),
+      signal: fixtureController.signal,
+    });
+    try {
+      await fixtureGeneration;
+    } finally {
+      fixtureGeneration = undefined;
+      fixtureController = undefined;
+    }
     return;
   }
   await Promise.all([
@@ -307,11 +358,14 @@ function contentType(path) {
 }
 
 async function stopOwnedResources() {
+  const activeFixtureGeneration = fixtureGeneration?.catch(() => undefined);
+  fixtureController?.abort();
   await Promise.all([
     new Promise(
       (resolveServer) => server?.close(resolveServer) ?? resolveServer(),
     ),
     stopOwnedApiProcess?.(),
+    activeFixtureGeneration,
   ]);
   await rm(mediaDirectory, { recursive: true, force: true });
   if (scratch) await rm(scratch, { recursive: true, force: true });

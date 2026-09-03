@@ -58,3 +58,104 @@ test("generates and probes C10-compatible portrait and verified fixtures", async
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("cancels every admitted codec command before starting a demo API", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "revelai-demo-media-test-"));
+  const controller = new AbortController();
+  let started = 0;
+  try {
+    const fixtures = createDemoMediaFixtures({
+      directory,
+      signal: controller.signal,
+      run: async ({ signal }) => {
+        started += 1;
+        if (!signal) throw new Error("Expected an owned codec abort signal.");
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => reject(new Error("owned codec cancelled")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const outcome = fixtures.then(
+      () => undefined,
+      (error) => error,
+    );
+
+    await waitFor(() => started === 2);
+    controller.abort();
+    const error = await outcome;
+    assert.match(error?.message, /owned codec cancelled/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("waits for every admitted codec before surfacing one fixture failure", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "revelai-demo-media-test-"));
+  let releaseVerifiedCodec;
+  let verifiedCodecStarted = false;
+  try {
+    const fixtures = createDemoMediaFixtures({
+      directory,
+      run: async ({ executable, arguments: args }) => {
+        const path = args.at(-1);
+        if (executable === "ffmpeg" && path.endsWith("free-portrait.mp4"))
+          throw new Error("free fixture failed");
+        if (executable === "ffmpeg") {
+          verifiedCodecStarted = true;
+          return new Promise((resolve) => {
+            releaseVerifiedCodec = () =>
+              resolve({ exitCode: 0, stderr: "", stdout: "" });
+          });
+        }
+        return {
+          exitCode: 0,
+          stderr: "",
+          stdout: JSON.stringify({
+            format: { duration: "64.000000" },
+            streams: [
+              {
+                codec_type: "video",
+                width: 1280,
+                height: 720,
+                avg_frame_rate: "24/1",
+              },
+            ],
+          }),
+        };
+      },
+    });
+    let settled = false;
+    const outcome = fixtures.then(
+      () => {
+        settled = true;
+        return undefined;
+      },
+      (error) => {
+        settled = true;
+        return error;
+      },
+    );
+
+    await waitFor(() => verifiedCodecStarted);
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 20));
+    assert.equal(settled, false);
+    releaseVerifiedCodec();
+    const error = await outcome;
+    assert.match(error?.message, /free fixture failed/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+async function waitFor(predicate) {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 10));
+  }
+  throw new Error("Timed out waiting for both owned codec commands.");
+}

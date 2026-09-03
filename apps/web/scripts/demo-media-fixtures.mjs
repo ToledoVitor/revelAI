@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { createOwnedChildStop } from "./owned-child-lifecycle.mjs";
+
+const codecTerminationGraceMilliseconds = 1_000;
 
 const fixtureDefinitions = Object.freeze([
   Object.freeze({
@@ -21,48 +24,69 @@ const fixtureDefinitions = Object.freeze([
   }),
 ]);
 
-export async function createDemoMediaFixtures({ directory, run = runCodec }) {
+export async function createDemoMediaFixtures({
+  directory,
+  run = runCodec,
+  signal,
+}) {
+  throwIfAborted(signal);
   await mkdir(directory, { recursive: true });
-  return Promise.all(
+  throwIfAborted(signal);
+  const results = await Promise.allSettled(
     fixtureDefinitions.map(async (definition) => {
       const path = join(directory, definition.filename);
-      await runOrThrow(run, "ffmpeg", [
-        "-nostdin",
-        "-y",
-        "-f",
-        "lavfi",
-        "-i",
-        `color=c=black:s=${definition.width}x${definition.height}:r=${definition.fps}:d=${definition.durationSeconds}`,
-        "-an",
-        "-c:v",
-        "mpeg4",
-        "-q:v",
-        "31",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        path,
-      ]);
-      const probe = await readProbe(run, path);
+      await runOrThrow(
+        run,
+        "ffmpeg",
+        [
+          "-nostdin",
+          "-y",
+          "-f",
+          "lavfi",
+          "-i",
+          `color=c=black:s=${definition.width}x${definition.height}:r=${definition.fps}:d=${definition.durationSeconds}`,
+          "-an",
+          "-c:v",
+          "mpeg4",
+          "-q:v",
+          "31",
+          "-pix_fmt",
+          "yuv420p",
+          "-movflags",
+          "+faststart",
+          path,
+        ],
+        signal,
+      );
+      throwIfAborted(signal);
+      const probe = await readProbe(run, path, signal);
+      throwIfAborted(signal);
       assertFixtureProbe(definition, probe);
       return Object.freeze({ kind: definition.kind, path, probe });
     }),
   );
+  const rejected = results.find((result) => result.status === "rejected");
+  if (rejected?.status === "rejected") throw rejected.reason;
+  return results.map((result) => result.value);
 }
 
-async function readProbe(run, path) {
-  const output = await runOrThrow(run, "ffprobe", [
-    "-v",
-    "error",
-    "-print_format",
-    "json",
-    "-show_entries",
-    "format=duration:stream=codec_type,width,height,avg_frame_rate",
-    "-select_streams",
-    "v:0",
-    path,
-  ]);
+async function readProbe(run, path, signal) {
+  const output = await runOrThrow(
+    run,
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-print_format",
+      "json",
+      "-show_entries",
+      "format=duration:stream=codec_type,width,height,avg_frame_rate",
+      "-select_streams",
+      "v:0",
+      path,
+    ],
+    signal,
+  );
   let parsed;
   try {
     parsed = JSON.parse(output.stdout);
@@ -109,29 +133,64 @@ function assertFixtureProbe(definition, probe) {
     );
 }
 
-async function runOrThrow(run, executable, arguments_) {
-  const result = await run({ executable, arguments: arguments_ });
+async function runOrThrow(run, executable, arguments_, signal) {
+  const result = await run({ executable, arguments: arguments_, signal });
   if (result.exitCode !== 0)
     throw new Error(`Demo media fixture codec command failed: ${executable}.`);
   return result;
 }
 
-function runCodec({ executable, arguments: arguments_ }) {
+export function runCodec({ executable, arguments: arguments_, signal }) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, arguments_, {
       stdio: ["ignore", "pipe", "pipe"],
     });
+    const stopChild = createOwnedChildStop(child, {
+      graceMilliseconds: codecTerminationGraceMilliseconds,
+    });
     const stdout = [];
     const stderr = [];
+    let settled = false;
+    let cancelled = false;
+    const settle = (callback) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", cancel);
+      child.off("error", receiveError);
+      callback();
+    };
+    const cancel = () => {
+      cancelled = true;
+      void stopChild();
+    };
+    const receiveError = (error) => {
+      if (cancelled) return;
+      settle(() => reject(error));
+    };
     child.stdout.on("data", (chunk) => stdout.push(chunk));
     child.stderr.on("data", (chunk) => stderr.push(chunk));
-    child.once("error", reject);
-    child.once("close", (code) =>
-      resolve({
-        exitCode: code ?? 1,
-        stdout: Buffer.concat(stdout).toString("utf8"),
-        stderr: Buffer.concat(stderr).toString("utf8"),
-      }),
-    );
+    child.once("error", receiveError);
+    child.once("close", (code) => {
+      if (cancelled) {
+        settle(() =>
+          reject(new Error("Demo media fixture generation cancelled.")),
+        );
+        return;
+      }
+      settle(() =>
+        resolve({
+          exitCode: code ?? 1,
+          stdout: Buffer.concat(stdout).toString("utf8"),
+          stderr: Buffer.concat(stderr).toString("utf8"),
+        }),
+      );
+    });
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
   });
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted)
+    throw new Error("Demo media fixture generation cancelled.");
 }

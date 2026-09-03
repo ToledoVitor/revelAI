@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, rename } from "node:fs/promises";
+import { access, mkdtemp, readFile, rename, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -24,6 +25,15 @@ const delayedReadyChild = resolve(
   webRoot,
   "scripts/fixtures/demo-e2e-delayed-ready-child.mjs",
 );
+const delayedStopCodec = resolve(
+  webRoot,
+  "scripts/fixtures/demo-e2e-delayed-stop-codec.mjs",
+);
+const apiStartSpy = resolve(
+  webRoot,
+  "scripts/fixtures/demo-e2e-api-start-spy.mjs",
+);
+const mediaDirectory = resolve(webRoot, "coverage/demo-media");
 
 test(
   "rejects a foreign health response instead of treating it as the spawned API",
@@ -174,6 +184,52 @@ test("shares repeated SIGTERM during child grace before returning demo ports", a
   }
 });
 
+test("waits for cancelled fixture codecs before leaving startup", async () => {
+  const markers = await mkdtemp(join(tmpdir(), "revelai-demo-codec-test-"));
+  const codecReady = join(markers, "codec-ready");
+  const codecClosed = join(markers, "codec-closed");
+  const apiStarted = join(markers, "api-started");
+  await rm(mediaDirectory, { recursive: true, force: true });
+  await assertPortAvailable(apiPort);
+  await assertPortAvailable(webPort);
+  const wrapper = launchWrapper({
+    environment: {
+      NODE_ENV: "test",
+      DEMO_E2E_CODEC_READY_PATH: codecReady,
+      DEMO_E2E_CODEC_CLOSED_PATH: codecClosed,
+      DEMO_E2E_API_STARTED_PATH: apiStarted,
+    },
+    testApiEntry: apiStartSpy,
+    testCodecEntry: delayedStopCodec,
+  });
+  try {
+    await waitForFile(codecReady, wrapper);
+    assert.equal(await isWebHealthReady(), false);
+    wrapper.kill("SIGTERM");
+    const closure = await waitForCloseAt(
+      wrapper,
+      ownedShutdownTimeoutMilliseconds,
+    );
+
+    assert.equal(closure.exitCode, 0);
+    const closedAt = (await readFile(codecClosed, "utf8"))
+      .trim()
+      .split("\n")
+      .map(Number);
+    assert.equal(closedAt.length, 2);
+    assert.ok(closedAt.every(Number.isFinite));
+    assert.ok(closedAt.every((time) => time <= closure.closedAt));
+    await assert.rejects(access(apiStarted));
+    await assert.rejects(access(mediaDirectory));
+    await assertPortAvailable(apiPort);
+    await assertPortAvailable(webPort);
+  } finally {
+    await stopOwnedWrapperGroup(wrapper);
+    await rm(markers, { recursive: true, force: true });
+    await rm(mediaDirectory, { recursive: true, force: true });
+  }
+});
+
 async function withApiPortBlocker(kind, callback) {
   const blocker = createServer((_request, response) => {
     if (kind === "health") {
@@ -224,9 +280,15 @@ function invokeWrapper(options = {}) {
   });
 }
 
-function launchWrapper({ environment = {}, testApiEntry } = {}) {
-  const args = ["scripts/start-demo-e2e-server.mjs", "--serve-check"];
+function launchWrapper({
+  environment = {},
+  testApiEntry,
+  testCodecEntry,
+} = {}) {
+  const args = ["scripts/start-demo-e2e-server.mjs"];
+  if (!testCodecEntry) args.push("--serve-check");
   if (testApiEntry) args.push(`--test-api-entry=${testApiEntry}`);
+  if (testCodecEntry) args.push(`--test-codec-entry=${testCodecEntry}`);
   const child = spawn(process.execPath, args, {
     cwd: webRoot,
     detached: true,
@@ -312,6 +374,36 @@ function waitForClose(child, timeoutMilliseconds) {
     }, timeoutMilliseconds);
     child.once("close", close);
   });
+}
+
+function waitForCloseAt(child, timeoutMilliseconds) {
+  return new Promise((resolveClose) => {
+    const close = (exitCode) => {
+      clearTimeout(timeout);
+      resolveClose({ exitCode: exitCode ?? 1, closedAt: Date.now() });
+    };
+    const timeout = setTimeout(() => {
+      child.off("close", close);
+      resolveClose({ exitCode: undefined, closedAt: Date.now() });
+    }, timeoutMilliseconds);
+    child.once("close", close);
+  });
+}
+
+async function waitForFile(path, child) {
+  const deadline = Date.now() + wrapperTimeoutMilliseconds;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null)
+      throw new Error("Demo wrapper exited before fixture codec began.");
+    try {
+      await access(path);
+      return;
+    } catch {
+      // The owned fixture codec has not recorded its start yet.
+    }
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 25));
+  }
+  throw new Error("Demo fixture codec did not begin within its test budget.");
 }
 
 async function stopOwnedWrapperGroup(wrapper) {
