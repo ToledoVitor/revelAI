@@ -6,3 +6,13 @@ allowBuilds:
   better-sqlite3: true
   esbuild: true
   msw: true
+
+overrides:
+  "@revelai/mobile>expo": 54.0.18
+  "@revelai/mobile>jest": 29.7.0
+  "@revelai/mobile>jest-expo": 54.0.18
+  "@revelai/mobile>react": 19.1.0
+  "@revelai/mobile>react-dom": 19.1.0
+  "@revelai/mobile>react-native": 0.81.4
+  "@revelai/mobile>react-native-svg": 15.12.1
+  "@revelai/mobile>react-native-web": 0.21.0
