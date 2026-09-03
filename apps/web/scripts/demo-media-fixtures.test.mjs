@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
-import { createDemoMediaFixtures } from "./demo-media-fixtures.mjs";
+import { createDemoMediaFixtures, runCodec } from "./demo-media-fixtures.mjs";
 
 test("generates and probes C10-compatible portrait and verified fixtures", async () => {
   const directory = await mkdtemp(join(tmpdir(), "revelai-demo-media-test-"));
@@ -150,6 +152,108 @@ test("waits for every admitted codec before surfacing one fixture failure", asyn
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("holds a codec error open until the owned child closes", async () => {
+  const child = createFakeCodecChild();
+  const codec = runCodec({
+    executable: "fake-codec",
+    arguments: [],
+    spawnProcess: () => child,
+  });
+  let settled = false;
+  const outcome = codec.then(
+    () => {
+      settled = true;
+      return undefined;
+    },
+    (error) => {
+      settled = true;
+      return error;
+    },
+  );
+
+  child.emit("error", new Error("codec spawn failed"));
+  await new Promise((resolveTimer) => setTimeout(resolveTimer, 20));
+  assert.equal(settled, false);
+
+  child.emit("close", 1);
+  const error = await outcome;
+  assert.match(error?.message, /codec spawn failed/);
+  assert.equal(child.listenerCount("error"), 0);
+});
+
+test("settles codec exit failures only from close", async () => {
+  const child = createFakeCodecChild();
+  const codec = runCodec({
+    executable: "fake-codec",
+    arguments: [],
+    spawnProcess: () => child,
+  });
+  let settled = false;
+  const outcome = codec.then(
+    () => {
+      settled = true;
+      return undefined;
+    },
+    (error) => {
+      settled = true;
+      return error;
+    },
+  );
+
+  await new Promise((resolveTimer) => setTimeout(resolveTimer, 20));
+  assert.equal(settled, false);
+  child.emit("close", 1);
+  const error = await outcome;
+  assert.match(error?.message, /fake-codec/);
+});
+
+test("waits for close after aborting an owned codec child", async () => {
+  const controller = new AbortController();
+  const child = createFakeCodecChild();
+  const killedWith = [];
+  child.kill = (signal) => {
+    killedWith.push(signal);
+    return true;
+  };
+  const codec = runCodec({
+    executable: "fake-codec",
+    arguments: [],
+    signal: controller.signal,
+    spawnProcess: () => child,
+  });
+  let settled = false;
+  const outcome = codec.then(
+    () => {
+      settled = true;
+      return undefined;
+    },
+    (error) => {
+      settled = true;
+      return error;
+    },
+  );
+
+  controller.abort();
+  await new Promise((resolveTimer) => setTimeout(resolveTimer, 20));
+  assert.deepEqual(killedWith, ["SIGTERM"]);
+  assert.equal(settled, false);
+
+  child.signalCode = "SIGTERM";
+  child.emit("close", null);
+  const error = await outcome;
+  assert.match(error?.message, /generation cancelled/);
+});
+
+function createFakeCodecChild() {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.kill = () => true;
+  return child;
+}
 
 async function waitFor(predicate) {
   const deadline = Date.now() + 1_000;

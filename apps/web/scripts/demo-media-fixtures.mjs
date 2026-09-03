@@ -140,11 +140,22 @@ async function runOrThrow(run, executable, arguments_, signal) {
   return result;
 }
 
-export function runCodec({ executable, arguments: arguments_, signal }) {
+export function runCodec({
+  executable,
+  arguments: arguments_,
+  signal,
+  spawnProcess = spawn,
+}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, arguments_, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    let child;
+    try {
+      child = spawnProcess(executable, arguments_, {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
     const stopChild = createOwnedChildStop(child, {
       graceMilliseconds: codecTerminationGraceMilliseconds,
     });
@@ -152,6 +163,7 @@ export function runCodec({ executable, arguments: arguments_, signal }) {
     const stderr = [];
     let settled = false;
     let cancelled = false;
+    let firstError;
     const settle = (callback) => {
       if (settled) return;
       settled = true;
@@ -164,22 +176,35 @@ export function runCodec({ executable, arguments: arguments_, signal }) {
       void stopChild();
     };
     const receiveError = (error) => {
-      if (cancelled) return;
-      settle(() => reject(error));
+      firstError ??= error;
     };
     child.stdout.on("data", (chunk) => stdout.push(chunk));
     child.stderr.on("data", (chunk) => stderr.push(chunk));
-    child.once("error", receiveError);
+    child.on("error", receiveError);
     child.once("close", (code) => {
+      if (firstError) {
+        settle(() => reject(firstError));
+        return;
+      }
       if (cancelled) {
         settle(() =>
           reject(new Error("Demo media fixture generation cancelled.")),
         );
         return;
       }
+      if (code !== 0) {
+        settle(() =>
+          reject(
+            new Error(
+              `Demo media fixture codec command failed: ${executable}.`,
+            ),
+          ),
+        );
+        return;
+      }
       settle(() =>
         resolve({
-          exitCode: code ?? 1,
+          exitCode: code,
           stdout: Buffer.concat(stdout).toString("utf8"),
           stderr: Buffer.concat(stderr).toString("utf8"),
         }),
