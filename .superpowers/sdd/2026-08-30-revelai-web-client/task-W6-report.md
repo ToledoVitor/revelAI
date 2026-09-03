@@ -86,7 +86,7 @@ Each stem above has `.png`, `.reference-normalized.png`, `.overlay.png`, `.diff.
 - **Accessibility and UX evidence:** structural coverage retains semantic labels, focus landing, keyboard operation, disabled/enabled states, responsive bounds, reduced motion, and console/page-error assertions. W6 adds visible upload state, pending/refresh, terminal/empty-history checks. This is not a full WCAG conformance claim; W6-V04's long mobile capture instructions remain a scanning risk.
 - **Open P3 backlog:** none beyond Sol's confirmation of W6-V01's documented W0 photo-variance disposition.
 
-`apps/web/design-qa.md` deliberately ends with `final result: pending independent Sol acceptance; W6-V01 through W6-V06 remain open.` It does not claim the prohibited `final result: passed`.
+At this initial capture, `apps/web/design-qa.md` deliberately ended with `final result: pending independent Sol acceptance; W6-V01 through W6-V06 remain open.` It did not self-issue the prohibited `final result: passed`; the hosted final acceptance below supersedes that historical status.
 
 ## Renderer, CI, and platform limits
 
@@ -416,8 +416,6 @@ The normal browser trace also corrected a harness-only ordering error: after cli
 
 The Docker result is a startup/V05 diagnostic only, not terminal acceptance. Definitive terminal proof remains controller-pushed native Linux/x64 hosted codec CI. No hosted orphan is claimed and no check-fact smoke replaces normal media acceptance.
 
-final result: pending independent Sol acceptance.
-
 ## CI fix round 6 — owned readiness and observed pending — 2026-09-02
 
 Review base: `be9e864`. Functional/test corrections: `e6aa4fc` (`fix(web): harden demo E2E readiness`) and `e858e51` (`test(web): require enabled pending refresh`). This round changes no W0–W6 visual surface, token, asset, pixel threshold, or capture artifact. It corrects the normal demo acceptance harness and its evidence only; no fresh visual artifact is claimed.
@@ -564,3 +562,13 @@ The fixture aggregate already uses `Promise.allSettled`, so this delayed codec s
 The test-only child seam is deterministic lifecycle evidence; it does not replace normal C10 codec proof, Linux/x64 hosted acceptance, canonical visual evidence, or independent Sol acceptance.
 
 final result: pending independent Sol acceptance.
+
+## Final hosted W6 acceptance — 2026-09-03
+
+**Status: PASSED.** Independent Sol acceptance is approved. Hosted workflow [33712809662](https://github.com/ToledoVitor/revelAI/actions/runs/33712809662), at head `12318cb43a9669f67caa9eb462cbfd1f48a69f3d`, completed every W6 acceptance gate green: `pnpm check` (**12m14s**), production router, real-FFmpeg/C10 demo E2E terminal, canonical Linux visual comparison, OpenAPI, and operability probes (**2m54s**).
+
+The hosted terminal proof uses the normal codec-backed path rather than `--serve-check`; it creates and probes real C10 media, reaches terminal state, and the Verified trace observes the truthful pending owner/manual refresh before that outcome. Linux/x64 canonical visual acceptance completes the platform-specific evidence that this local Darwin host could not provide.
+
+The accepted truth rulings remain unchanged: V05 makes no closed-app notification promise and keeps foreground/manual refresh; V06 is an isolated policy-approved ranked fixture with persistent `Resultado validado — vale para ranking`, while Free/demo/experimental paths remain structurally noncompetitive. Approved runtime hero/crop variance remains documented evidence, not a copied screenshot or invented runtime asset. No W6 acceptance concern remains.
+
+final result: passed

@@ -110,8 +110,6 @@ Focused comparison was needed for V02 (challenge choice/CTA), V03 (passed gate a
 
 The production fixes are present, but the P0, P1, and P2 acceptance disposition for V02–V06 remains pending independent Sol review. Open P3 items are limited to the approved runtime hero or required truth replacement described above; neither is an implementation defect that can be corrected without violating the asset/truth constraints.
 
-final result: pending independent Sol acceptance.
-
 ## Sol round-6 codec close boundary — 2026-09-03
 
 No visual surface or approved reference changed. The fixture codec lifecycle now reports child errors, non-zero exits, and cancellation only after the owned child closes; its deterministic coverage is **18/18** Node checks plus browser smoke **2/2**. It does not establish normal C10/Linux or independent Sol visual acceptance.
@@ -301,3 +299,11 @@ final result: pending independent Sol acceptance.
 Functional commit `c2816a6` changes no visual artifact or visual gate. Normal fixture generation is now an owned cancellable startup resource: a signal closes admission, waits for every already-admitted codec to close, prevents API/Web continuation, and removes fixture media. The controlled integration records both codec closes before wrapper close, no API-start marker, absent temporary media directory, and rebindable 4174/4175; the Node suite passes **15/15** and browser smoke **2/2**. Normal hosted codec and canonical evidence remain pending.
 
 final result: pending independent Sol acceptance.
+
+## Final W6 acceptance — 2026-09-03
+
+**Passed by independent Sol review.** Hosted workflow [33712809662](https://github.com/ToledoVitor/revelAI/actions/runs/33712809662) at `12318cb43a9669f67caa9eb462cbfd1f48a69f3d` passed `pnpm check`, production-router, the real-FFmpeg/C10 demo terminal, canonical Linux/x64 visual comparison, OpenAPI, and operability probes. The reported durations are **12m14s** for quality and **2m54s** for probes.
+
+The approved truth rulings remain part of the accepted UI: V05 retains foreground/manual refresh and no closed-app notification promise; V06 retains the isolated ranked fixture and exact `Resultado validado — vale para ranking`, while Free/demo/experimental paths structurally omit rank fields. The documented approved-runtime hero/crop variance remains accepted evidence; no reference screenshot, invented asset, or false competitive claim was introduced.
+
+final result: passed
