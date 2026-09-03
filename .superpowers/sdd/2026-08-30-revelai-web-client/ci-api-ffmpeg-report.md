@@ -162,3 +162,46 @@ The macOS developer host has no `ffmpeg`, so the real-codec smoke remains an
 honest capability skip locally. The Ubuntu replay covers the hosted codec
 path; a fresh hosted CI run remains the final confirmation after the root task
 pushes the commits.
+
+### Bounded compact smoke correction
+
+Hosted run `33700036063` showed the prior 15-second test budget was still not
+safe: `local-frame-extraction.test.ts:764` timed out after 15,000 ms, then
+reported `ENOTEMPTY` removing its `.frames` staging directory. The API suite
+was not running its files concurrently: hosted Vitest resolves `CI=true` to
+one worker and the root task invokes Turbo with `--concurrency=1`. The suite
+took 255.33 seconds serially. The cause was the smoke itself: its fixture
+encoded 64 seconds at 1280x720 and C5 then generated, validated, copied, and
+published 640 JPEGs before Vitest's non-cancelling timeout could run cleanup.
+After that timeout, the test continuation performed C5's staged-directory
+cleanup concurrently with `afterEach` root removal, explaining `ENOTEMPTY`.
+
+Commit `9d1875e` keeps a real FFmpeg/C5 integration proof but changes only its
+fixture to the smallest truthful Free input: a 4.05-second, 480x480, 12-fps
+MPEG-4 MP4. C5 still runs its owned full argv (`fps`, `split`, `showinfo`,
+`select`, `metadata`, image2 `mjpeg yuvj420p -bitexact`, and the `[scene]`
+null map). The filter emits exactly 41 decoded JPEGs (0.0 through 4.0), the
+test requires the 4.0 scene boundary and exact encoder/null-map ordering, and
+C5 must publish 12 Free samples with both `frame-0000.jpg` and
+`frame-0011.jpg` readable. This replaces about 640 full-resolution output
+images plus 640 publication copies with a bounded 41/12 proof; it does not
+relax an evidence, file-size, selection, or production timeout invariant.
+
+The smoke disables only Vitest's outer timeout and instead owns a 30,000-ms
+deadline that mirrors C5's actual runner timeout (the runner assertion makes
+that contract explicit). On expiry it closes the per-test tracker, and its
+`finally` awaits `closeAndDrain` before the smoke promise resolves, so hooks
+cannot remove a root while its body is still cleaning up. A controlled-child
+RED/GREEN regression waits for the deadline's SIGTERM, proves the tracker
+remains nonempty until actual close, and allows root removal only after the
+deadline promise observes tracker size zero. This is a scoped cancellation
+contract, not a sleep or global timeout increase.
+
+Verification: FFmpeg is absent on the macOS host, so focused Vitest reports
+20 passed and one honest capability skip; three fresh focused processes passed
+under concurrent host load. API typecheck, lint, Prettier, and diff checks
+passed. An Ubuntu 24.04-based FFmpeg 7.1 container constrained to one CPU ran
+the compact exact filter/encoder/muxer proof 10/10 times; every run produced
+41 JPEGs including `decoded-000040.jpg` and emitted the required 4.0 scene
+record. A fresh hosted run remains required for the workflow-installed FFmpeg
+6.1 path.
