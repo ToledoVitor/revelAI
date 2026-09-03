@@ -2,9 +2,9 @@
 
 ## Status
 
-`DONE_WITH_CONCERNS`
+`DONE`
 
-The required browser/HTTP, contract-fixture, capture, structural, and CI wiring are implemented and verified. Hosted run `33714558200` exposed a deterministic test-admission gap after the prior green; the corrected test now awaits two handlers-armed owned codecs, and final acceptance is pending the next hosted green. The current concern is hosted revalidation; the dated sections below preserve contemporaneous evidence: every prior `DONE_WITH_CONCERNS`, `DONE`, `passed`, `pending`, or self-review statement is historical unless superseded by the final revalidation record.
+The required browser/HTTP, contract-fixture, capture, structural, and CI wiring are implemented and verified. Hosted revalidation run `33715926577` is green at head `6115cadeaa21a2a2d89dae373204e3d0d1eb9d44`; independent Sol acceptance is complete and the final result is passed. The dated sections below preserve contemporaneous evidence: every prior `DONE_WITH_CONCERNS`, `DONE`, `passed`, `pending`, or self-review statement is historical unless superseded by the final revalidation record.
 
 ## Baseline and commits
 
@@ -583,14 +583,34 @@ The accepted truth rulings remained unchanged: V05 made no closed-app notificati
 
 historical result: passed
 
-## Hosted revalidation pending — 2026-09-03
+## Hosted revalidation correction — historical, 2026-09-03
 
-**Hosted revalidation is pending.** Hosted workflow `33714558200` failed only `apps/web/scripts/start-demo-e2e-server.test.mjs`'s `waits for cancelled fixture codecs before leaving startup`: tests 1–17 were green, but this test observed one delayed-codec close where two were expected after **643ms**. The prior test waited for one generic `started` marker, so SIGTERM could occur after the first child admitted but before the second child had started; the expectation of two owned closes was correct, but the synchronization was not.
+**Historical revalidation state: pending.** Hosted workflow `33714558200` failed only `apps/web/scripts/start-demo-e2e-server.test.mjs`'s `waits for cancelled fixture codecs before leaving startup`: tests 1–17 were green, but this test observed one delayed-codec close where two were expected after **643ms**. The prior test waited for one generic `started` marker, so SIGTERM could occur after the first child admitted but before the second child had started; the expectation of two owned closes was correct, but the synchronization was not.
 
 Functional commit `2e04bee` makes the test-only codec fixture publish its target filename at start and close. Follow-up commit `acf1faa` installs both SIGINT/SIGTERM handlers before publishing each `:handlers-ready` marker. The wrapper regression waits for both distinct `free-portrait.mp4:handlers-ready` and `verified-landscape.mp4:handlers-ready` markers before SIGTERM, then requires the two distinct close markers, wrapper close after both timestamps, no API start, deleted fixture media, and free 4174/4175. It neither weakens the expected two closes nor introduces a sleep/retry.
 
 RED: the focused test with the two-marker barrier and the prior generic fixture failed deterministically after the 3s bounded readiness budget. GREEN: the handlers-armed focused test passed; **16** fresh processes passed the same focused test; combined media/lifecycle/wrapper checks passed **18/18**; demo smoke passed Node **18/18** and browser **2/2**; lint, typecheck, Prettier, and diff checks exited 0. No visual surface, W0 budget, or truth ruling changed.
 
-Current concern: independent Sol review and native hosted revalidation remain required after `acf1faa`; the historical pass at `12318cb` is not the current acceptance result.
+At this historical checkpoint, independent Sol review and native hosted revalidation remained required after `acf1faa`; the historical pass at `12318cb` was not the current acceptance result.
 
-final result: pending independent Sol acceptance.
+historical result: pending independent Sol acceptance.
+
+## Final hosted W6 revalidation — 2026-09-03
+
+**Status: DONE. Result: passed.** Hosted workflow [33715926577](https://github.com/ToledoVitor/revelAI/actions/runs/33715926577), at head `6115cadeaa21a2a2d89dae373204e3d0d1eb9d44`, completed every gate green. The complete `Demo-only quality checks` job took **11m50s**; the complete `Demo-only clean executable and operability probes` job took **3m05s**.
+
+| Hosted gate                | Verified result                                              |
+| -------------------------- | ------------------------------------------------------------ |
+| `pnpm check`               | exit 0.                                                      |
+| Production router          | exit 0; **23/23**.                                           |
+| Real-FFmpeg/C10 demo E2E   | exit 0; Node **18/18** and browser **2/2** through terminal. |
+| Canonical Linux/x64 visual | exit 0; **30 passed, 10 skipped**.                           |
+| OpenAPI                    | exit 0.                                                      |
+| Focused API                | exit 0; **23/23**.                                           |
+| Operability                | exit 0; **18/18**.                                           |
+
+Run `33714558200` remains the historical flake evidence: its generic first-codec marker admitted SIGTERM before both codecs were handlers-armed. The `2e04bee`/`acf1faa` distinct markers and handler-first publication corrected that test boundary; this final hosted run validates the correction without altering W0 or any visual surface.
+
+V05 remains foreground/manual-refresh truth with no closed-app notification promise. V06 remains the isolated policy-approved ranked fixture with exact `Resultado validado — vale para ranking`; Free/demo/experimental paths structurally remain noncompetitive. No W6 acceptance concern remains.
+
+final result: passed

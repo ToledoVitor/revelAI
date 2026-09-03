@@ -2,7 +2,7 @@
 
 ## W6 document authority
 
-Only [Hosted revalidation pending](#hosted-revalidation-pending--2026-09-03) is the current W6 authority. Every earlier W6 `pending`, `current authority`, `authoritative`, reviewer disposition, `DONE`, `passed`, and `final result` statement is a dated historical checkpoint retained as evidence; it is superseded by the revalidation record at the end of this document.
+Only [Final hosted W6 revalidation](#final-hosted-w6-revalidation--2026-09-03) is the current W6 authority. Every earlier W6 `pending`, `current authority`, `authoritative`, reviewer disposition, `DONE`, `passed`, and `final result` statement is a dated historical checkpoint retained as evidence; it is superseded by the final green revalidation record at the end of this document.
 
 ## Audit record
 
@@ -314,12 +314,20 @@ The approved truth rulings remained part of the accepted UI: V05 retained foregr
 
 historical result: passed
 
-## Hosted revalidation pending — 2026-09-03
+## Hosted revalidation correction — historical, 2026-09-03
 
-**Status: PENDING_HOSTED_REVALIDATION.** Hosted run `33714558200` failed only the Node lifecycle regression `waits for cancelled fixture codecs before leaving startup`: tests 1–17 passed, then a generic first-codec marker allowed SIGTERM before the second codec had started, yielding one close instead of the required two. This is a test-synchronization flake, not a visual or product-truth regression.
+**Historical revalidation state: pending.** Hosted run `33714558200` failed only the Node lifecycle regression `waits for cancelled fixture codecs before leaving startup`: tests 1–17 passed, then a generic first-codec marker allowed SIGTERM before the second codec had started, yielding one close instead of the required two. This is a test-synchronization flake, not a visual or product-truth regression.
 
 Commit `2e04bee` requires distinct ready markers for `free-portrait.mp4` and `verified-landscape.mp4` before SIGTERM, then requires those same two close markers before wrapper completion. Follow-up `acf1faa` installs both SIGINT/SIGTERM handlers before publishing the `:handlers-ready` markers that satisfy this barrier. The proof preserves the exact two-close expectation, no API start, media cleanup, and 4174/4175 ownership; it adds neither sleep nor retry. Locally, the handlers-armed focused test passed in **16** fresh processes; Node lifecycle/media/wrapper checks passed **18/18**, smoke browser **2/2**, and lint/typecheck/Prettier/diff checks were green.
 
-V05's foreground/manual-refresh truth and V06's isolated ranked-only fixture remain binding. Independent Sol review and a new native hosted green are required before W6 can return to accepted status.
+V05's foreground/manual-refresh truth and V06's isolated ranked-only fixture remained binding. At this historical checkpoint, independent Sol review and a new native hosted green were required before W6 could return to accepted status.
 
-final result: pending independent Sol acceptance.
+historical result: pending independent Sol acceptance.
+
+## Final hosted W6 revalidation — 2026-09-03
+
+**Status: DONE. Result: passed by independent Sol review.** Hosted workflow [33715926577](https://github.com/ToledoVitor/revelAI/actions/runs/33715926577) at `6115cadeaa21a2a2d89dae373204e3d0d1eb9d44` passed every gate: `pnpm check` exit 0; production-router **23/23**; real-FFmpeg/C10 demo E2E Node **18/18** plus browser **2/2**; canonical Linux/x64 visual **30 passed, 10 skipped**; focused API **23/23**; OpenAPI exit 0; and operability **18/18**. The complete quality job took **11m50s**; the complete clean-executable/operability job took **3m05s**.
+
+The failed run `33714558200` remains historical flake evidence only: it exposed the generic marker race corrected by the distinct handlers-armed barrier in `2e04bee` and `acf1faa`. V05 retains foreground/manual refresh and no closed-app notification promise; V06 retains the isolated ranked fixture and exact `Resultado validado — vale para ranking`, while Free/demo/experimental paths structurally omit rank fields. No reference screenshot, invented asset, false competitive claim, or visual-budget change was introduced. This is the sole current W6 authority.
+
+final result: passed
