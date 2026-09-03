@@ -257,3 +257,9 @@ final result: pending independent Sol acceptance.
 The round-3 remediation evidence above supersedes the historical round-2 geometry, ratios, and implementation disposition. V02–V06 have no actionable P0/P1/P2 implementation finding, but every acceptance disposition remains pending independent Sol acceptance; hosted codec and canonical Linux/x64 evidence remain controller work.
 
 final result: pending independent Sol acceptance.
+
+## CI round 5 runtime-boundary note — 2026-09-02
+
+Functional commit `ef2ff28` changes no visual surface, approved asset, visual gate, W0 budget, or reference artifact; no visual recapture is claimed. The normal demo E2E child strips only Playwright's private `REVELAI_DEMO_E2E` marker before strict API validation. Codec-provisioned Ubuntu browser evidence reaches the real V05 pending composition with truthful timeline and manual refresh after upload. Its nonterminal Docker run is Rosetta amd64-emulation throughput, not a visual result or native hosted acceptance. Existing V02–V06 inspection remains applicable; native Linux/x64 codec completion and independent Sol review remain required.
+
+final result: pending independent Sol acceptance.

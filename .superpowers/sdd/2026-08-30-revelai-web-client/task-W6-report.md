@@ -384,3 +384,38 @@ The regression now stores the real capture heading returned by `findByRole` and 
 No visual capture was regenerated for this test-only synchronization: no visual surface or artifact-producing code changed. The normal codec-backed hosted acceptance and canonical Linux/x64 execution remain controller-hosted gates, and final independent Sol acceptance remains pending.
 
 final result: pending independent Sol acceptance.
+
+## CI fix round 5 — normal demo E2E startup boundary — 2026-09-02
+
+Functional/test commit: `ef2ff28` (`fix(web): isolate demo e2e runtime boundary`). This round changes neither W0–W6 rendering nor an approved asset. No fresh reference/candidate/overlay/diff artifact is claimed: the browser evidence below concerns the normal demo runtime boundary and its real-media lifecycle. Existing visual evidence remains authoritative; final result remains pending independent Sol acceptance.
+
+### Hosted RED, diagnosis, and correction
+
+Hosted run `33703583459` passed `pnpm check` and production-router, then failed `test:demo:e2e` before API readiness. The outer server reported that the local demo API exited; before this fix the API child reduced every non-preflight failure to that same generic sentence.
+
+- The explicit FFmpeg preflight message was absent. A clean Ubuntu 24.04 + FFmpeg direct normal API start reached health readiness (`ubuntu-normal-demo-start=ready`), excluding ordinary codec preflight/parser and SQLite bootstrap in that codec-equipped environment.
+- A controlled occupied-port probe reproduced the former generic output exactly. It proves a `4174` namespace collision can be masked, but does **not** prove a hosted orphan.
+- The exact strict-config probe `rtk node --input-type=module -e '…parseApiEnv({ REVELAI_DEMO_E2E: "true" })…'` returned `{"name":"Error","message":"Unrecognized key: REVELAI_DEMO_E2E"}`. `playwright.demo.config.ts` intentionally sets that runner-private marker; `start-demo-e2e-server.mjs` had copied it into strict API validation. This is the direct pre-bind cause.
+
+`createDemoApiEnvironment` now removes **only** `REVELAI_DEMO_E2E` before spawning the normal API. It preserves normal values including `CI` and an ordinary non-`REVELAI_` runner setting, then applies existing host/port/data/media values. `parseApiEnv` remains strict for unknown production `REVELAI_*`; no production rule was relaxed.
+
+The runner smoke server now owns `4176` and the normal demo API retains `4174`. Browser-runner regressions prove both simultaneous port separation and post-run ownership by binding `4174` while the runner listens, then binding `4176` after `runPlaywrightRunner` exits. The startup diagnostic now reports `RevelAI local demo startup failed: address_in_use.` only for `EADDRINUSE`; other failures retain non-sensitive `runtime_initialization_failed`/`server_bind_failed` phase labels. The occupied-port API regression asserts exactly that safe output, with no path, environment value, or secret.
+
+The normal browser trace also corrected a harness-only ordering error: after clicking upload it now observes the real accessible progressbar before awaiting terminal report, instead of expecting pending while the verified upload may still be active. Its finite terminal budget is named: 30 s upload + C5's existing 30 s extraction cap + 30 s durable reconstruction/analysis + one 5 s capped pending poll + 25 s CI scheduling margin = 120 s. Playwright allows 150 s only for teardown/reporting room. This changes no runtime delay, retry, provider, or media fact.
+
+### RED/GREEN evidence and hosted gate
+
+| Phase | Exact command / observed result |
+| --- | --- |
+| Hosted RED | Run `33703583459`: `pnpm check` and production-router passed; `test:demo:e2e` failed because the local demo API exited before ready. |
+| RED | In the Ubuntu Playwright image, `CI=true pnpm --filter @revelai/web run test:demo:e2e` previously classified the child as `runtime_initialization_failed`; the direct strict-config probe identified the rejected marker. |
+| RED | Before diagnostic classification, `rtk pnpm --filter @revelai/api run demo:smoke` failed its new occupied-port assertion after normal check passed; old child text was generic. |
+| GREEN | `rtk pnpm --filter @revelai/api run demo:smoke` — normal check and hermetic occupied-port regression passed. |
+| GREEN | `rtk node --test apps/web/scripts/demo-e2e-environment.test.mjs` — **1/1 passed**: private marker removed; `CI`, ordinary runner setting, host, port, data, and media settings preserved. |
+| GREEN | `rtk pnpm --filter @revelai/web run test` — **13 Node checks**, **27 Vitest files / 291 tests**, structural Playwright **26 passed / 14 skipped**; includes all **6** runner ownership/separation tests. |
+| GREEN | `rtk pnpm --filter @revelai/web run lint`; `rtk pnpm --filter @revelai/web run typecheck`; focused `rtk pnpm exec prettier --check …`; and `rtk git diff --check` — all exit **0**. |
+| Ubuntu diagnostic | With codec-provisioned Ubuntu, corrected normal startup and real upload reach V05 `main "Processando tentativa"` with truthful timeline/manual refresh. It does not terminalize within the local budget. `docker top` shows no FFmpeg child and API Node around 90% CPU under `/run/rosetta/rosetta … node --no-opt`; that is Apple amd64 emulation throughput, not native hosted Ubuntu behavior. |
+
+The Docker result is a startup/V05 diagnostic only, not terminal acceptance. Definitive terminal proof remains controller-pushed native Linux/x64 hosted codec CI. No hosted orphan is claimed and no check-fact smoke replaces normal media acceptance.
+
+final result: pending independent Sol acceptance.
