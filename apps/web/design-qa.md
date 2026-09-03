@@ -275,3 +275,11 @@ final result: pending independent Sol acceptance.
 Functional commit `e99733f` changes no visual state or accepted artifact. The verified browser trace has one 120-second post-upload budget shared by progress, pending, and terminal observations; it no longer permits independent 120-second pending and terminal waits. The browser harness consumes only its child’s exact readiness token and never emits child stdout/stderr. Regressions prove that a pre-setup child stack, local path, and sentinel secret do not reach wrapper output, and that successful and SIGTERM-resistant owned children release both 4174 and 4175 before their wrapper completes. Existing V02–V06 visual inspection remains applicable. Native Linux/x64 codec terminal evidence and independent Sol review are still required.
 
 final result: pending independent Sol acceptance.
+
+## CI lifecycle edge-case correction — 2026-09-03
+
+Functional commit `27df4ce555eca77df74c86c95ab2035d6be55dd2` changes no captured visual surface, asset, W0 budget, or reference gate, so no fresh visual artifact is claimed. The wrapper now keeps its owned child error listener through TERM and SIGKILL until that exact child closes, and concurrent shutdown callers share one cleanup promise. Wrapper regressions cover a normal child and a SIGTERM-resistant owned child; each run proves ports 4174 and 4175 can be rebound only after wrapper completion.
+
+The real Verified browser trace now gives the enabled `Atualizar agora` expectation the same decreasing 120-second post-upload remainder already used for progress, pending, and terminal report. This corrects the prior implicit 5-second default and preserves the 150-second outer teardown/reporting backstop. Focused Node lifecycle tests pass **2/2**, combined wrapper tests **8/8**, and the smoke browser run **2/2**; the normal codec-backed terminal and Linux/x64 canonical visual evidence remain hosted-controller work.
+
+final result: pending independent Sol acceptance.

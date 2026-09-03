@@ -14,18 +14,18 @@ The required browser/HTTP, contract-fixture, capture, structural, and CI wiring 
 
 ## Files changed
 
-| Path | Why |
-| --- | --- |
-| `.github/workflows/ci.yml` | Runs the new secret-free production demo browser trace before the immutable canonical Linux visual gate. |
-| `apps/api/scripts/start-local-demo.mjs` | Adds private `--serve-check` lifecycle support so an HTTP server can use the existing deterministic C10 check probe/extraction seam. The default demo command is unchanged. |
-| `apps/web/package.json` | Adds `test:demo:e2e`, building the API workspace and the production Web client before Playwright. |
-| `apps/web/playwright.demo.config.ts` | Dedicated production-client/demo-API test config; it enables the suite only there so W0–W5's development visual run does not collect it. |
-| `apps/web/scripts/start-demo-e2e-server.mjs` | Starts a static production client, proxies `/v1` to the real local Fastify demo server, creates deterministic C10 check media bytes, and cleans its private scratch/media state. |
-| `apps/web/src/visual/demo-api.e2e.visual.spec.ts` | Visible-control Free and Verified browser traces against the real API HTTP boundary, with request/body/truth assertions and no API mocks. |
-| `apps/web/src/visual/ranked-policy-fixture.ts` and `.test.ts` | Isolated schema-parsed competitive fixture for the positive ranked rendering capture; it performs no policy or ranking calculation. |
-| `apps/web/src/visual/approved-reference.visual.spec.ts` | Deterministically drives and records the six mobile approved-reference states through the extended W0 artifact pipeline. |
+| Path                                                                | Why                                                                                                                                                                                               |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.github/workflows/ci.yml`                                          | Runs the new secret-free production demo browser trace before the immutable canonical Linux visual gate.                                                                                          |
+| `apps/api/scripts/start-local-demo.mjs`                             | Adds private `--serve-check` lifecycle support so an HTTP server can use the existing deterministic C10 check probe/extraction seam. The default demo command is unchanged.                       |
+| `apps/web/package.json`                                             | Adds `test:demo:e2e`, building the API workspace and the production Web client before Playwright.                                                                                                 |
+| `apps/web/playwright.demo.config.ts`                                | Dedicated production-client/demo-API test config; it enables the suite only there so W0–W5's development visual run does not collect it.                                                          |
+| `apps/web/scripts/start-demo-e2e-server.mjs`                        | Starts a static production client, proxies `/v1` to the real local Fastify demo server, creates deterministic C10 check media bytes, and cleans its private scratch/media state.                  |
+| `apps/web/src/visual/demo-api.e2e.visual.spec.ts`                   | Visible-control Free and Verified browser traces against the real API HTTP boundary, with request/body/truth assertions and no API mocks.                                                         |
+| `apps/web/src/visual/ranked-policy-fixture.ts` and `.test.ts`       | Isolated schema-parsed competitive fixture for the positive ranked rendering capture; it performs no policy or ranking calculation.                                                               |
+| `apps/web/src/visual/approved-reference.visual.spec.ts`             | Deterministically drives and records the six mobile approved-reference states through the extended W0 artifact pipeline.                                                                          |
 | `apps/web/src/visual/visual-harness.ts`, `.node.ts`, and `.test.ts` | Registers route/state/reference metadata and writes normalized reference, candidate, 50% overlay, unmasked diff, and metadata for each W6 state. Existing W0 home budgets/masks remain unchanged. |
-| `apps/web/design-qa.md` | Preserves W0 history and records the complete W6 inspection, findings, truth rulings, risks, and pending independent acceptance. |
+| `apps/web/design-qa.md`                                             | Preserves W0 history and records the complete W6 inspection, findings, truth rulings, risks, and pending independent acceptance.                                                                  |
 
 ## Test-first evidence
 
@@ -65,15 +65,15 @@ The host lacks FFmpeg, so the test media uses deterministic C10-compatible check
 
 All state artifacts use CSS screenshots, normalized density `1`, and equal-dimension nearest-neighbour normalized references. Every named reference, candidate capture, 50% overlay, and diff was opened and inspected from the fresh run; no blank, loading, wrong-route, or artificially cropped capture was accepted. The non-home comparisons have `regions: []`: no masking or candidate-derived budget.
 
-| ID | Route / state / fixture | CSS viewport / DPR / reference | Artifact stem under `apps/web/coverage/playwright/visual-artifacts/` | Diff result and inspection |
-| --- | --- | --- | --- | --- |
-| W6-D01 | `/` / `ready` / `home-default` | `1440×1024`, DPR 1, `desktop-home.png` | `home-default--1440x1024--dpr-1--root--ready` | Existing W0 capture pipeline and its narrow photo mask/independent ink proof stayed unchanged; desktop visual checks passed in the Darwin run. |
-| W6-V01 | `/` / `ready` / `home-default` | `390×844`, DPR 2, `mobile-home.png` | `home-default--390x844--dpr-2--root--ready` | 114,561 / 329,160 changed pixels = **34.804%** unmasked. Opened all artifacts. Known runtime photo/crop variance remains governed by the accepted W0 mask/ink proof; P3 confirmation only. |
-| W6-V02 | `/verified` / `challenge-choice` / `verified-challenge-default` | `390×844`, DPR 2, `mobile-challenge.png` | `verified-challenge-default--390x844--dpr-2--verified--challenge-choice` | 90,855 / 329,160 = **27.602%**. Complete but visibly divergent capture; P0 remains open. |
-| W6-V03 | `/verified` / `calibration-guidance` / `verified-calibration-default` | `390×844`, DPR 2, `mobile-calibration.png` | `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` | 105,417 / 329,160 = **32.026%**. Complete but visually divergent; P0 remains open. |
-| W6-V04 | `/verified` / `recording-capture` / `verified-record-default` | `390×844`, DPR 2, `mobile-record.png` | `verified-record-default--390x844--dpr-2--verified--recording-capture` | 127,122 / 329,160 = **38.620%**. Complete visible requirements/capture controls, but the approved composition is absent; P0 remains open. |
-| W6-V05 | `/verified` / `processing-pending` / `verified-processing-demo` | `390×844`, DPR 2, `mobile-processing.png` | `verified-processing-demo--390x844--dpr-2--verified--processing-pending` | 64,207 / 329,160 = **19.506%**. The reference notification promise is intentionally not copied: visible copy truthfully requires foreground/manual refresh. Composition still diverges; P0 remains open. |
-| W6-V06 | `/verified` / `ranked-report` / `verified-ranked-policy-approved` | `390×844`, DPR 2, `mobile-report.png` | `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report` | 61,144 / 329,160 = **18.576%**. Isolated ranked result visibly says `Resultado validado — vale para ranking`; it is not a demo result. Compact reference composition remains P0-open. |
+| ID     | Route / state / fixture                                               | CSS viewport / DPR / reference             | Artifact stem under `apps/web/coverage/playwright/visual-artifacts/`           | Diff result and inspection                                                                                                                                                                               |
+| ------ | --------------------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W6-D01 | `/` / `ready` / `home-default`                                        | `1440×1024`, DPR 1, `desktop-home.png`     | `home-default--1440x1024--dpr-1--root--ready`                                  | Existing W0 capture pipeline and its narrow photo mask/independent ink proof stayed unchanged; desktop visual checks passed in the Darwin run.                                                           |
+| W6-V01 | `/` / `ready` / `home-default`                                        | `390×844`, DPR 2, `mobile-home.png`        | `home-default--390x844--dpr-2--root--ready`                                    | 114,561 / 329,160 changed pixels = **34.804%** unmasked. Opened all artifacts. Known runtime photo/crop variance remains governed by the accepted W0 mask/ink proof; P3 confirmation only.               |
+| W6-V02 | `/verified` / `challenge-choice` / `verified-challenge-default`       | `390×844`, DPR 2, `mobile-challenge.png`   | `verified-challenge-default--390x844--dpr-2--verified--challenge-choice`       | 90,855 / 329,160 = **27.602%**. Complete but visibly divergent capture; P0 remains open.                                                                                                                 |
+| W6-V03 | `/verified` / `calibration-guidance` / `verified-calibration-default` | `390×844`, DPR 2, `mobile-calibration.png` | `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` | 105,417 / 329,160 = **32.026%**. Complete but visually divergent; P0 remains open.                                                                                                                       |
+| W6-V04 | `/verified` / `recording-capture` / `verified-record-default`         | `390×844`, DPR 2, `mobile-record.png`      | `verified-record-default--390x844--dpr-2--verified--recording-capture`         | 127,122 / 329,160 = **38.620%**. Complete visible requirements/capture controls, but the approved composition is absent; P0 remains open.                                                                |
+| W6-V05 | `/verified` / `processing-pending` / `verified-processing-demo`       | `390×844`, DPR 2, `mobile-processing.png`  | `verified-processing-demo--390x844--dpr-2--verified--processing-pending`       | 64,207 / 329,160 = **19.506%**. The reference notification promise is intentionally not copied: visible copy truthfully requires foreground/manual refresh. Composition still diverges; P0 remains open. |
+| W6-V06 | `/verified` / `ranked-report` / `verified-ranked-policy-approved`     | `390×844`, DPR 2, `mobile-report.png`      | `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report`     | 61,144 / 329,160 = **18.576%**. Isolated ranked result visibly says `Resultado validado — vale para ranking`; it is not a demo result. Compact reference composition remains P0-open.                    |
 
 Each stem above has `.png`, `.reference-normalized.png`, `.overlay.png`, `.diff.png`, and `.metadata.json`. The metadata contains the stable route/state/fixture, viewport, DPR, CSS capture scale, normalized density, capture dimensions, reference, comparison threshold, count, and mask declaration. The six W6 non-home/matrix captures were inspected at exact `390×844` CSS dimensions and DPR `2`; W0 preserves the exact desktop home `1440×1024`, DPR `1` pipeline.
 
@@ -112,15 +112,15 @@ Remaining concerns are the five real P0 visual gaps, required independent Sol ac
 
 ### Changed files and why
 
-| Path | Why |
-| --- | --- |
-| `apps/web/src/verified/tracer.tsx` | Adds the public challenge-choice state before setup ownership; provides the styled real calibration, capture, pending, and ranked-report states while preserving existing HTTP, setup, upload, polling, and result boundaries. |
-| `apps/web/src/verified/production-capture.tsx` | Adds the approved hero fallback only while a real camera stream is absent, preserves the real `<video>`, and makes requirements semantic disclosure. |
-| `apps/web/src/styles.css` | Uses existing tokens and bundled Bebas/Arimo faces for editorial layout, normal borders, real-control states, progress, timeline, metrics, and responsive presentation. No screenshot, new raster, CSS illustration, or custom SVG is introduced. |
-| `apps/web/src/verified/{tracer,production-capture}.test.tsx` | Covers choice-before-owner ordering, camera fallback controls, ranked-only fields, and the real passed-device calibration rail. |
-| `apps/web/src/{home/home.test.tsx,production-router-harness.test.ts}` | Updates direct public-route assertions to the new real choice boundary. |
-| `apps/web/src/visual/{approved-reference,demo-api.e2e,production-route-isolation}.visual.spec.ts` | Drives choice explicitly before calibration in production/demo paths and verifies `/verified` has no calibration mutation before the player prepares wall pass. |
-| `apps/web/design-qa.md` | Records the before/fix/after remediation comparison and pending independent acceptance. |
+| Path                                                                                              | Why                                                                                                                                                                                                                                               |
+| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apps/web/src/verified/tracer.tsx`                                                                | Adds the public challenge-choice state before setup ownership; provides the styled real calibration, capture, pending, and ranked-report states while preserving existing HTTP, setup, upload, polling, and result boundaries.                    |
+| `apps/web/src/verified/production-capture.tsx`                                                    | Adds the approved hero fallback only while a real camera stream is absent, preserves the real `<video>`, and makes requirements semantic disclosure.                                                                                              |
+| `apps/web/src/styles.css`                                                                         | Uses existing tokens and bundled Bebas/Arimo faces for editorial layout, normal borders, real-control states, progress, timeline, metrics, and responsive presentation. No screenshot, new raster, CSS illustration, or custom SVG is introduced. |
+| `apps/web/src/verified/{tracer,production-capture}.test.tsx`                                      | Covers choice-before-owner ordering, camera fallback controls, ranked-only fields, and the real passed-device calibration rail.                                                                                                                   |
+| `apps/web/src/{home/home.test.tsx,production-router-harness.test.ts}`                             | Updates direct public-route assertions to the new real choice boundary.                                                                                                                                                                           |
+| `apps/web/src/visual/{approved-reference,demo-api.e2e,production-route-isolation}.visual.spec.ts` | Drives choice explicitly before calibration in production/demo paths and verifies `/verified` has no calibration mutation before the player prepares wall pass.                                                                                   |
+| `apps/web/design-qa.md`                                                                           | Records the before/fix/after remediation comparison and pending independent acceptance.                                                                                                                                                           |
 
 ### RED/GREEN evidence added in this remediation
 
@@ -134,13 +134,13 @@ Remaining concerns are the five real P0 visual gaps, required independent Sol ac
 
 Every item below was captured after `b20bf02`, at `390×844` CSS pixels, DPR 2, CSS scale, normalized density 1. Reference, capture, 50% overlay, and complete unmasked diff were opened and inspected. Artifact directory: `apps/web/coverage/playwright/visual-artifacts/`.
 
-| Finding | Exact code fix | Fresh artifact stem | Full unmasked ratio / outcome |
-| --- | --- | --- | --- |
-| W6-V02 challenge choice | `ChallengeChoice` + `TracerStage` `challenge`; move setup only from `Preparar desafio`. | `verified-challenge-default--390x844--dpr-2--verified--challenge-choice` | **23.596%**. Card/disabled rows/CTA/headline are present; approved hero subject/crop is P3 only. |
-| W6-V03 calibration | `SetupProgress`, `CalibrationGuidance`, `displayedPassedGates` use actual gate/camera state. | `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` | **38.174%**. Rail, passed device, active correction, truthful blocked guidance and hero region are present; unavailable source court art is P3 only. |
-| W6-V04 capture | real camera conditional plus `capture-fallback-image`, semantic requirements disclosure and control layout. | `verified-record-default--390x844--dpr-2--verified--recording-capture` | **34.494%**. Actual camera remains primary when present; approved fallback/crop difference is P3 only. |
-| W6-V05 pending | semantic `processing-timeline`, foreground/manual refresh copy, no closed-app promise/control. | `verified-processing-demo--390x844--dpr-2--verified--processing-pending` | **25.132%**. Timeline hierarchy is present; removed notification/image-strip source content is required truth/asset P3 only. |
-| W6-V06 ranked report | `VerifiedReport` scorecard/metrics/insight; ranked branch is isolated and demo/experimental structurally lack rank fields. | `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report` | **16.812%**. Persistent exact competitive truth and report hierarchy are present. |
+| Finding                 | Exact code fix                                                                                                             | Fresh artifact stem                                                            | Full unmasked ratio / outcome                                                                                                                        |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W6-V02 challenge choice | `ChallengeChoice` + `TracerStage` `challenge`; move setup only from `Preparar desafio`.                                    | `verified-challenge-default--390x844--dpr-2--verified--challenge-choice`       | **23.596%**. Card/disabled rows/CTA/headline are present; approved hero subject/crop is P3 only.                                                     |
+| W6-V03 calibration      | `SetupProgress`, `CalibrationGuidance`, `displayedPassedGates` use actual gate/camera state.                               | `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` | **38.174%**. Rail, passed device, active correction, truthful blocked guidance and hero region are present; unavailable source court art is P3 only. |
+| W6-V04 capture          | real camera conditional plus `capture-fallback-image`, semantic requirements disclosure and control layout.                | `verified-record-default--390x844--dpr-2--verified--recording-capture`         | **34.494%**. Actual camera remains primary when present; approved fallback/crop difference is P3 only.                                               |
+| W6-V05 pending          | semantic `processing-timeline`, foreground/manual refresh copy, no closed-app promise/control.                             | `verified-processing-demo--390x844--dpr-2--verified--processing-pending`       | **25.132%**. Timeline hierarchy is present; removed notification/image-strip source content is required truth/asset P3 only.                         |
+| W6-V06 ranked report    | `VerifiedReport` scorecard/metrics/insight; ranked branch is isolated and demo/experimental structurally lack rank fields. | `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report`     | **16.812%**. Persistent exact competitive truth and report hierarchy are present.                                                                    |
 
 Fidelity surfaces reviewed in every row: Bebas/Arimo typography and wrapping; spacing/rhythm at 390px; warm-white/deep-emerald/border tokens and contrast; approved image quality/crop; Portuguese copy, truth, controls, and Phosphor icon affordance. Focused state comparisons were performed for challenge controls, passed calibration status, live/fallback camera boundary, manual refresh, and rank-field isolation. No P0/P1/P2 remains actionable.
 
@@ -172,26 +172,26 @@ This section supersedes earlier statements that the local `test:demo:e2e` check-
 
 ### Commit ledger
 
-| Commit | Role |
-| --- | --- |
-| `8cb14d5ab04edd880cc03adb4aa011783328315d` | Required W6 base. |
-| `eabf3ff84e6ed4a4b7f976a91f9fc4a0c8ccd048` | Initial W6 functional/browser coverage. |
-| `5e46a75` | Initial W6 evidence/report commit (recorded here to repair the previously omitted ledger entry). |
-| `b20bf023c56038194eeb980c9434cad1b243cc01` | Prior verified-state remediation. |
-| `b71abc2` | Round-1 review base. |
-| `94a13e68d65482f1d9d66ad0ab939c07124223a1` | Round-1 functional/test/CI remediation: enforce W6 visual acceptance. |
+| Commit                                     | Role                                                                                             |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `8cb14d5ab04edd880cc03adb4aa011783328315d` | Required W6 base.                                                                                |
+| `eabf3ff84e6ed4a4b7f976a91f9fc4a0c8ccd048` | Initial W6 functional/browser coverage.                                                          |
+| `5e46a75`                                  | Initial W6 evidence/report commit (recorded here to repair the previously omitted ledger entry). |
+| `b20bf023c56038194eeb980c9434cad1b243cc01` | Prior verified-state remediation.                                                                |
+| `b71abc2`                                  | Round-1 review base.                                                                             |
+| `94a13e68d65482f1d9d66ad0ab939c07124223a1` | Round-1 functional/test/CI remediation: enforce W6 visual acceptance.                            |
 
 ### Files changed in this round
 
-| Path | Reason |
-| --- | --- |
-| `.github/workflows/ci.yml` | Provisions FFmpeg before the normal demo-browser command so the hosted acceptance path generates and probes actual C10 media. |
-| `apps/web/{package.json,vitest.config.ts,playwright.demo.smoke.config.ts}` | Includes the Node codec-fixture test in the standard Web test command, prevents Vitest from miscollecting it, and isolates check-fact smoke from normal demo acceptance. |
-| `apps/web/scripts/{demo-media-fixtures.mjs,demo-media-fixtures.test.mjs,start-demo-e2e-server.mjs}` | Generates FFmpeg MP4s, validates them with FFprobe, starts normal API runtime by default, and retains `--serve-check` only for smoke. |
-| `apps/web/src/{app.tsx,styles.css}` | Adds durable visual landmark hooks and compact mobile layout without changing W0 budgets. |
-| `apps/web/src/verified/{tracer,production-capture}.{tsx,test.tsx}` | Restores `3 metros`, uses native disabled upcoming buttons, prevents focus scroll, makes file selection keyboard-operable, and adds regression coverage. |
+| Path                                                                                                   | Reason                                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.github/workflows/ci.yml`                                                                             | Provisions FFmpeg before the normal demo-browser command so the hosted acceptance path generates and probes actual C10 media.                                                           |
+| `apps/web/{package.json,vitest.config.ts,playwright.demo.smoke.config.ts}`                             | Includes the Node codec-fixture test in the standard Web test command, prevents Vitest from miscollecting it, and isolates check-fact smoke from normal demo acceptance.                |
+| `apps/web/scripts/{demo-media-fixtures.mjs,demo-media-fixtures.test.mjs,start-demo-e2e-server.mjs}`    | Generates FFmpeg MP4s, validates them with FFprobe, starts normal API runtime by default, and retains `--serve-check` only for smoke.                                                   |
+| `apps/web/src/{app.tsx,styles.css}`                                                                    | Adds durable visual landmark hooks and compact mobile layout without changing W0 budgets.                                                                                               |
+| `apps/web/src/verified/{tracer,production-capture}.{tsx,test.tsx}`                                     | Restores `3 metros`, uses native disabled upcoming buttons, prevents focus scroll, makes file selection keyboard-operable, and adds regression coverage.                                |
 | `apps/web/src/visual/{visual-harness,visual-harness.node,approved-reference.visual.spec}.{ts,node.ts}` | Adds fixed W6 per-state visual thresholds, landmark/crop/mismatch rejection, capture metadata, reset-scroll assertion, and 390px browser semantics/keyboard/focus/state/error evidence. |
-| `apps/web/design-qa.md` and this report | Separate evidence record, after-artifact inspection, exact tests, and pending acceptance disposition. |
+| `apps/web/design-qa.md` and this report                                                                | Separate evidence record, after-artifact inspection, exact tests, and pending acceptance disposition.                                                                                   |
 
 ### Critical 1 — non-home visual acceptance is now enforceable
 
@@ -224,36 +224,36 @@ The final mobile W6 browser suite covers all five states at `390×844`, DPR 2: s
 
 The final `pnpm check` structural run wrote all matrix artifacts. I opened every fresh normalized reference, capture, 50% overlay, and diff for home plus V02–V06. They were nonblank, at the expected route/state, and contained the required landmarks. Artifact directory: `apps/web/coverage/playwright/visual-artifacts/`.
 
-| State / artifact stem | Ratio / fixed cap | Inspection conclusion |
-| --- | ---: | --- |
-| home `home-default--390x844--dpr-2--root--ready` | W0 governed separately | Existing home photo/crop variance remains W0 P3 only. |
-| V02 `verified-challenge-default--390x844--dpr-2--verified--challenge-choice` | 21.188% / 25.0% | Card, `3 metros`, disabled rows, CTA and bounds are present. |
-| V03 `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` | 31.839% / 40.0% | Rail, real blocking correction, truth panel, controls and bounds are present. |
-| V04 `verified-record-default--390x844--dpr-2--verified--recording-capture` | 33.405% / 36.0% | Actual/fallback preview boundary, record/file controls and disclosure are present. |
-| V05 `verified-processing-demo--390x844--dpr-2--verified--processing-pending` | 25.132% / 30.0% | Manual-refresh timeline is present; false notification promise is absent. |
-| V06 `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report` | 16.812% / 20.0% | Isolated ranked truth, scorecard and metrics are present; demo is never used. |
+| State / artifact stem                                                              |      Ratio / fixed cap | Inspection conclusion                                                              |
+| ---------------------------------------------------------------------------------- | ---------------------: | ---------------------------------------------------------------------------------- |
+| home `home-default--390x844--dpr-2--root--ready`                                   | W0 governed separately | Existing home photo/crop variance remains W0 P3 only.                              |
+| V02 `verified-challenge-default--390x844--dpr-2--verified--challenge-choice`       |        21.188% / 25.0% | Card, `3 metros`, disabled rows, CTA and bounds are present.                       |
+| V03 `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` |        31.839% / 40.0% | Rail, real blocking correction, truth panel, controls and bounds are present.      |
+| V04 `verified-record-default--390x844--dpr-2--verified--recording-capture`         |        33.405% / 36.0% | Actual/fallback preview boundary, record/file controls and disclosure are present. |
+| V05 `verified-processing-demo--390x844--dpr-2--verified--processing-pending`       |        25.132% / 30.0% | Manual-refresh timeline is present; false notification promise is absent.          |
+| V06 `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report`     |        16.812% / 20.0% | Isolated ranked truth, scorecard and metrics are present; demo is never used.      |
 
 Required fidelity surfaces inspected across those comparisons: Bebas/Arimo typography/wrapping, 390px spacing/rhythm, warm-white/deep-emerald/border tokens and contrast, approved hero boundary, Portuguese truth copy, semantic control states, and Phosphor icons. Focused comparisons covered V02 card/CTA, V03 passed/current gate, V04 live/fallback and file focus, V05 refresh loading, and V06 ranked-only DOM. Only source hero/court subject variance or required notification-truth replacement remains P3; no P0/P1/P2 is left actionable.
 
 ### RED/GREEN evidence
 
-| Phase | Command / exact outcome |
-| --- | --- |
-| RED | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts --reporter=dot` — **1 failed, 4 passed (5)**; missing gate export/enforcement. |
-| RED | `rtk pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx -t 'states the three-metre' --reporter=dot` — **1 failed, 42 skipped (43)**. |
-| RED | `rtk pnpm --filter @revelai/web exec vitest run src/verified/production-capture.test.tsx -t 'uses a focusable button' --reporter=dot` — **1 failed, 10 skipped (11)**. |
-| RED | `rtk node --test apps/web/scripts/demo-media-fixtures.test.mjs` — **1 failed** before fixture module creation. |
-| RED | First `rtk pnpm check` after adding the Node test — **1 failed suite, 286 passed tests**; Vitest incorrectly collected the Node suite. |
-| GREEN | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts src/verified/tracer.test.tsx src/verified/production-capture.test.tsx --reporter=dot` — **59 passed**. |
-| GREEN | `rtk node --test apps/web/scripts/demo-media-fixtures.test.mjs` — **1 passed**. |
-| GREEN | `rtk pnpm --filter @revelai/web exec playwright test src/visual/approved-reference.visual.spec.ts --project mobile-home --config playwright.config.ts --reporter=line` — **2 passed**. |
-| GREEN | `rtk pnpm --filter @revelai/web run test:production-router` — **23 passed**. |
-| GREEN | `rtk pnpm --filter @revelai/web run test:demo:e2e:smoke` — **2 passed**. |
-| GREEN | `rtk env CI=1 pnpm --filter @revelai/web run test:visual:structural -- --reporter=line` — **26 passed, 14 skipped**. |
-| GREEN | `rtk env CI=1 pnpm --filter @revelai/web run test:visual:darwin -- --reporter=line` — **30 passed, 10 skipped**. |
-| Expected platform limit | `rtk env CI=1 pnpm --filter @revelai/web run test:visual:canonical -- --reporter=line` — exit **1**, `Canonical visual pixels require linux/x64.` |
-| GREEN | Final `rtk pnpm check` — exit **0**: format; **7/7 lint**, **12/12 typecheck**, **12/12 test tasks**, **7/7 build**. Web recorded **12 Node checks**, **27 Vitest files / 286 tests**, and structural **26 passed / 14 skipped**. |
-| GREEN | `rtk git diff --check` — exit **0** before functional commit. |
+| Phase                   | Command / exact outcome                                                                                                                                                                                                           |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| RED                     | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts --reporter=dot` — **1 failed, 4 passed (5)**; missing gate export/enforcement.                                                                  |
+| RED                     | `rtk pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx -t 'states the three-metre' --reporter=dot` — **1 failed, 42 skipped (43)**.                                                                         |
+| RED                     | `rtk pnpm --filter @revelai/web exec vitest run src/verified/production-capture.test.tsx -t 'uses a focusable button' --reporter=dot` — **1 failed, 10 skipped (11)**.                                                            |
+| RED                     | `rtk node --test apps/web/scripts/demo-media-fixtures.test.mjs` — **1 failed** before fixture module creation.                                                                                                                    |
+| RED                     | First `rtk pnpm check` after adding the Node test — **1 failed suite, 286 passed tests**; Vitest incorrectly collected the Node suite.                                                                                            |
+| GREEN                   | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts src/verified/tracer.test.tsx src/verified/production-capture.test.tsx --reporter=dot` — **59 passed**.                                          |
+| GREEN                   | `rtk node --test apps/web/scripts/demo-media-fixtures.test.mjs` — **1 passed**.                                                                                                                                                   |
+| GREEN                   | `rtk pnpm --filter @revelai/web exec playwright test src/visual/approved-reference.visual.spec.ts --project mobile-home --config playwright.config.ts --reporter=line` — **2 passed**.                                            |
+| GREEN                   | `rtk pnpm --filter @revelai/web run test:production-router` — **23 passed**.                                                                                                                                                      |
+| GREEN                   | `rtk pnpm --filter @revelai/web run test:demo:e2e:smoke` — **2 passed**.                                                                                                                                                          |
+| GREEN                   | `rtk env CI=1 pnpm --filter @revelai/web run test:visual:structural -- --reporter=line` — **26 passed, 14 skipped**.                                                                                                              |
+| GREEN                   | `rtk env CI=1 pnpm --filter @revelai/web run test:visual:darwin -- --reporter=line` — **30 passed, 10 skipped**.                                                                                                                  |
+| Expected platform limit | `rtk env CI=1 pnpm --filter @revelai/web run test:visual:canonical -- --reporter=line` — exit **1**, `Canonical visual pixels require linux/x64.`                                                                                 |
+| GREEN                   | Final `rtk pnpm check` — exit **0**: format; **7/7 lint**, **12/12 typecheck**, **12/12 test tasks**, **7/7 build**. Web recorded **12 Node checks**, **27 Vitest files / 286 tests**, and structural **26 passed / 14 skipped**. |
+| GREEN                   | `rtk git diff --check` — exit **0** before functional commit.                                                                                                                                                                     |
 
 ### Self-review and concerns
 
@@ -277,28 +277,28 @@ Review base: `c63dada1d066a572f76d1c803dc3b7ecd0140438`. Functional/test work is
 
 The final `CI=1` approved-reference matrix regenerated and I inspected the normalized reference, candidate, 50% overlay, and complete diff for home plus V02–V06. Each verified comparison is full-screen and unmasked.
 
-| State | Artifact stem | Measured mismatch / stored cap | Key source-relative bounds at 390×844 |
-| --- | --- | ---: | --- |
-| V02 | `verified-challenge-default--390x844--dpr-2--verified--challenge-choice` | **21.153% / 25.0%** | heading `27.30–129.12 × 114.19–359.15`; card `27.30–362.70 × 462.39–581.22`; CTA `27.30–362.70 × 755.94–807.13` |
-| V03 | `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` | **29.236% / 40.0%** | heading `27.30–282.19 × 125.17–173.05`; visual `0–390 × 236.75–454.34`; actions `27.30–362.69 × 741.08–816.25` |
-| V04 | `verified-record-default--390x844--dpr-2--verified--recording-capture` | **33.437% / 36.0%** | heading `27.30–295.61 × 137.52–261.42`; preview `27.30–362.69 × 317.42–565.42`; actions `27.30–362.69 × 625.42–727.02` |
-| V05 | `verified-processing-demo--390x844--dpr-2--verified--processing-pending` | **24.992% / 30.0%** | manual refresh, truthful foreground copy, and semantic timeline visible; no notification promise/control |
-| V06 | `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report` | **16.670% / 20.0%** | persistent exact ranking truth, isolated ranked scorecard/metrics; demo and experimental arms omit rank fields structurally |
+| State | Artifact stem                                                                  | Measured mismatch / stored cap | Key source-relative bounds at 390×844                                                                                       |
+| ----- | ------------------------------------------------------------------------------ | -----------------------------: | --------------------------------------------------------------------------------------------------------------------------- |
+| V02   | `verified-challenge-default--390x844--dpr-2--verified--challenge-choice`       |            **21.153% / 25.0%** | heading `27.30–129.12 × 114.19–359.15`; card `27.30–362.70 × 462.39–581.22`; CTA `27.30–362.70 × 755.94–807.13`             |
+| V03   | `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` |            **29.236% / 40.0%** | heading `27.30–282.19 × 125.17–173.05`; visual `0–390 × 236.75–454.34`; actions `27.30–362.69 × 741.08–816.25`              |
+| V04   | `verified-record-default--390x844--dpr-2--verified--recording-capture`         |            **33.437% / 36.0%** | heading `27.30–295.61 × 137.52–261.42`; preview `27.30–362.69 × 317.42–565.42`; actions `27.30–362.69 × 625.42–727.02`      |
+| V05   | `verified-processing-demo--390x844--dpr-2--verified--processing-pending`       |            **24.992% / 30.0%** | manual refresh, truthful foreground copy, and semantic timeline visible; no notification promise/control                    |
+| V06   | `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report`     |            **16.670% / 20.0%** | persistent exact ranking truth, isolated ranked scorecard/metrics; demo and experimental arms omit rank fields structurally |
 
 The stored limits are independently specified source policy, not candidate-derived tolerances. `visual-harness.test.ts` proves both a position mutation (V02 heading below the allowed top) and a size mutation (V02 card right edge too narrow) fail `assertReferenceVisualLandmarkGeometry`; the existing missing/cropped/over-budget negative proofs remain in place.
 
 ### Round-2 RED/GREEN commands
 
-| Phase | Exact command / output |
-| --- | --- |
-| RED | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts src/verified/production-capture.test.tsx --reporter=dot` initially failed: no `referenceGeometry` policy and focus landed on the clipped file input. |
-| RED | `rtk env CI=1 pnpm --filter @revelai/web exec playwright test src/visual/approved-reference.visual.spec.ts --project=mobile-home --reporter=line` — **1 failed, 1 passed** while each V02–V04 source-relative landmark correction was deliberately out of range. |
-| GREEN | `rtk pnpm --filter @revelai/web exec vitest run src/app.test.tsx src/visual/visual-harness.test.ts src/verified/production-capture.test.tsx --reporter=dot` — **3 files, 19 passed**. |
-| GREEN | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts src/verified/production-capture.test.tsx src/verified/tracer.test.tsx --reporter=dot` — **3 files, 60 passed**. |
-| GREEN | `rtk env CI=1 pnpm --filter @revelai/web exec playwright test src/visual/approved-reference.visual.spec.ts --reporter=line` — **2 passed, 2 skipped**. |
-| GREEN | `rtk env CI=1 pnpm --filter @revelai/web run test:visual:structural -- --reporter=line` — **26 passed, 14 skipped**; `rtk env CI=1 pnpm --filter @revelai/web run test:visual:darwin -- --reporter=line` — **30 passed, 10 skipped**. |
-| GREEN | `rtk pnpm check` — exit **0**: format; **7/7** lint; **12/12** typecheck; **12/12** test tasks; **7/7** build. |
-| GREEN | `rtk git diff --check` — exit **0** before `726ffc6`. |
+| Phase | Exact command / output                                                                                                                                                                                                                                           |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| RED   | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts src/verified/production-capture.test.tsx --reporter=dot` initially failed: no `referenceGeometry` policy and focus landed on the clipped file input.                           |
+| RED   | `rtk env CI=1 pnpm --filter @revelai/web exec playwright test src/visual/approved-reference.visual.spec.ts --project=mobile-home --reporter=line` — **1 failed, 1 passed** while each V02–V04 source-relative landmark correction was deliberately out of range. |
+| GREEN | `rtk pnpm --filter @revelai/web exec vitest run src/app.test.tsx src/visual/visual-harness.test.ts src/verified/production-capture.test.tsx --reporter=dot` — **3 files, 19 passed**.                                                                            |
+| GREEN | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts src/verified/production-capture.test.tsx src/verified/tracer.test.tsx --reporter=dot` — **3 files, 60 passed**.                                                                |
+| GREEN | `rtk env CI=1 pnpm --filter @revelai/web exec playwright test src/visual/approved-reference.visual.spec.ts --reporter=line` — **2 passed, 2 skipped**.                                                                                                           |
+| GREEN | `rtk env CI=1 pnpm --filter @revelai/web run test:visual:structural -- --reporter=line` — **26 passed, 14 skipped**; `rtk env CI=1 pnpm --filter @revelai/web run test:visual:darwin -- --reporter=line` — **30 passed, 10 skipped**.                            |
+| GREEN | `rtk pnpm check` — exit **0**: format; **7/7** lint; **12/12** typecheck; **12/12** test tasks; **7/7** build.                                                                                                                                                   |
+| GREEN | `rtk git diff --check` — exit **0** before `726ffc6`.                                                                                                                                                                                                            |
 
 ### Current acceptance and codec limit
 
@@ -312,41 +312,41 @@ This machine still lacks FFmpeg, so the normal codec-backed C10 demo acceptance 
 
 `DONE_WITH_CONCERNS`. Review base: `168f16a`. Functional/test remediation is committed separately as `62f1072` (`fix(web): tighten W6 mobile visual gates`); this report/evidence update follows in its own documentation commit. No push was made.
 
-| Path | Change and reason |
-| --- | --- |
-| `apps/web/src/styles.css` | Restored V02's three-line white-column paragraph; calibrated V03/V04 headline scale, line-height, offset, and the V03 visual/V04 preview rhythm against the selected mobile sources. |
-| `apps/web/src/visual/visual-harness.ts` | Added independent headline-height and sibling-gap policy for V03/V04, with runtime enforcement before accepted capture evidence is returned. W0 remains untouched. |
-| `apps/web/src/visual/visual-harness.test.ts` | Added state-specific negative mutations for wrong V03/V04 headline height, bottom, and inter-landmark gap. |
-| `apps/web/src/visual/approved-reference.visual.spec.ts` | Passes the per-state stored gap policy into browser landmark verification. |
-| `apps/web/src/visual/visual-harness.node.ts` | Corrected the harness contract comment: artifacts are recorded, the independently approved non-home budget is enforced, and no candidate UI is hidden. |
-| `apps/web/design-qa.md` and this report | Recorded reviewer findings, exact fixes, complete fresh capture/inspection evidence, RED/GREEN outcomes, limits, and pending acceptance. |
+| Path                                                    | Change and reason                                                                                                                                                                    |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `apps/web/src/styles.css`                               | Restored V02's three-line white-column paragraph; calibrated V03/V04 headline scale, line-height, offset, and the V03 visual/V04 preview rhythm against the selected mobile sources. |
+| `apps/web/src/visual/visual-harness.ts`                 | Added independent headline-height and sibling-gap policy for V03/V04, with runtime enforcement before accepted capture evidence is returned. W0 remains untouched.                   |
+| `apps/web/src/visual/visual-harness.test.ts`            | Added state-specific negative mutations for wrong V03/V04 headline height, bottom, and inter-landmark gap.                                                                           |
+| `apps/web/src/visual/approved-reference.visual.spec.ts` | Passes the per-state stored gap policy into browser landmark verification.                                                                                                           |
+| `apps/web/src/visual/visual-harness.node.ts`            | Corrected the harness contract comment: artifacts are recorded, the independently approved non-home budget is enforced, and no candidate UI is hidden.                               |
+| `apps/web/design-qa.md` and this report                 | Recorded reviewer findings, exact fixes, complete fresh capture/inspection evidence, RED/GREEN outcomes, limits, and pending acceptance.                                             |
 
 ### RED/GREEN evidence
 
-| Phase | Exact command / observed result |
-| --- | --- |
-| RED | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts --reporter=dot` — **1 file failed; 2 failed, 6 passed (8)** because V03/V04 gate policy lacked required height/bottom/gap values. |
-| GREEN | The same command — **1 file passed; 8 passed** after independent stored ranges and runtime enforcement. |
-| RED | The same command after tightening expected source-relative values — **1 file failed; 2 failed, 6 passed (8)** until the policy was updated. |
-| GREEN | The same command — **1 file passed; 8 passed** after final calibrated ranges. |
-| RED | `rtk pnpm --filter @revelai/web exec playwright test src/visual/approved-reference.visual.spec.ts --reporter=line` — **1 failed, 1 passed, 2 skipped** while the denser V04 line-height moved preview top to `314.9375`, below stored `320–334`. This identified flow-height, not a capture flake. |
-| GREEN | The same browser command — **2 passed, 2 skipped** after setting the existing production-capture top margin to retain preview y=`326.14`. |
-| GREEN | `rtk pnpm --filter @revelai/web exec vitest run src/app.test.tsx src/visual/visual-harness.test.ts src/verified/production-capture.test.tsx --reporter=dot` — **3 files, 21 passed**. |
-| GREEN | `rtk pnpm --filter @revelai/web run test:visual:structural:run` — **26 passed, 14 skipped**. |
-| GREEN | `rtk pnpm check` — exit **0**: format; **7/7 lint**, **12/12 typecheck**, **12/12 test**, and **7/7 build** tasks successful. |
-| GREEN | `rtk git diff --check` — exit **0** before the functional commit. |
+| Phase | Exact command / observed result                                                                                                                                                                                                                                                                    |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| RED   | `rtk pnpm --filter @revelai/web exec vitest run src/visual/visual-harness.test.ts --reporter=dot` — **1 file failed; 2 failed, 6 passed (8)** because V03/V04 gate policy lacked required height/bottom/gap values.                                                                                |
+| GREEN | The same command — **1 file passed; 8 passed** after independent stored ranges and runtime enforcement.                                                                                                                                                                                            |
+| RED   | The same command after tightening expected source-relative values — **1 file failed; 2 failed, 6 passed (8)** until the policy was updated.                                                                                                                                                        |
+| GREEN | The same command — **1 file passed; 8 passed** after final calibrated ranges.                                                                                                                                                                                                                      |
+| RED   | `rtk pnpm --filter @revelai/web exec playwright test src/visual/approved-reference.visual.spec.ts --reporter=line` — **1 failed, 1 passed, 2 skipped** while the denser V04 line-height moved preview top to `314.9375`, below stored `320–334`. This identified flow-height, not a capture flake. |
+| GREEN | The same browser command — **2 passed, 2 skipped** after setting the existing production-capture top margin to retain preview y=`326.14`.                                                                                                                                                          |
+| GREEN | `rtk pnpm --filter @revelai/web exec vitest run src/app.test.tsx src/visual/visual-harness.test.ts src/verified/production-capture.test.tsx --reporter=dot` — **3 files, 21 passed**.                                                                                                              |
+| GREEN | `rtk pnpm --filter @revelai/web run test:visual:structural:run` — **26 passed, 14 skipped**.                                                                                                                                                                                                       |
+| GREEN | `rtk pnpm check` — exit **0**: format; **7/7 lint**, **12/12 typecheck**, **12/12 test**, and **7/7 build** tasks successful.                                                                                                                                                                      |
+| GREEN | `rtk git diff --check` — exit **0** before the functional commit.                                                                                                                                                                                                                                  |
 
 ### Fresh visual matrix and inspection
 
 The final approved-reference run regenerated and I individually opened the reference-normalized PNG, candidate PNG, 50% overlay, and complete diff for every V02–V06 state at `390×844`, DPR 2, CSS scale, normalized density 1. All five comparisons are unmasked; the home-only W0 mask and budget were not changed.
 
-| State | Artifact stem | Mismatch / independently stored cap | Inspection conclusion |
-| --- | --- | ---: | --- |
-| V02 challenge choice | `verified-challenge-default--390x844--dpr-2--verified--challenge-choice` | **21.154% / 25.0%** | The source-like three-line paragraph stays wholly within the white column; card, `3 metros`, disabled rows, and CTA remain visible. |
-| V03 calibration | `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` | **27.834% / 40.0%** | The heading's raster ink matches source rows y=`134–188`; rail, real visual region, blocker, corrections, and controls remain present. |
-| V04 capture | `verified-record-default--390x844--dpr-2--verified--recording-capture` | **31.061% / 36.0%** | Headline and preview now hold the selected source-relative height/rhythm; real-camera/approved-fallback, accessible controls, and disclosure remain visible. |
-| V05 pending | `verified-processing-demo--390x844--dpr-2--verified--processing-pending` | **24.992% / 30.0%** | Truthful foreground/manual refresh timeline remains; no notification promise/control appears. |
-| V06 ranked | `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report` | **16.670% / 20.0%** | Isolated ranked truth, scorecard, and metrics remain; demo/experimental arms structurally lack ranking fields. |
+| State                | Artifact stem                                                                  | Mismatch / independently stored cap | Inspection conclusion                                                                                                                                        |
+| -------------------- | ------------------------------------------------------------------------------ | ----------------------------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| V02 challenge choice | `verified-challenge-default--390x844--dpr-2--verified--challenge-choice`       |                 **21.154% / 25.0%** | The source-like three-line paragraph stays wholly within the white column; card, `3 metros`, disabled rows, and CTA remain visible.                          |
+| V03 calibration      | `verified-calibration-default--390x844--dpr-2--verified--calibration-guidance` |                 **27.834% / 40.0%** | The heading's raster ink matches source rows y=`134–188`; rail, real visual region, blocker, corrections, and controls remain present.                       |
+| V04 capture          | `verified-record-default--390x844--dpr-2--verified--recording-capture`         |                 **31.061% / 36.0%** | Headline and preview now hold the selected source-relative height/rhythm; real-camera/approved-fallback, accessible controls, and disclosure remain visible. |
+| V05 pending          | `verified-processing-demo--390x844--dpr-2--verified--processing-pending`       |                 **24.992% / 30.0%** | Truthful foreground/manual refresh timeline remains; no notification promise/control appears.                                                                |
+| V06 ranked           | `verified-ranked-policy-approved--390x844--dpr-2--verified--ranked-report`     |                 **16.670% / 20.0%** | Isolated ranked truth, scorecard, and metrics remain; demo/experimental arms structurally lack ranking fields.                                               |
 
 Required fidelity surfaces inspected: Bebas/Arimo family, weight, scale, wrap, and hierarchy; margins, borders, card/rail/CTA rhythm; warm-white/deep-emerald/border tokens; approved runtime hero quality/crop and its intentionally variable subject; Portuguese truth copy; semantic native controls and Phosphor-only icons. Focused review covered V02 paragraph/image boundary, V03 heading/visual gap, V04 heading/preview gap, V05 manual refresh truth, and V06 rank-only fields.
 
@@ -372,14 +372,14 @@ The regression now stores the real capture heading returned by `findByRole` and 
 
 ### Round-4 RED/GREEN record
 
-| Phase | Exact command / observed output |
-| --- | --- |
-| Hosted RED | Run `33689431803`: Web Vitest failed at the old immediate capture focus assertion; capture heading existed, `body` had focus. Quality lint/typecheck passed and probes were green. |
-| Local baseline | `rtk env CI=1 pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx -t 'mounts the verified owner before running the exact session-ready-attempt-media sequence' --reporter=dot` — **1 passed, 42 skipped (43)**. This did not reproduce the scheduler race locally. |
-| Mutation RED | The same command with the temporary capture-only focus-effect skip — **1 failed, 42 skipped (43)** at `await waitFor(() => expect(captureHeading).toHaveFocus())`; expected capture heading was mounted and `body` was focused. |
-| Fresh repeated GREEN | `rtk zsh -c 'for run in {1..10}; do CI=1 pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx -t "mounts the verified owner before running the exact session-ready-attempt-media sequence" --reporter=dot || exit 1; done'` — **10 fresh processes × (1 passed, 42 skipped)**. |
-| Full tracer GREEN | `rtk env CI=1 pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx --reporter=dot` — **1 file, 43 passed**. |
-| Root GREEN | `rtk pnpm check` — exit **0**: formatting clean; **7/7 lint**, **12/12 typecheck**, **12/12 test tasks**, and **7/7 build** successful. |
+| Phase                | Exact command / observed output                                                                                                                                                                                                                                                        |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- | ----------------------------------------------------------------- |
+| Hosted RED           | Run `33689431803`: Web Vitest failed at the old immediate capture focus assertion; capture heading existed, `body` had focus. Quality lint/typecheck passed and probes were green.                                                                                                     |
+| Local baseline       | `rtk env CI=1 pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx -t 'mounts the verified owner before running the exact session-ready-attempt-media sequence' --reporter=dot` — **1 passed, 42 skipped (43)**. This did not reproduce the scheduler race locally. |
+| Mutation RED         | The same command with the temporary capture-only focus-effect skip — **1 failed, 42 skipped (43)** at `await waitFor(() => expect(captureHeading).toHaveFocus())`; expected capture heading was mounted and `body` was focused.                                                        |
+| Fresh repeated GREEN | `rtk zsh -c 'for run in {1..10}; do CI=1 pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx -t "mounts the verified owner before running the exact session-ready-attempt-media sequence" --reporter=dot                                                           |     | exit 1; done'` — **10 fresh processes × (1 passed, 42 skipped)**. |
+| Full tracer GREEN    | `rtk env CI=1 pnpm --filter @revelai/web exec vitest run src/verified/tracer.test.tsx --reporter=dot` — **1 file, 43 passed**.                                                                                                                                                         |
+| Root GREEN           | `rtk pnpm check` — exit **0**: formatting clean; **7/7 lint**, **12/12 typecheck**, **12/12 test tasks**, and **7/7 build** successful.                                                                                                                                                |
 
 No visual capture was regenerated for this test-only synchronization: no visual surface or artifact-producing code changed. The normal codec-backed hosted acceptance and canonical Linux/x64 execution remain controller-hosted gates, and final independent Sol acceptance remains pending.
 
@@ -405,15 +405,15 @@ The normal browser trace also corrected a harness-only ordering error: after cli
 
 ### RED/GREEN evidence and hosted gate
 
-| Phase | Exact command / observed result |
-| --- | --- |
-| Hosted RED | Run `33703583459`: `pnpm check` and production-router passed; `test:demo:e2e` failed because the local demo API exited before ready. |
-| RED | In the Ubuntu Playwright image, `CI=true pnpm --filter @revelai/web run test:demo:e2e` previously classified the child as `runtime_initialization_failed`; the direct strict-config probe identified the rejected marker. |
-| RED | Before diagnostic classification, `rtk pnpm --filter @revelai/api run demo:smoke` failed its new occupied-port assertion after normal check passed; old child text was generic. |
-| GREEN | `rtk pnpm --filter @revelai/api run demo:smoke` — normal check and hermetic occupied-port regression passed. |
-| GREEN | `rtk node --test apps/web/scripts/demo-e2e-environment.test.mjs` — **1/1 passed**: private marker removed; `CI`, ordinary runner setting, host, port, data, and media settings preserved. |
-| GREEN | `rtk pnpm --filter @revelai/web run test` — **13 Node checks**, **27 Vitest files / 291 tests**, structural Playwright **26 passed / 14 skipped**; includes all **6** runner ownership/separation tests. |
-| GREEN | `rtk pnpm --filter @revelai/web run lint`; `rtk pnpm --filter @revelai/web run typecheck`; focused `rtk pnpm exec prettier --check …`; and `rtk git diff --check` — all exit **0**. |
+| Phase             | Exact command / observed result                                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Hosted RED        | Run `33703583459`: `pnpm check` and production-router passed; `test:demo:e2e` failed because the local demo API exited before ready.                                                                                                                                                                                                                                                               |
+| RED               | In the Ubuntu Playwright image, `CI=true pnpm --filter @revelai/web run test:demo:e2e` previously classified the child as `runtime_initialization_failed`; the direct strict-config probe identified the rejected marker.                                                                                                                                                                          |
+| RED               | Before diagnostic classification, `rtk pnpm --filter @revelai/api run demo:smoke` failed its new occupied-port assertion after normal check passed; old child text was generic.                                                                                                                                                                                                                    |
+| GREEN             | `rtk pnpm --filter @revelai/api run demo:smoke` — normal check and hermetic occupied-port regression passed.                                                                                                                                                                                                                                                                                       |
+| GREEN             | `rtk node --test apps/web/scripts/demo-e2e-environment.test.mjs` — **1/1 passed**: private marker removed; `CI`, ordinary runner setting, host, port, data, and media settings preserved.                                                                                                                                                                                                          |
+| GREEN             | `rtk pnpm --filter @revelai/web run test` — **13 Node checks**, **27 Vitest files / 291 tests**, structural Playwright **26 passed / 14 skipped**; includes all **6** runner ownership/separation tests.                                                                                                                                                                                           |
+| GREEN             | `rtk pnpm --filter @revelai/web run lint`; `rtk pnpm --filter @revelai/web run typecheck`; focused `rtk pnpm exec prettier --check …`; and `rtk git diff --check` — all exit **0**.                                                                                                                                                                                                                |
 | Ubuntu diagnostic | With codec-provisioned Ubuntu, corrected normal startup and real upload reach V05 `main "Processando tentativa"` with truthful timeline/manual refresh. It does not terminalize within the local budget. `docker top` shows no FFmpeg child and API Node around 90% CPU under `/run/rosetta/rosetta … node --no-opt`; that is Apple amd64 emulation throughput, not native hosted Ubuntu behavior. |
 
 The Docker result is a startup/V05 diagnostic only, not terminal acceptance. Definitive terminal proof remains controller-pushed native Linux/x64 hosted codec CI. No hosted orphan is claimed and no check-fact smoke replaces normal media acceptance.
@@ -432,14 +432,14 @@ Review base: `be9e864`. Functional/test corrections: `e6aa4fc` (`fix(web): harde
 
 ### RED/GREEN evidence
 
-| Phase | Exact command / observed result |
-| --- | --- |
-| RED | `rtk node --test apps/web/scripts/start-demo-e2e-server.test.mjs` before the correction — **0/3 passed**. A foreign health-200 owner was accepted until the 3 s harness watchdog; a foreign hanging owner left `fetch` stalled until that watchdog; a missing generated index printed an `ENOENT` stack containing the absolute Web path. |
+| Phase | Exact command / observed result                                                                                                                                                                                                                                                                                                                         |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| RED   | `rtk node --test apps/web/scripts/start-demo-e2e-server.test.mjs` before the correction — **0/3 passed**. A foreign health-200 owner was accepted until the 3 s harness watchdog; a foreign hanging owner left `fetch` stalled until that watchdog; a missing generated index printed an `ENOENT` stack containing the absolute Web path.               |
 | GREEN | `rtk pnpm --filter @revelai/web run test:demo:e2e:smoke` — builds API/Web, then real-wrapper regressions **3/3 passed** (foreign health, hanging socket, absolute-path sanitization) and Playwright browser traces **2/2 passed**. The Verified trace visibly observes progress → pending heading/manual refresh → terminal without route interception. |
-| GREEN | `rtk pnpm --filter @revelai/api run demo:smoke` — terminal check and hermetic occupied-port regression passed. |
-| GREEN | `rtk node --test apps/web/scripts/demo-e2e-environment.test.mjs` — **1/1 passed**: only `REVELAI_DEMO_E2E` is withheld from strict API environment and normal values remain. |
-| GREEN | `rtk env npm_execpath=/Users/vitortoledo/.nvm/versions/node/v22.19.0/lib/node_modules/corepack/dist/pnpm.js pnpm --filter @revelai/web exec vitest run src/visual/playwright-runner.test.ts --reporter=dot` — **1 file, 6/6 passed**, including 4174/4176 separation and post-run ownership. |
-| GREEN | `rtk pnpm --filter @revelai/web run lint`; `rtk pnpm --filter @revelai/web run typecheck`; focused Prettier; and `rtk git diff --check` — all exit **0**. |
+| GREEN | `rtk pnpm --filter @revelai/api run demo:smoke` — terminal check and hermetic occupied-port regression passed.                                                                                                                                                                                                                                          |
+| GREEN | `rtk node --test apps/web/scripts/demo-e2e-environment.test.mjs` — **1/1 passed**: only `REVELAI_DEMO_E2E` is withheld from strict API environment and normal values remain.                                                                                                                                                                            |
+| GREEN | `rtk env npm_execpath=/Users/vitortoledo/.nvm/versions/node/v22.19.0/lib/node_modules/corepack/dist/pnpm.js pnpm --filter @revelai/web exec vitest run src/visual/playwright-runner.test.ts --reporter=dot` — **1 file, 6/6 passed**, including 4174/4176 separation and post-run ownership.                                                            |
+| GREEN | `rtk pnpm --filter @revelai/web run lint`; `rtk pnpm --filter @revelai/web run typecheck`; focused Prettier; and `rtk git diff --check` — all exit **0**.                                                                                                                                                                                               |
 
 The local codec-limited smoke is proof of the browser state ordering and owned startup boundary, not of native codec terminal throughput. The definitive normal C10 fixture terminal remains the controller-pushed Linux/x64 hosted gate. Independent Sol acceptance remains pending.
 
@@ -457,15 +457,42 @@ Review base: `0309dc0`. Functional/test correction: `e99733f` (`fix(web): bound 
 
 ### RED/GREEN evidence
 
-| Phase | Exact command / observed result |
-| --- | --- |
-| RED | `rtk node --test --test-name-pattern='does not forward a child failure' apps/web/scripts/start-demo-e2e-server.test.mjs` with the temporary raw-stderr forwarding mutation — **1 failed**. Captured output contained the child fixture path, stack frames, and `w6-child-pretry-secret`; restoring the closed protocol removes all three. |
-| RED | `rtk node --test --test-name-pattern='force-stops only its owned resistant child' apps/web/scripts/start-demo-e2e-server.test.mjs` with the temporary former TERM-and-unbounded-exit mutation — **1 failed** after the finite 2 s test limit: `Owned demo wrapper did not close after shutdown.` The descendant was contained in the newly created test-owned process group for cleanup only. |
+| Phase | Exact command / observed result                                                                                                                                                                                                                                                                                                                                                                                            |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| RED   | `rtk node --test --test-name-pattern='does not forward a child failure' apps/web/scripts/start-demo-e2e-server.test.mjs` with the temporary raw-stderr forwarding mutation — **1 failed**. Captured output contained the child fixture path, stack frames, and `w6-child-pretry-secret`; restoring the closed protocol removes all three.                                                                                  |
+| RED   | `rtk node --test --test-name-pattern='force-stops only its owned resistant child' apps/web/scripts/start-demo-e2e-server.test.mjs` with the temporary former TERM-and-unbounded-exit mutation — **1 failed** after the finite 2 s test limit: `Owned demo wrapper did not close after shutdown.` The descendant was contained in the newly created test-owned process group for cleanup only.                              |
 | GREEN | `rtk pnpm --filter @revelai/web run test:demo:e2e:smoke` — API/Web build; real-wrapper regression suite **6/6 passed** (foreign health, hanging socket, setup path, pre-setup child path/stack/sentinel, normal port release, resistant-child port release); Playwright browser traces **2/2 passed**. The Verified trace runs the single post-upload deadline and observes progress → pending/enabled refresh → terminal. |
-| GREEN | `rtk pnpm --filter @revelai/api run demo:smoke` — terminal check and occupied-port regression passed. `rtk node --test apps/web/scripts/demo-e2e-environment.test.mjs` — **1/1 passed**. |
-| GREEN | `rtk env npm_execpath=/Users/vitortoledo/.nvm/versions/node/v22.19.0/lib/node_modules/corepack/dist/pnpm.js pnpm --filter @revelai/web exec vitest run src/visual/playwright-runner.test.ts --reporter=dot` — **1 file, 6/6 passed**, including cross-port ownership. |
-| GREEN | Web lint, typecheck, focused Prettier, and `rtk git diff --check` — all exit **0**. |
+| GREEN | `rtk pnpm --filter @revelai/api run demo:smoke` — terminal check and occupied-port regression passed. `rtk node --test apps/web/scripts/demo-e2e-environment.test.mjs` — **1/1 passed**.                                                                                                                                                                                                                                   |
+| GREEN | `rtk env npm_execpath=/Users/vitortoledo/.nvm/versions/node/v22.19.0/lib/node_modules/corepack/dist/pnpm.js pnpm --filter @revelai/web exec vitest run src/visual/playwright-runner.test.ts --reporter=dot` — **1 file, 6/6 passed**, including cross-port ownership.                                                                                                                                                      |
+| GREEN | Web lint, typecheck, focused Prettier, and `rtk git diff --check` — all exit **0**.                                                                                                                                                                                                                                                                                                                                        |
 
 The local smoke proves browser ordering, child-protocol safety, and bounded ownership cleanup; it is not native normal-codec terminal acceptance. The definitive C10 normal fixture terminal remains controller-pushed Linux/x64 hosted CI, and independent Sol acceptance remains pending.
+
+final result: pending independent Sol acceptance.
+
+## CI lifecycle edge-case correction — 2026-09-03
+
+Functional/test commit: `27df4ce555eca77df74c86c95ab2035d6be55dd2` (`fix(web): share demo E2E shutdown lifecycle`). This changes no visual surface, W0 budget, approved asset, or reference capture. It corrects two acceptance-harness lifecycle edges; no new visual artifact is claimed.
+
+### Root cause and correction
+
+The previous owned-child teardown attached `child.once("error", ...)`. A TERM delivery error consumed that listener, leaving a later grace-triggered SIGKILL error without an owned listener before `close`. Separately, `async stop()` used a `stopping` early return, so a concurrent signal received a distinct already-resolved promise rather than awaiting the active cleanup. The signal handler then used `finally(process.exit)`, which could observe that short promise instead of the real close boundary.
+
+`apps/web/scripts/owned-child-lifecycle.mjs` now owns those two narrow contracts. `createOwnedChildStop` keeps a persistent child `error` listener from TERM through KILL and removes it only from the `close` handler. It applies the named 1-second TERM→SIGKILL grace only to the spawned child and resolves only at that child's `close`. `createSharedStop` caches one cleanup promise; the wrapper's `stop` function and all signal handlers return/await that exact promise. Signal completion uses its fulfilled/rejected branch before calling `process.exit`.
+
+The Verified browser trace's 120-second post-upload deadline is now truly shared by every observable outcome seam: upload progress, pending owner, enabled `Atualizar agora`, and terminal report each pass `remainingVerifiedOutcomeTime(verifiedOutcomeDeadline)` explicitly. This supersedes the previous documentation claim that omitted the enabled-refresh expectation's implicit 5-second Playwright default. The 150-second test timeout remains only a teardown/reporting backstop.
+
+### RED/GREEN evidence
+
+| Phase | Exact command / observed result                                                                                                                                                                                                                                                                                                                                                                  |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| RED   | `rtk node --test apps/web/scripts/owned-child-lifecycle.test.mjs` with temporary mutations `child.on`→`child.once` and cached-stop→new resolved promise — **2 failed**. The first test observed no retained child error listener after TERM; the second rejected the non-identical concurrent promise.                                                                                           |
+| GREEN | `rtk node --test apps/web/scripts/owned-child-lifecycle.test.mjs` — **2/2 passed**. Its owned simulated child emits an error for TERM, emits a second error for SIGKILL, then closes; the test awaits the teardown, observes both signals/errors, and verifies listener removal only after close. It also proves concurrent callers receive the same promise and the resource factory runs once. |
+| GREEN | `rtk node --test apps/web/scripts/owned-child-lifecycle.test.mjs apps/web/scripts/start-demo-e2e-server.test.mjs` — **8/8 passed**. This includes foreign readiness rejection, sanitization, and both normal/resistant owned-child wrapper runs that bind-check 4174 and 4175 after shutdown.                                                                                                    |
+| GREEN | `rtk pnpm --filter @revelai/web run test:demo:e2e:smoke` — build, Node lifecycle/wrapper suite **8/8**, and browser traces **2/2 passed**. The Verified trace executes the explicit remaining-time refresh assertion under the real smoke boundary.                                                                                                                                              |
+| GREEN | `rtk pnpm --filter @revelai/api run demo:smoke`; `rtk node --test apps/web/scripts/demo-e2e-environment.test.mjs`; and `rtk env npm_execpath=/Users/vitortoledo/.nvm/versions/node/v22.19.0/lib/node_modules/corepack/dist/pnpm.js pnpm --filter @revelai/web exec vitest run src/visual/playwright-runner.test.ts --reporter=dot` — API smoke passed; environment **1/1**; runner **6/6**.      |
+| GREEN | `rtk pnpm --filter @revelai/web run lint`; `rtk pnpm --filter @revelai/web run typecheck`; focused Prettier check; and `rtk git diff --check` — all exit **0**.                                                                                                                                                                                                                                  |
+
+The local smoke remains evidence of ownership, state ordering, and finite timing only; it is not normal codec-backed C10 terminal acceptance. Native Linux/x64 codec completion and canonical pixels remain controller-hosted gates. Independent Sol acceptance remains required.
 
 final result: pending independent Sol acceptance.
