@@ -50,7 +50,6 @@ const cleanupAcknowledgementTermination = new Promise((resolve) => {
 
 if (cleanupInvocationNonce !== undefined) {
   process.on("message", (message) => {
-    if (!shuttingDown) return;
     const terminationNonce = parseCleanupAcknowledgementTerminationNonce(
       message,
       cleanupInvocationNonce,
@@ -61,6 +60,7 @@ if (cleanupInvocationNonce !== undefined) {
     ) {
       return;
     }
+    // stopForSignal emits only after signal-driven cleanup has settled.
     cleanupTerminationNonce = terminationNonce;
     resolveCleanupTerminationNonce(terminationNonce);
   });
