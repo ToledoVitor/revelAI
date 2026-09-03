@@ -9,7 +9,7 @@ export default defineConfig({
   },
   webServer: {
     command: "node scripts/playwright-runner-server.mjs",
-    url: "http://127.0.0.1:4174",
+    url: "http://127.0.0.1:4176",
     reuseExistingServer: false,
   },
   projects: [

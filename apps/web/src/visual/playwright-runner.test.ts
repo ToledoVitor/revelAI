@@ -1,6 +1,8 @@
 // @vitest-environment node
 
 import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -68,12 +70,62 @@ describe("Playwright runner", () => {
     realBrowserIntegrationTimeoutMs,
   );
 
+  it(
+    "releases its dedicated port after the runner smoke process closes",
+    async () => {
+      const result = await runPlaywrightRunner([
+        "--config",
+        "playwright.runner.config.ts",
+        "src/visual/playwright-runner-smoke.visual.spec.ts",
+        "--grep",
+        "launches Chromium for runner environment checks",
+        "--project",
+        "runner-smoke",
+      ]);
+
+      expect(result.exitCode).toBe(0);
+      await assertPortAvailable(4176);
+    },
+    realBrowserIntegrationTimeoutMs,
+  );
+
   it("propagates a Playwright process failure", async () => {
     const result = await runPlaywrightRunner(["--not-a-playwright-option"]);
 
     expect(result.exitCode).toBe(1);
     expect(result.output).toContain("unknown option");
   });
+
+  it(
+    "leaves the demo API port available while the runner smoke server listens",
+    async () => {
+      const runnerServer = spawn(
+        process.execPath,
+        ["scripts/playwright-runner-server.mjs"],
+        { cwd: webRoot, stdio: "ignore" },
+      );
+      try {
+        await waitForRunnerServer();
+        const demoApiReservation = createServer();
+        await new Promise<void>((resolve, reject) => {
+          demoApiReservation.once("error", reject);
+          demoApiReservation.listen(4174, "127.0.0.1", resolve);
+        });
+        await new Promise<void>((resolve, reject) =>
+          demoApiReservation.close((error) =>
+            error ? reject(error) : resolve(),
+          ),
+        );
+      } finally {
+        if (runnerServer.exitCode === null) {
+          const exited = once(runnerServer, "close");
+          runnerServer.kill("SIGTERM");
+          await exited;
+        }
+      }
+    },
+    realBrowserIntegrationTimeoutMs,
+  );
 
   it("rejects an unknown visual mode before Playwright starts", async () => {
     const result = await runPlaywrightRunner([], "preview");
@@ -103,3 +155,28 @@ describe("Playwright runner", () => {
     expect(result.output).not.toContain("Running 22 tests");
   });
 });
+
+async function waitForRunnerServer() {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch("http://127.0.0.1:4176");
+      if (response.ok) return;
+    } catch {
+      // The process has not bound its dedicated port yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Runner smoke server did not bind its dedicated port.");
+}
+
+async function assertPortAvailable(port: number) {
+  const reservation = createServer();
+  await new Promise<void>((resolve, reject) => {
+    reservation.once("error", reject);
+    reservation.listen(port, "127.0.0.1", resolve);
+  });
+  await new Promise<void>((resolve, reject) =>
+    reservation.close((error) => (error ? reject(error) : resolve())),
+  );
+}

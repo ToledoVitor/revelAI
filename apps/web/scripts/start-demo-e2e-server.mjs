@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createDemoApiEnvironment } from "./demo-e2e-environment.mjs";
 import { createDemoMediaFixtures } from "./demo-media-fixtures.mjs";
 const webRoot = fileURLToPath(new URL("../", import.meta.url));
 const repositoryRoot = resolve(webRoot, "../..");
@@ -61,13 +62,12 @@ function startDemoApi(root) {
     ["scripts/start-local-demo.mjs", ...(serveCheck ? ["--serve-check"] : [])],
     {
       cwd: apiRoot,
-      env: {
-        ...process.env,
-        HOST: "127.0.0.1",
-        PORT: String(apiPort),
-        DATA_DIR: join(root, "data"),
-        MEDIA_DIR: join(root, "media"),
-      },
+      env: createDemoApiEnvironment({
+        environment: process.env,
+        port: apiPort,
+        dataDirectory: join(root, "data"),
+        mediaDirectory: join(root, "media"),
+      }),
       stdio: "inherit",
     },
   );

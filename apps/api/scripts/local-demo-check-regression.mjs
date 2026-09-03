@@ -51,6 +51,31 @@ try {
     throw new Error("Local demo check inherited provider configuration.");
   await expectAbsent(externalDatabasePath);
 
+  const collisionBlocker = createServer();
+  try {
+    const blockedPort = await listen(collisionBlocker);
+    const collision = await invoke({
+      executable: process.execPath,
+      arguments: [executable, "--serve-check"],
+      environment: {
+        ...process.env,
+        HOST: "127.0.0.1",
+        PORT: String(blockedPort),
+      },
+      timeoutMilliseconds: CHECK_TIMEOUT_MILLISECONDS,
+    });
+    if (
+      collision.exitCode !== 1 ||
+      collision.termination !== "completed" ||
+      collision.stdout !== "" ||
+      collision.stderr !==
+        "RevelAI local demo startup failed: address_in_use.\n"
+    )
+      throw new Error("Local demo startup did not report a safe bind failure.");
+  } finally {
+    await close(collisionBlocker);
+  }
+
   const timedOut = await invoke({
     executable: process.execPath,
     arguments: [

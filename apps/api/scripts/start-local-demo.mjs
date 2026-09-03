@@ -19,6 +19,7 @@ const environment = scratch
   : process.env;
 
 let runtime;
+let startupPhase = "runtime_initialization";
 
 try {
   runtime = await createLocalDemoRuntime({
@@ -34,6 +35,7 @@ try {
     await rm(scratch, { recursive: true, force: true });
     console.log("Local demo terminal check passed.");
   } else {
+    startupPhase = "server_bind";
     const started = await startConfiguredApi({
       environment,
       server: runtime.app,
@@ -68,12 +70,20 @@ try {
 } catch (error) {
   await runtime?.close().catch(() => undefined);
   if (scratch) await rm(scratch, { recursive: true, force: true });
-  console.error(
-    error instanceof LocalDemoPreflightError
-      ? error.message
-      : "RevelAI local demo could not start.",
-  );
+  console.error(startupFailureMessage(error, startupPhase));
   process.exitCode = 1;
+}
+
+function startupFailureMessage(error, phase) {
+  if (error instanceof LocalDemoPreflightError) return error.message;
+  if (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "EADDRINUSE"
+  )
+    return "RevelAI local demo startup failed: address_in_use.";
+  return `RevelAI local demo startup failed: ${phase}_failed.`;
 }
 
 function checkEnvironment(directory, input) {

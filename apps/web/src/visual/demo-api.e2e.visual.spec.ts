@@ -7,6 +7,21 @@ const mediaDirectory = resolve(webRoot, "coverage/demo-media");
 const freeMedia = resolve(mediaDirectory, "free-portrait.mp4");
 const verifiedMedia = resolve(mediaDirectory, "verified-landscape.mp4");
 const demoE2EEnabled = process.env.REVELAI_DEMO_E2E === "true";
+// A real verified trace handles 640 durable frames. Keep the finite E2E
+// outcome budget derived from the actual stages instead of adding retries or
+// replacing the runtime: transport, C5's 30-second process cap, C8's durable
+// reconstruction/analysis, one capped pending poll, and CI scheduling margin.
+const verifiedUploadBudgetMs = 30_000;
+const verifiedExtractionBudgetMs = 30_000;
+const verifiedAnalysisBudgetMs = 30_000;
+const verifiedPendingPollBudgetMs = 5_000;
+const verifiedCiSchedulingMarginMs = 25_000;
+const verifiedResultTimeoutMs =
+  verifiedUploadBudgetMs +
+  verifiedExtractionBudgetMs +
+  verifiedAnalysisBudgetMs +
+  verifiedPendingPollBudgetMs +
+  verifiedCiSchedulingMarginMs;
 
 test.skip(
   !demoE2EEnabled,
@@ -142,12 +157,12 @@ test("production build drives the verified demo trace without a ranking claim", 
   ).toBeEnabled();
   await page.getByRole("button", { name: "Enviar vídeo", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "Processando tentativa" }),
+    page.getByRole("progressbar", { name: "Envio do vídeo verificado" }),
   ).toBeVisible();
   const report = page.getByRole("main", {
     name: "Resultado do desafio verificado",
   });
-  await expect(report).toBeVisible({ timeout: 45_000 });
+  await expect(report).toBeVisible({ timeout: verifiedResultTimeoutMs });
   await expect(report.getByText("Demo — não vale para ranking")).toBeVisible();
   expect(await report.innerText()).not.toMatch(
     /posição|percentil|top percent|ranking no resultado/i,

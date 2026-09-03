@@ -8,7 +8,9 @@ export default defineConfig({
   outputDir: "./coverage/playwright-demo",
   testDir: "./src/visual",
   testMatch: "demo-api.e2e.visual.spec.ts",
-  timeout: 90_000,
+  // The verified C10 trace has its own finite 120-second terminal budget;
+  // leave teardown/reporting room without modifying the production runtime.
+  timeout: 150_000,
   use: {
     baseURL: "http://127.0.0.1:4175",
     browserName: "chromium",
