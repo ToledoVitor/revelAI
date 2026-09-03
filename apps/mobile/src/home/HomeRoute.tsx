@@ -1,4 +1,3 @@
-import { ArrowRight, List } from "phosphor-react-native";
 import { useState } from "react";
 import {
   Image,
@@ -11,6 +10,7 @@ import {
 import { router } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import heroImage from "../../assets/futsal-hero.png";
+import { ArrowRight, List } from "../icons/phosphor";
 import { theme } from "../theme/tokens";
 
 type InactiveDestination =

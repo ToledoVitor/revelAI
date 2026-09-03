@@ -1,6 +1,8 @@
 import { createServer } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { extname, relative, resolve } from "node:path";
+import process from "node:process";
+import { URL } from "node:url";
 
 const distDirectory = resolve(import.meta.dirname, "../dist");
 const port = Number(process.env.PORT ?? "4186");

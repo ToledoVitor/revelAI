@@ -1,6 +1,7 @@
 import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
+  outputDir: "dist/playwright-results",
   testDir: "./e2e",
   testMatch: "HomeRoute.web.ts",
   use: {

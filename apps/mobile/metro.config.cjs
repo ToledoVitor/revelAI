@@ -10,18 +10,6 @@ config.resolver.nodeModulesPaths = [
   path.join(projectRoot, "node_modules"),
   path.join(workspaceRoot, "node_modules"),
 ];
-const phosphorCommonJsEntry = path.join(
-  projectRoot,
-  "node_modules/phosphor-react-native/lib/commonjs/index.js",
-);
-
-config.resolver.resolveRequest = (context, moduleName, platform) => {
-  if (moduleName === "phosphor-react-native") {
-    return { filePath: phosphorCommonJsEntry, type: "sourceFile" };
-  }
-
-  return context.resolveRequest(context, moduleName, platform);
-};
 config.resolver.unstable_enablePackageExports = true;
 
 module.exports = config;

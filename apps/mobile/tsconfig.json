@@ -5,5 +5,11 @@
     "jsx": "react-jsx",
     "types": ["jest", "react", "react-native"]
   },
-  "include": ["app", "src", "expo-env.d.ts"]
+  "include": [
+    "app",
+    "src",
+    "e2e",
+    "playwright.web-smoke.config.ts",
+    "expo-env.d.ts"
+  ]
 }

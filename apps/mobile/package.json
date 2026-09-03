@@ -12,9 +12,11 @@
     "export:web": "expo export --platform web",
     "preexport:ios": "pnpm run prepare:runtime",
     "export:ios": "expo export --platform ios",
-    "pretest:web:hydration": "pnpm run export:web",
-    "test:web:hydration": "playwright test --config playwright.web-smoke.config.ts",
-    "lint": "eslint app src",
+    "pretest:web:bundle": "pnpm run export:web",
+    "test:web:bundle": "node scripts/assert-web-bundle-size.mjs",
+    "pretest:web:hydration": "pnpm run test:web:bundle",
+    "test:web:hydration": "playwright test --config playwright.web-smoke.config.ts && node scripts/assert-web-smoke-clean.mjs",
+    "lint": "eslint app src e2e scripts playwright.web-smoke.config.ts",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "pretest": "pnpm run prepare:runtime",
     "test": "jest --runInBand",
@@ -69,7 +71,6 @@
     "moduleNameMapper": {
       "^@revelai/contracts$": "<rootDir>/../../packages/contracts/dist/index.js",
       "^@revelai/design-system$": "<rootDir>/../../packages/design-system/dist/index.js",
-      "^phosphor-react-native$": "<rootDir>/node_modules/phosphor-react-native/lib/commonjs/index.js",
       "^yaml$": "<rootDir>/node_modules/yaml/dist/index.js"
     }
   },
