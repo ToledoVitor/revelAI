@@ -401,7 +401,7 @@ Hosted run `33703583459` passed `pnpm check` and production-router, then failed 
 
 The runner smoke server now owns `4176` and the normal demo API retains `4174`. Browser-runner regressions prove both simultaneous port separation and post-run ownership by binding `4174` while the runner listens, then binding `4176` after `runPlaywrightRunner` exits. The startup diagnostic now reports `RevelAI local demo startup failed: address_in_use.` only for `EADDRINUSE`; other failures retain non-sensitive `runtime_initialization_failed`/`server_bind_failed` phase labels. The occupied-port API regression asserts exactly that safe output, with no path, environment value, or secret.
 
-The normal browser trace also corrected a harness-only ordering error: after clicking upload it now observes the real accessible progressbar before awaiting terminal report, instead of expecting pending while the verified upload may still be active. Its finite terminal budget is named: 30 s upload + C5's existing 30 s extraction cap + 30 s durable reconstruction/analysis + one 5 s capped pending poll + 25 s CI scheduling margin = 120 s. Playwright allows 150 s only for teardown/reporting room. This changes no runtime delay, retry, provider, or media fact.
+The normal browser trace also corrected a harness-only ordering error: after clicking upload it observes the real accessible progressbar, then the distinct pending owner (`Processando tentativa`) and its visible `Atualizar agora` action, before awaiting terminal report. Progress alone is not treated as pending evidence. Its finite terminal budget is named: 30 s upload + C5's existing 30 s extraction cap + 30 s durable reconstruction/analysis + one 5 s capped pending poll + 25 s CI scheduling margin = 120 s. Playwright allows 150 s only for teardown/reporting room. This changes no runtime delay, retry, provider, or media fact.
 
 ### RED/GREEN evidence and hosted gate
 
@@ -417,5 +417,30 @@ The normal browser trace also corrected a harness-only ordering error: after cli
 | Ubuntu diagnostic | With codec-provisioned Ubuntu, corrected normal startup and real upload reach V05 `main "Processando tentativa"` with truthful timeline/manual refresh. It does not terminalize within the local budget. `docker top` shows no FFmpeg child and API Node around 90% CPU under `/run/rosetta/rosetta … node --no-opt`; that is Apple amd64 emulation throughput, not native hosted Ubuntu behavior. |
 
 The Docker result is a startup/V05 diagnostic only, not terminal acceptance. Definitive terminal proof remains controller-pushed native Linux/x64 hosted codec CI. No hosted orphan is claimed and no check-fact smoke replaces normal media acceptance.
+
+final result: pending independent Sol acceptance.
+
+## CI fix round 6 — owned readiness and observed pending — 2026-09-02
+
+Review base: `be9e864`. Functional/test corrections: `e6aa4fc` (`fix(web): harden demo E2E readiness`) and `e858e51` (`test(web): require enabled pending refresh`). This round changes no W0–W6 visual surface, token, asset, pixel threshold, or capture artifact. It corrects the normal demo acceptance harness and its evidence only; no fresh visual artifact is claimed.
+
+### Reviewed P1 corrections
+
+- The Verified real-API browser trace now requires the ordered visible lifecycle: upload progressbar, then the pending main landmark named `Processando tentativa` and the enabled visible `Atualizar agora` control, then the terminal report within the unchanged named 120-second outcome budget. The local `--serve-check` Playwright command executes this exact browser spec; normal codec media still runs only in hosted acceptance.
+- `start-demo-e2e-server.mjs` no longer accepts a generic `GET /health` response as readiness. It pipes the exact post-listen marker from the API child it spawned, then probes only after that marker. Both marker and probe race the owned child exit and one abortable 60-second readiness budget; completion aborts the outstanding probe. This rejects both a foreign health-200 server and a foreign socket that accepts but never responds, rather than waiting for an unrelated fetch.
+- The wrapper forwards the owned API child's already-sanitized output, but its own setup/readiness catch now emits only `RevelAI demo E2E server failed to start.`. A real wrapper-process regression with a temporarily unavailable generated `dist/index.html` proves an absolute local path is absent from its terminal output.
+
+### RED/GREEN evidence
+
+| Phase | Exact command / observed result |
+| --- | --- |
+| RED | `rtk node --test apps/web/scripts/start-demo-e2e-server.test.mjs` before the correction — **0/3 passed**. A foreign health-200 owner was accepted until the 3 s harness watchdog; a foreign hanging owner left `fetch` stalled until that watchdog; a missing generated index printed an `ENOENT` stack containing the absolute Web path. |
+| GREEN | `rtk pnpm --filter @revelai/web run test:demo:e2e:smoke` — builds API/Web, then real-wrapper regressions **3/3 passed** (foreign health, hanging socket, absolute-path sanitization) and Playwright browser traces **2/2 passed**. The Verified trace visibly observes progress → pending heading/manual refresh → terminal without route interception. |
+| GREEN | `rtk pnpm --filter @revelai/api run demo:smoke` — terminal check and hermetic occupied-port regression passed. |
+| GREEN | `rtk node --test apps/web/scripts/demo-e2e-environment.test.mjs` — **1/1 passed**: only `REVELAI_DEMO_E2E` is withheld from strict API environment and normal values remain. |
+| GREEN | `rtk env npm_execpath=/Users/vitortoledo/.nvm/versions/node/v22.19.0/lib/node_modules/corepack/dist/pnpm.js pnpm --filter @revelai/web exec vitest run src/visual/playwright-runner.test.ts --reporter=dot` — **1 file, 6/6 passed**, including 4174/4176 separation and post-run ownership. |
+| GREEN | `rtk pnpm --filter @revelai/web run lint`; `rtk pnpm --filter @revelai/web run typecheck`; focused Prettier; and `rtk git diff --check` — all exit **0**. |
+
+The local codec-limited smoke is proof of the browser state ordering and owned startup boundary, not of native codec terminal throughput. The definitive normal C10 fixture terminal remains the controller-pushed Linux/x64 hosted gate. Independent Sol acceptance remains pending.
 
 final result: pending independent Sol acceptance.
