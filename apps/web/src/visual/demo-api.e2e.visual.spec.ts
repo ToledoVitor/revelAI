@@ -16,7 +16,7 @@ const verifiedExtractionBudgetMs = 30_000;
 const verifiedAnalysisBudgetMs = 30_000;
 const verifiedPendingPollBudgetMs = 5_000;
 const verifiedCiSchedulingMarginMs = 25_000;
-const verifiedResultTimeoutMs =
+const verifiedOutcomeBudgetMs =
   verifiedUploadBudgetMs +
   verifiedExtractionBudgetMs +
   verifiedAnalysisBudgetMs +
@@ -64,6 +64,15 @@ function requestByPath(
   );
   if (!request) throw new Error(`Missing ${method} ${path}.`);
   return request.request;
+}
+
+function remainingVerifiedOutcomeTime(deadline: number) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0)
+    throw new Error(
+      "Verified outcome budget expired before the next lifecycle state.",
+    );
+  return remaining;
 }
 
 async function completeVerifiedSetup(page: Page) {
@@ -156,20 +165,27 @@ test("production build drives the verified demo trace without a ranking claim", 
     page.getByRole("button", { name: "Enviar vídeo", exact: true }),
   ).toBeEnabled();
   await page.getByRole("button", { name: "Enviar vídeo", exact: true }).click();
+  const verifiedOutcomeDeadline = Date.now() + verifiedOutcomeBudgetMs;
   await expect(
     page.getByRole("progressbar", { name: "Envio do vídeo verificado" }),
-  ).toBeVisible();
+  ).toBeVisible({
+    timeout: remainingVerifiedOutcomeTime(verifiedOutcomeDeadline),
+  });
   const pending = page.getByRole("main", {
     name: "Processando tentativa",
   });
-  await expect(pending).toBeVisible({ timeout: verifiedResultTimeoutMs });
+  await expect(pending).toBeVisible({
+    timeout: remainingVerifiedOutcomeTime(verifiedOutcomeDeadline),
+  });
   await expect(
     pending.getByRole("button", { name: "Atualizar agora" }),
   ).toBeEnabled();
   const report = page.getByRole("main", {
     name: "Resultado do desafio verificado",
   });
-  await expect(report).toBeVisible({ timeout: verifiedResultTimeoutMs });
+  await expect(report).toBeVisible({
+    timeout: remainingVerifiedOutcomeTime(verifiedOutcomeDeadline),
+  });
   await expect(report.getByText("Demo — não vale para ranking")).toBeVisible();
   expect(await report.innerText()).not.toMatch(
     /posição|percentil|top percent|ranking no resultado/i,

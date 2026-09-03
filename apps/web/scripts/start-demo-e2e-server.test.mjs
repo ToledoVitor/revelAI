@@ -11,6 +11,15 @@ const apiPort = 4174;
 const webPort = 4175;
 const wrapperTimeoutMilliseconds = 3_000;
 const terminationGraceMilliseconds = 250;
+const ownedShutdownTimeoutMilliseconds = 2_000;
+const resistantChild = resolve(
+  webRoot,
+  "scripts/fixtures/demo-e2e-resistant-child.mjs",
+);
+const pretryFailureChild = resolve(
+  webRoot,
+  "scripts/fixtures/demo-e2e-pretry-failure-child.mjs",
+);
 
 test(
   "rejects a foreign health response instead of treating it as the spawned API",
@@ -62,6 +71,56 @@ test("sanitizes wrapper setup failures that contain a local absolute path", asyn
   }
 });
 
+test("does not forward a child failure before local-demo setup", async () => {
+  const secret = "w6-child-pretry-secret";
+  const result = await invokeWrapper({
+    environment: { DEMO_E2E_TEST_SECRET: secret, NODE_ENV: "test" },
+    testApiEntry: pretryFailureChild,
+  });
+
+  assert.equal(result.termination, "completed");
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.output, "RevelAI demo E2E server failed to start.\n");
+  assert.doesNotMatch(result.output, new RegExp(escapeRegExp(webRoot)));
+  assert.doesNotMatch(result.output, /ERR_MODULE_NOT_FOUND|\bat\s/);
+  assert.doesNotMatch(result.output, new RegExp(secret));
+});
+
+test("releases both demo ports after a successful wrapper run", async () => {
+  await assertPortAvailable(apiPort);
+  await assertPortAvailable(webPort);
+  const wrapper = launchWrapper();
+  try {
+    await waitForWrapperHealth(wrapper);
+    const exitCode = await stopWrapper(wrapper);
+
+    assert.equal(exitCode, 0);
+    await assertPortAvailable(apiPort);
+    await assertPortAvailable(webPort);
+  } finally {
+    await stopOwnedWrapperGroup(wrapper);
+  }
+});
+
+test("force-stops only its owned resistant child before returning demo ports", async () => {
+  await assertPortAvailable(apiPort);
+  await assertPortAvailable(webPort);
+  const wrapper = launchWrapper({
+    environment: { NODE_ENV: "test" },
+    testApiEntry: resistantChild,
+  });
+  try {
+    await waitForWrapperHealth(wrapper);
+    const exitCode = await stopWrapper(wrapper);
+
+    assert.equal(exitCode, 0);
+    await assertPortAvailable(apiPort);
+    await assertPortAvailable(webPort);
+  } finally {
+    await stopOwnedWrapperGroup(wrapper);
+  }
+});
+
 async function withApiPortBlocker(kind, callback) {
   const blocker = createServer((_request, response) => {
     if (kind === "health") {
@@ -77,17 +136,9 @@ async function withApiPortBlocker(kind, callback) {
   }
 }
 
-function invokeWrapper() {
+function invokeWrapper(options = {}) {
   return new Promise((resolveResult, rejectResult) => {
-    const child = spawn(
-      process.execPath,
-      ["scripts/start-demo-e2e-server.mjs", "--serve-check"],
-      {
-        cwd: webRoot,
-        env: { ...process.env, REVELAI_DEMO_E2E: "true" },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+    const child = launchWrapper(options);
     let output = "";
     let termination = "completed";
     let forceKill;
@@ -118,6 +169,77 @@ function invokeWrapper() {
       });
     });
   });
+}
+
+function launchWrapper({ environment = {}, testApiEntry } = {}) {
+  const args = ["scripts/start-demo-e2e-server.mjs", "--serve-check"];
+  if (testApiEntry) args.push(`--test-api-entry=${testApiEntry}`);
+  const child = spawn(process.execPath, args, {
+    cwd: webRoot,
+    detached: true,
+    env: {
+      ...process.env,
+      REVELAI_DEMO_E2E: "true",
+      ...environment,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout.resume();
+  child.stderr.resume();
+  return child;
+}
+
+async function waitForWrapperHealth(child) {
+  const deadline = Date.now() + wrapperTimeoutMilliseconds;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null)
+      throw new Error(
+        "Demo wrapper exited before its web server became ready.",
+      );
+    try {
+      const response = await fetch("http://127.0.0.1:4175/health", {
+        signal: AbortSignal.timeout(100),
+      });
+      if (response.ok) return;
+    } catch {
+      // The owned wrapper has not bound the Web port yet.
+    }
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 25));
+  }
+  throw new Error("Demo wrapper did not become ready within its test budget.");
+}
+
+async function stopWrapper(child) {
+  if (child.exitCode !== null) return child.exitCode;
+  child.kill("SIGTERM");
+  const exitCode = await waitForClose(child, ownedShutdownTimeoutMilliseconds);
+  if (exitCode === undefined)
+    throw new Error("Owned demo wrapper did not close after shutdown.");
+  return exitCode;
+}
+
+function waitForClose(child, timeoutMilliseconds) {
+  return new Promise((resolveClose) => {
+    const close = (exitCode) => {
+      clearTimeout(timeout);
+      resolveClose(exitCode ?? 1);
+    };
+    const timeout = setTimeout(() => {
+      child.off("close", close);
+      resolveClose(undefined);
+    }, timeoutMilliseconds);
+    child.once("close", close);
+  });
+}
+
+async function stopOwnedWrapperGroup(wrapper) {
+  if (!wrapper.pid) return;
+  try {
+    process.kill(-wrapper.pid, "SIGKILL");
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+  await waitForClose(wrapper, terminationGraceMilliseconds);
 }
 
 function listen(server, port) {

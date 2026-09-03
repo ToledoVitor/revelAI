@@ -18,11 +18,13 @@ const repositoryRoot = resolve(webRoot, "../..");
 const apiRoot = resolve(repositoryRoot, "apps/api");
 const staticRoot = resolve(webRoot, "dist");
 const mediaDirectory = resolve(webRoot, "coverage/demo-media");
+const testFixtureRoot = resolve(webRoot, "scripts/fixtures");
 const apiPort = 4174;
 const webPort = 4175;
 const apiOrigin = `http://127.0.0.1:${apiPort}`;
 const serveCheck = process.argv.includes("--serve-check");
 const apiReadyTimeoutMilliseconds = 60_000;
+const childTerminationGraceMilliseconds = 1_000;
 const apiReadyMessages = new Set([
   "RevelAI local demo is listening on its configured local host.",
   "RevelAI local demo check API is listening on its configured local host.",
@@ -34,6 +36,7 @@ const c10CheckMedia = Buffer.from([
 ]);
 let apiProcess;
 let apiReadiness;
+let apiProcessClosed = false;
 let server;
 let scratch;
 let stopping = false;
@@ -64,9 +67,9 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 }
 
 function startDemoApi(root) {
-  return spawn(
+  const child = spawn(
     process.execPath,
-    ["scripts/start-local-demo.mjs", ...(serveCheck ? ["--serve-check"] : [])],
+    [demoApiEntry(), ...(serveCheck ? ["--serve-check"] : [])],
     {
       cwd: apiRoot,
       env: createDemoApiEnvironment({
@@ -78,6 +81,23 @@ function startDemoApi(root) {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  child.once("close", () => {
+    apiProcessClosed = true;
+  });
+  return child;
+}
+
+function demoApiEntry() {
+  const argument = process.argv.find((value) =>
+    value.startsWith("--test-api-entry="),
+  );
+  if (!argument) return "scripts/start-local-demo.mjs";
+  if (process.env.NODE_ENV !== "test")
+    throw new Error("Test API entry is unavailable outside test mode.");
+  const entry = resolve(argument.slice("--test-api-entry=".length));
+  if (!entry.startsWith(`${testFixtureRoot}${sep}`))
+    throw new Error("Test API entry must be an owned fixture.");
+  return entry;
 }
 
 async function createMediaFixtures() {
@@ -138,13 +158,12 @@ function observeApiReadiness(child) {
         ),
       );
     const receiveStdout = (chunk) => {
-      process.stdout.write(chunk);
       const lines = `${remaining}${chunk.toString("utf8")}`.split(/\r?\n/);
       remaining = lines.pop() ?? "";
       if (lines.some((line) => apiReadyMessages.has(line)))
         settle(resolveReady);
     };
-    const receiveStderr = (chunk) => process.stderr.write(chunk);
+    const receiveStderr = () => undefined;
 
     child.stdout.on("data", receiveStdout);
     child.stderr.on("data", receiveStderr);
@@ -273,9 +292,23 @@ async function stop() {
 }
 
 async function stopProcess(child) {
-  if (!child || child.exitCode !== null) return;
+  if (!child || apiProcessClosed) return;
   await new Promise((resolveChild) => {
-    child.once("exit", resolveChild);
-    child.kill("SIGTERM");
+    let forceKill;
+    const closeChild = () => {
+      if (forceKill) clearTimeout(forceKill);
+      child.off("error", ignoreChildError);
+      resolveChild();
+    };
+    const ignoreChildError = () => undefined;
+    child.once("close", closeChild);
+    child.once("error", ignoreChildError);
+    if (child.exitCode === null) {
+      child.kill("SIGTERM");
+      forceKill = setTimeout(() => {
+        if (child.exitCode === null) child.kill("SIGKILL");
+      }, childTerminationGraceMilliseconds);
+      forceKill.unref();
+    }
   });
 }

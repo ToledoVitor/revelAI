@@ -8,8 +8,8 @@ export default defineConfig({
   outputDir: "./coverage/playwright-demo",
   testDir: "./src/visual",
   testMatch: "demo-api.e2e.visual.spec.ts",
-  // The verified C10 trace has its own finite 120-second terminal budget;
-  // leave teardown/reporting room without modifying the production runtime.
+  // The verified C10 trace owns one finite 120-second post-upload budget;
+  // this outer timeout is only teardown/reporting backstop room.
   timeout: 150_000,
   use: {
     baseURL: "http://127.0.0.1:4175",
